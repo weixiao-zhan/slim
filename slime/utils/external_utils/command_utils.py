@@ -107,6 +107,9 @@ def execute_train(
     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
+    train_backend_fsdp = "--train-backend fsdp" in train_args
+    assert train_backend_fsdp == (megatron_model_type is None)
+
     exec_command(
         "pkill -9 sglang; "
         "sleep 3; "
@@ -138,7 +141,14 @@ def execute_train(
         {
             "env_vars": {
                 "PYTHONPATH": "/root/Megatron-LM/",
-                "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                # If setting this in FSDP, the computation communication overlapping may have issues
+                **(
+                    {}
+                    if train_backend_fsdp
+                    else {
+                        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+                    }
+                ),
                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
                 "no_proxy": f"127.0.0.1,{master_addr}",
                 # This is needed by megatron / torch distributed in multi-node setup

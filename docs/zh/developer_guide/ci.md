@@ -20,8 +20,9 @@ slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——�
 | Label | Job | 说明 |
 |---|---|---|
 | `run-ci-short` | `e2e-test-short` | Qwen2.5-0.5B 轻量级冒烟测试（4 GPU），用于快速反馈。 |
+| `run-ci-fsdp` | `e2e-test-fsdp` | FSDP 后端测试（true on-policy、VL、megatron-fsdp 对齐）。 |
 | `run-ci-megatron` | `e2e-test-megatron` | 核心 Megatron 训练测试，覆盖 Dense、MoE、PPO、MTP、OPD 等。 |
-| `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查）。 |
+| `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查、megatron-fsdp 对齐）。 |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint 保存/加载正确性（同步和异步保存）。 |
 | `run-ci-image` | `e2e-test-image` | 在 `slimerl/slime-test:latest` 镜像上运行**全部**测试（用于镜像验证）。 |
 | `run-ci-changed` | `e2e-test-changed` | **动态**检测 PR 中新增或修改的测试文件，仅运行这些测试。 |

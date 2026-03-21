@@ -1,6 +1,6 @@
-# VLM Single-Turn RL
+# VLM Single-Turn RL (FSDP & Megatron)
 
-Training VLMs with Megatron on single-turn reasoning task using GRPO on the [GEO3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). We used processed version [here](https://huggingface.co/datasets/chenhegu/geo3k_imgurl).
+Training VLMs with FSDP or Megatron on single-turn reasoning task using GRPO on the [GEO3K dataset](https://huggingface.co/datasets/hiyouga/geometry3k). We used processed version [here](https://huggingface.co/datasets/chenhegu/geo3k_imgurl).
 
 Supported models:
 * Qwen2.5-VL
@@ -20,7 +20,7 @@ provider.freeze_vision_model = False
 ```
 
 <p align="center">
-  <img src="fsdp_vs_megatron.png" alt="Reward Plot" width="800">
+  <img src="fsdp_vs_megatron.png" alt="FSDP vs Megatron Reward Plot" width="800">
 </p>
 
 ## Data Preparation (For SFT Training)
@@ -63,6 +63,9 @@ export WANDB_API_KEY=your_wandb_api_key
 # Megatron backend (default -> Qwen3-VL-8B-Instruct + Megatron)
 ./examples/geo3k_vlm/run_geo3k_vlm.sh
 
+# FSDP backend
+SLIME_SCRIPT_TRAIN_BACKEND=fsdp ./examples/geo3k_vlm/run_geo3k_vlm.sh
+
 # With different model
 SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.sh
 
@@ -74,6 +77,7 @@ SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-4B-Instruct ./examples/geo3k_vlm/run_geo3k_vlm.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
+| `SLIME_SCRIPT_TRAIN_BACKEND` | `megatron` | Training backend (`megatron` or `fsdp`) |
 | `SLIME_SCRIPT_MODEL_NAME` | `Qwen3-VL-8B-Instruct` | Model name |
 | `SLIME_SCRIPT_DATASET_NAME` | `chenhegu/geo3k_imgurl` | HuggingFace dataset name |
 | `SLIME_SCRIPT_NUM_GPUS` | `8` | Number of GPUs |
