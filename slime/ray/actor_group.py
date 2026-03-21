@@ -59,33 +59,13 @@ class RayTrainGroup:
             **self.args.train_env_vars,
         }
 
-        if self.args.offload_train and self.args.train_backend == "megatron":
-            import torch_memory_saver
-
-            dynlib_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                "torch_memory_saver_hook_mode_preload.abi3.so",
-            )
-            assert os.path.exists(dynlib_path), f"LD_PRELOAD so file {dynlib_path} does not exist."
-
-            env_vars["LD_PRELOAD"] = dynlib_path
-            env_vars["TMS_INIT_ENABLE"] = "1"
-            env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
-
         # We cannot do routing replay for critic.
         if self.args.use_routing_replay and self.role == "actor":
             env_vars["ENABLE_ROUTING_REPLAY"] = "1"
 
-        backend = self.args.train_backend
-        if backend == "megatron":
-            from slime.backends.megatron_utils.actor import MegatronTrainRayActor
+        from slime.backends.fsdp_utils import FSDPTrainRayActor
 
-            actor_impl = MegatronTrainRayActor
-
-        else:
-            from slime.backends.fsdp_utils import FSDPTrainRayActor
-
-            actor_impl = FSDPTrainRayActor
+        actor_impl = FSDPTrainRayActor
 
         TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
 

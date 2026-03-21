@@ -48,8 +48,8 @@ class FSDPTrainRayActor(TrainRayActor):
     def init(self, args: Namespace, role: str, with_ref: bool = False, with_opd_teacher: bool = False) -> int:  # type: ignore[override]
         if with_opd_teacher:
             raise NotImplementedError(
-                "On-policy distillation (OPD) with Megatron teacher is not supported in FSDP backend. "
-                "Please use the Megatron backend for OPD, or use --opd-type=sglang with an external teacher server."
+                "On-policy distillation (OPD) with a local teacher model is not supported. "
+                "Please use --opd-type=sglang with an external teacher server."
             )
         super().init(args, role, with_ref, with_opd_teacher)
 

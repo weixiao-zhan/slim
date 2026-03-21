@@ -152,7 +152,7 @@ def create_training_models(args, pgs, rollout_manager):
             args,
             role="actor",
             with_ref=args.kl_coef != 0 or args.use_kl_loss,
-            with_opd_teacher=args.use_opd and args.opd_type == "megatron",
+            with_opd_teacher=False,
         )
     )
 

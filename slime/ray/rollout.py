@@ -53,7 +53,7 @@ class ServerGroup:
     rank_offset: int = 0  # cumulative engine count before this group
     gpu_offset: int = 0  # cumulative GPU count before this group
     sglang_overrides: dict = dataclasses.field(default_factory=dict)
-    needs_offload: bool = False  # True when this group's GPUs overlap with megatron
+    needs_offload: bool = False  # True when this group's GPUs overlap with training
     model_path: str | None = None  # checkpoint path for update_weights_from_disk
     router_ip: str | None = None
     router_port: int | None = None
@@ -177,7 +177,7 @@ class ServerGroup:
         """Fire release_memory_occupation on all engines (non-blocking).
 
         Returns a list of Ray ObjectRefs.  Skipped for groups that do not
-        overlap with megatron GPUs (``needs_offload=False``).
+        overlap with training GPUs (``needs_offload=False``).
         """
         if not self.needs_offload:
             return []
@@ -187,7 +187,7 @@ class ServerGroup:
         """Fire resume_memory_occupation on all engines (non-blocking).
 
         Returns a list of Ray ObjectRefs.  Skipped for groups that do not
-        overlap with megatron GPUs (``needs_offload=False``).
+        overlap with training GPUs (``needs_offload=False``).
         """
         if not self.needs_offload:
             return []
@@ -956,8 +956,8 @@ def _compute_rollout_offset(args) -> int:
     return offset
 
 
-def _compute_megatron_num_gpus(args) -> int:
-    """Total number of megatron (actor + critic) GPU slots in the placement group."""
+def _compute_train_num_gpus(args) -> int:
+    """Total number of training (actor + critic) GPU slots in the placement group."""
     if args.debug_rollout_only:
         return 0
     if args.critic_train_only:
@@ -987,9 +987,9 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     gpu_offset = 0
     engine_offset = 0
 
-    # Compute megatron GPU range for per-group offload decisions.
+    # Compute training GPU range for per-group offload decisions.
     rollout_pg_offset = _compute_rollout_offset(args)
-    megatron_num_gpus = _compute_megatron_num_gpus(args)
+    train_num_gpus = _compute_train_num_gpus(args)
 
     for model_idx, model_cfg in enumerate(config.models):
         model_cfg.resolve(args)
@@ -1014,7 +1014,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
             num_engines = group_cfg.num_gpus // num_gpu_per_engine_local
 
             group_abs_start = rollout_pg_offset + gpu_offset
-            needs_offload = args.offload_rollout and group_abs_start < megatron_num_gpus
+            needs_offload = args.offload_rollout and group_abs_start < train_num_gpus
             overrides = dict(group_cfg.overrides)
             if overrides_extra:
                 for k, v in overrides_extra.items():

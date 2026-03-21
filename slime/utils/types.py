@@ -186,7 +186,7 @@ class ParamInfo:
 
 # A dict-based batch produced along the rollout -> training path
 # In Megatron backend, several fields are converted to torch.Tensor lists on GPU
-# before being consumed by data iterators (see megatron_utils.actor._get_rollout_data).
+# before being consumed by data iterators (see fsdp_utils.actor).
 RolloutBatch = dict[str, list[torch.Tensor] | list[int] | list[float] | list[str]]
 
 

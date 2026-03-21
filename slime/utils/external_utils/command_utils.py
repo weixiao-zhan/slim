@@ -18,52 +18,6 @@ _ = exec_command, dataclass_cli
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
 
 
-def convert_checkpoint(
-    model_name,
-    megatron_model_type,
-    num_gpus_per_node: int,
-    multinode: bool = False,
-    extra_args: str = "",
-    dir_dst: str = "/root",
-    hf_checkpoint: str | None = None,
-):
-    hf_checkpoint = hf_checkpoint or f"/root/models/{model_name}"
-    normalized_extra_args = f" {extra_args.strip()}" if extra_args.strip() else ""
-
-    # TODO shall we make it in host-mapped folder and thus can cache it to speedup CI
-    path_dst = f"{dir_dst}/{model_name}_torch_dist"
-    if Path(path_dst).exists():
-        print(f"convert_checkpoint skip {path_dst} since exists")
-        return
-
-    multinode_args = ""
-    if multinode:
-        # This variable can be provided via:
-        # `export SLURM_JOB_HOSTNAMES=$(scontrol show hostnames "$SLURM_JOB_NODELIST")`
-        print(f"{os.environ.get('SLURM_JOB_HOSTNAMES')=} {os.environ.get('SLURM_NODEID')=}")
-        job_hostnames = os.environ["SLURM_JOB_HOSTNAMES"].strip().split("\n")
-        master_addr = job_hostnames[0]
-        nnodes = len(job_hostnames)
-        node_rank = int(os.environ["SLURM_NODEID"])
-
-        multinode_args = (
-            f"--master-addr {master_addr} " "--master-port 23456 " f"--nnodes={nnodes} " f"--node-rank {node_rank} "
-        )
-
-    exec_command(
-        f"source {repo_base_dir}/scripts/models/{megatron_model_type}.sh && "
-        f"PYTHONPATH=/root/Megatron-LM "
-        f"torchrun "
-        f"--nproc-per-node {num_gpus_per_node} "
-        f"{multinode_args}"
-        f"tools/convert_hf_to_torch_dist.py "
-        "${MODEL_ARGS[@]} "
-        f"--hf-checkpoint {hf_checkpoint} "
-        f"--save {path_dst}"
-        f"{normalized_extra_args}"
-    )
-
-
 def rsync_simple(path_src: str, path_dst: str):
     exec_command(f"mkdir -p {path_dst} && rsync -a --info=progress2 {path_src}/ {path_dst}")
 
@@ -71,16 +25,6 @@ def rsync_simple(path_src: str, path_dst: str):
 def hf_download_dataset(full_name: str):
     _, partial_name = full_name.split("/")
     exec_command(f"hf download --repo-type dataset {full_name} --local-dir /root/datasets/{partial_name}")
-
-
-def fp8_cast_bf16(path_src, path_dst):
-    if Path(path_dst).exists():
-        print(f"fp8_cast_bf16 skip {path_dst} since exists")
-        return
-
-    exec_command(
-        "python tools/fp8_cast_bf16.py " f"--input-fp8-hf-path {path_src} " f"--output-bf16-hf-path {path_dst} "
-    )
 
 
 # This class can be extended by concrete scripts
@@ -94,7 +38,6 @@ class ExecuteTrainConfig:
 def execute_train(
     train_args: str,
     num_gpus_per_node: int,
-    megatron_model_type: str | None,
     train_script: str = "train.py",
     before_ray_job_submit=None,
     extra_env_vars=None,
@@ -107,21 +50,14 @@ def execute_train(
     external_ray = get_bool_env_var("SLIME_SCRIPT_EXTERNAL_RAY")
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
 
-    train_backend_fsdp = "--train-backend fsdp" in train_args
-    assert train_backend_fsdp == (megatron_model_type is None)
-
     exec_command(
         "pkill -9 sglang; "
         "sleep 3; "
         f"{'' if external_ray else 'ray stop --force; '}"
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        # cannot be run in CI, o/w kill the parent script
-        # TODO: do we really need this kill? (or can we instead kill slime)
-        # "pkill -9 python; "
         "pkill -9 slime; "
         "sleep 3; "
         f"{'' if external_ray else 'pkill -9 ray; '}"
-        # "pkill -9 python; "
         "pkill -9 slime; "
         "pkill -9 redis; "
         "true; "
@@ -129,7 +65,6 @@ def execute_train(
 
     if not external_ray:
         exec_command(
-            # will prevent ray from buffering stdout/stderr
             f"export PYTHONBUFFERED=16 && "
             f"ray start --head --node-ip-address {master_addr} --num-gpus {num_gpus_per_node} --disable-usage-stats"
         )
@@ -140,18 +75,8 @@ def execute_train(
     runtime_env_json = json.dumps(
         {
             "env_vars": {
-                "PYTHONPATH": "/root/Megatron-LM/",
-                # If setting this in FSDP, the computation communication overlapping may have issues
-                **(
-                    {}
-                    if train_backend_fsdp
-                    else {
-                        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-                    }
-                ),
                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
                 "no_proxy": f"127.0.0.1,{master_addr}",
-                # This is needed by megatron / torch distributed in multi-node setup
                 "MASTER_ADDR": master_addr,
                 **(
                     {
@@ -170,18 +95,11 @@ def execute_train(
     )
 
     if get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
-        cmd_megatron_model_source = (
-            f'source "{repo_base_dir}/scripts/models/{megatron_model_type}.sh" && '
-            if megatron_model_type is not None
-            else ""
-        )
         exec_command(
             f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
-            f"{cmd_megatron_model_source}"
             f'ray job submit --address="http://127.0.0.1:8265" '
             f"--runtime-env-json='{runtime_env_json}' "
             f"-- python3 {train_script} "
-            f"{'${MODEL_ARGS[@]}' if megatron_model_type is not None else ''} "
             f"{train_args}"
         )
 

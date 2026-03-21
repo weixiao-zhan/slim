@@ -370,7 +370,7 @@ class SGLangEngine(RayActor):
     def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
         """Reload weights from *model_path* without restarting the engine.
 
-        Used for non-updatable (frozen) models that overlap with megatron:
+        Used for non-updatable (frozen) models that overlap with training:
         after offload, weights are restored from disk instead of CPU cache.
         """
         payload = {"model_path": model_path}

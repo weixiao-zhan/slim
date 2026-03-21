@@ -17,10 +17,7 @@ logger = logging.getLogger(__name__)
 
 def reset_arg(parser, name, **kwargs):
     """
-    Reset the default value of a Megatron argument.
-    :param parser: The argument parser.
-    :param name: The name of the argument to reset.
-    :param default: The new default value.
+    Reset the default value of an argument or add it if missing.
     """
     for action in parser._actions:
         if name in action.option_strings:
@@ -109,14 +106,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_train_arguments(parser):
-            # --train-backend is parsed early in _pre_parse_mode() and merged later.
-            parser.add_argument(
-                "--qkv-format",
-                type=str,
-                choices=["thd", "bshd"],
-                default="thd",
-                help="The qkv layout for Megatron backend.",
-            )
             parser.add_argument(
                 "--train-env-vars",
                 type=json.loads,
@@ -136,29 +125,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help="Whether to disable weights backuper to save host memory.",
             )
             parser.add_argument(
-                "--megatron-to-hf-mode",
-                choices=["raw", "bridge"],
-                default="raw",
-                help="The method to convert megatron weights to hugging face weights for SGLang.",
-            )
-            parser.add_argument(
-                "--custom-model-provider-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to a custom model provider function. "
-                    "If set, we will use this function instead of the default model provider. "
-                    "The function should have the signature "
-                    "`def custom_model_provider(pre_process: bool, post_process: bool, vp_stage: int | None = None) -> GPTModel`. "
-                    "Example: 'my_module.my_model_provider'."
-                ),
-            )
-            parser.add_argument(
-                "--recompute-loss-function",
-                action="store_true",
-                help="Whether to disable recompute loss function to save memory during training.",
-            )
-            parser.add_argument(
                 "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
             )
             parser.add_argument(
@@ -166,21 +132,10 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 nargs="*",
                 default=None,
-                help="""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN. 
+                help="""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN.
                         Supports Python regex syntax (re.search).
-
-                        Examples:
-                        1. Train ONLY MoE experts:
-                            --only-train-params-name-list experts
-
-                        2. Train ONLY Indexer parameters:
-                            --only-train-params-name-list self_attention.wq_b self_attention.wk self_attention.k_norm self_attention.weights_proj
-
-                        3. Train ONLY Layer 20 to 23:
-                            --only-train-params-name-list layers\.2[0-3]\.
                         """,
             )
-
             parser.add_argument(
                 "--freeze-params-name-list",
                 type=str,
@@ -188,22 +143,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
                         Supports Python regex syntax (re.search).
-
-                        Examples:
-                        1. Freeze Embeddings and Output Layer (common for fine-tuning):
-                            --freeze-params-name-list embedding output_layer
-
-                        2. Freeze Indexer parameters:
-                            --freeze-params-name-list self_attention.wq_b self_attention.wk self_attention.k_norm self_attention.weights_proj
-
-                        3. Freeze specific projection layers (e.g., all Gate/Up projections):
-                            --freeze-params-name-list linear_fc1
                         """,
-            )
-            parser.add_argument(
-                "--allgather-cp",
-                action="store_true",
-                default=False,
             )
 
             return parser
@@ -217,7 +157,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "The huggingface checkpoint of the trained model. "
                     "This is used to initialize sglang and also provide the tokenizer. "
-                    "Note that, we will always update the parameters in sglang with that of megatron before training, "
+                    "Note that, we will always update the parameters in sglang with that of the training backend, "
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
                 ),
@@ -227,7 +167,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help=(
-                    "The name of the model, this is used to convert the megatron weights into huggingface format. "
+                    "The name of the model. "
                     "If not set, we will use `type(AutoConfig.from_pretrained(args.hf_checkpoint)).__name__.lower()` as model_name. "
                     "Also, sometimes this will help alleviate the bug that transformers cannot find certain model."
                 ),
@@ -741,7 +681,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help=(
-                    "Path to save the model in HuggingFace format when using Megatron backend. "
+                    "Path to save the model in HuggingFace format. "
                     "The model will be saved to `save_hf.format(rollout_id)`. "
                 ),
             )
@@ -972,12 +912,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--opd-type",
                 type=str,
-                choices=["sglang", "megatron"],
+                choices=["sglang"],
                 default=None,
                 help=(
                     "Type of on-policy distillation. "
-                    "'sglang': Teacher log-probs are obtained from external SGLang server during rollout. "
-                    "'megatron': Teacher model is loaded via --opd-teacher-load and forwarded during training."
+                    "'sglang': Teacher log-probs are obtained from external SGLang server during rollout."
                 ),
             )
             parser.add_argument(
@@ -990,10 +929,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--opd-teacher-load",
                 type=str,
                 default=None,
-                help=(
-                    "The checkpoint for OPD teacher model. Required when --opd-type=megatron. "
-                    "The teacher model should have the same architecture as policy/ref model."
-                ),
+                help="The checkpoint for OPD teacher model.",
             )
             parser.add_argument(
                 "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
@@ -1320,29 +1256,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        def add_custom_megatron_plugins_arguments(parser):
-            """
-            Add custom Megatron plugins arguments.
-            This is a placeholder for any additional arguments that might be needed.
-            """
-            # Custom arguments can be added here
-            parser.add_argument(
-                "--custom-megatron-init-path",
-                type=str,
-                default=None,
-            )
-            parser.add_argument(
-                "--custom-megatron-before-log-prob-hook-path",
-                type=str,
-                default=None,
-            )
-            parser.add_argument(
-                "--custom-megatron-before-train-step-hook-path",
-                type=str,
-                default=None,
-            )
-            return parser
-
         def add_mtp_training_arguments(parser):
             """Add MTP training specific arguments."""
             reset_arg(parser, "--mtp-num-layers", type=int, default=None)
@@ -1398,7 +1311,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         parser = add_rollout_buffer_arguments(parser)
         parser = add_mtp_training_arguments(parser)
         parser = add_ci_arguments(parser)
-        parser = add_custom_megatron_plugins_arguments(parser)
         reset_arg(
             parser,
             "--custom-config-path",
@@ -1421,7 +1333,6 @@ def _pre_parse_mode():
     the final ``args`` after Phase 2 parsing.
     """
     temp_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    temp_parser.add_argument("--train-backend", type=str, choices=["megatron", "fsdp"], default="megatron")
     temp_parser.add_argument("--debug-rollout-only", action="store_true", default=False)
     temp_parser.add_argument("--debug-train-only", action="store_true", default=False)
     temp_parser.add_argument("--load-debug-rollout-data", type=str, default=None)
@@ -1444,25 +1355,13 @@ def parse_args(add_custom_arguments=None):
     if not skip_sglang:
         sglang_ns = sglang_parse_args()
 
-    # Phase 2: Parse megatron/fsdp + slime args.
-    # Uses ignore_unknown_args=True so that --sglang-* and pre-parsed CLI flags
-    # are silently ignored by the megatron/fsdp parser.
-    if pre.train_backend == "megatron":
-        from slime.backends.megatron_utils.arguments import megatron_parse_args
-        from slime.backends.megatron_utils.arguments import validate_args as megatron_validate_args
+    # Phase 2: Parse FSDP + slime args.
+    from slime.backends.fsdp_utils.arguments import fsdp_parse_args
 
-        args = megatron_parse_args(
-            extra_args_provider=add_slime_arguments,
-            skip_hf_validate=pre.debug_rollout_only,
-        )
-    else:
-        logger.warning(
-            "🚧 🚧 🚧 FSDP backend is being rewritten, please use Megatron backend for better stability. 🚧 🚧 🚧"
-        )
+    args = fsdp_parse_args(extra_args_provider=add_slime_arguments, ignore_unknown_args=True)
 
-        from slime.backends.fsdp_utils.arguments import fsdp_parse_args
-
-        args = fsdp_parse_args(extra_args_provider=add_slime_arguments, ignore_unknown_args=True)
+    # Set train_backend for any code that checks it
+    args.train_backend = "fsdp"
 
     # Merge pre-parsed args into the main namespace
     for key, value in vars(pre).items():
@@ -1474,9 +1373,6 @@ def parse_args(add_custom_arguments=None):
             setattr(args, key, value)
 
     slime_validate_args(args)
-
-    if pre.train_backend == "megatron" and not args.debug_rollout_only:
-        megatron_validate_args(args)
 
     if not args.debug_train_only:
         sglang_validate_args(args)
@@ -1534,34 +1430,12 @@ def slime_validate_args(args):
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
 
-        if not os.path.exists(os.path.join(args.ref_load, "latest_checkpointed_iteration.txt")):
-            logger.info(
-                f"ref_load {args.ref_load} does not have latest_checkpointed_iteration.txt, "
-                "please make sure it is a valid megatron checkpoint directory."
-            )
-
     # Validate on-policy distillation (OPD) arguments
     if args.use_opd:
         if args.opd_type is None:
-            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang' or 'megatron'.")
+            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang'.")
 
-        if args.opd_type == "megatron":
-            if args.opd_teacher_load is None:
-                raise ValueError(
-                    "--opd-teacher-load is required when --opd-type=megatron. "
-                    "Please provide the path to the teacher model checkpoint."
-                )
-            if not os.path.exists(args.opd_teacher_load):
-                raise FileNotFoundError(
-                    f"opd_teacher_load {args.opd_teacher_load} does not exist, please check the path."
-                )
-            if not os.path.exists(os.path.join(args.opd_teacher_load, "latest_checkpointed_iteration.txt")):
-                logger.info(
-                    f"opd_teacher_load {args.opd_teacher_load} does not have latest_checkpointed_iteration.txt, "
-                    "please make sure it is a valid megatron checkpoint directory."
-                )
-
-        elif args.opd_type == "sglang":
+        if args.opd_type == "sglang":
             if args.opd_teacher_load is not None:
                 raise ValueError(
                     "--opd-teacher-load should not be set when --opd-type=sglang. "
@@ -1571,33 +1445,6 @@ def slime_validate_args(args):
         # If OPD is not enabled, opd_teacher_load should not be set
         if args.opd_teacher_load is not None:
             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
-
-    if args.megatron_to_hf_mode == "bridge":
-        if (
-            args.load is not None
-            and os.path.exists(args.load)
-            and os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            # If is a Megatron checkpoint, won't use bridge to load hf weight.
-            pass
-        else:
-            if args.load is None:
-                args.load = args.ref_load or args.hf_checkpoint
-            # If is a HF checkpoint, set start_rollout_id to 0 here.
-            args.start_rollout_id = 0
-    else:
-        if (
-            args.load is None
-            or not os.path.exists(args.load)
-            or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
-        ):
-            args.no_load_optim = True
-            args.no_load_rng = True
-            args.finetune = True
-            args.load = args.ref_load
-            if args.ref_ckpt_step is not None:
-                args.ckpt_step = args.ref_ckpt_step
-            args.start_rollout_id = 0
 
     if args.eval_interval is not None:
         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
@@ -1775,12 +1622,6 @@ def slime_validate_args(args):
         assert (
             args.rollout_max_prompt_len <= args.rollout_max_context_len - 1
         ), f"args.rollout_max_prompt_len ({args.rollout_max_prompt_len}) must be smaller than args.rollout_max_context_len ({args.rollout_max_context_len}) so that there is at least one generated token to compute loss."
-
-    if args.qkv_format == "bshd":
-        assert args.train_backend == "megatron", "bshd format is only supported for megatron backend."
-        assert (
-            args.use_dynamic_batch_size is False
-        ), "Dynamic batch size is not supported for bshd format. Please specify --micro-batch-size instead."
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
