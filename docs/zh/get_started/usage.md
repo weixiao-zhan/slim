@@ -5,7 +5,7 @@
 在使用 slime 时，传参主要是为了如下几件事：
 
 1. 把集群中一部分 GPU 分配做训练，一部分分配做推理；
-2. 训练的部分加载 megatron；
+2. 配置 FSDP 训练后端；
 3. 推理部分加载 sglang；
 4. 配置 RL 训练需要的超参。
 
@@ -33,112 +33,36 @@
 
 此外，slime 支持 Prefill 和 Decode 的分离部署 (PD Disaggregation)，可以通过设置 `--prefill-num-servers` 参数来指定用于 Prefill 的服务器数量。
 
-### 选择训练后端
+### 训练后端
 
-slime 支持多种训练后端，可以通过 `--train-backend` 参数进行选择：
+slime 使用 PyTorch FSDP2 作为训练后端。FSDP 通过 `AutoModelForCausalLM.from_pretrained()` 直接加载 HuggingFace 格式的权重，无需进行 checkpoint 格式转换。
 
-- `megatron`（默认）：使用 Megatron-LM 作为训练后端，支持大规模模型的高效训练；
-- `fsdp`（实验性）：使用 PyTorch FSDP 作为训练后端，可以直接加载 HuggingFace 格式权重，无需转换。
+#### 模型配置
 
-### 加载 megatron
-
-megatron 与 sglang, vllm 或者 huggingface trainer 之类的工具不同，他不能直接读取 huggingface ckpt，而是需要用户配置好要训练的模型的参数，并且加载 megatron 自己的 ckpt。
-
-一般来说，我们需要做 3 点准备：
-
-- 配置模型参数
-- 配置并行以及一些优化
-- 配置需要加载的 ckpt
-
-对于一些 megatron 的自定义以及 slime 引入 megatron 的原理，请见 megatron 使用方法一节。
-
-#### 配置模型参数
-
-这里以 qwen3 4B 为例，我们需要这些参数：
-
-```bash
-MODEL_ARGS=(
-   --num-layers 36
-   --hidden-size 2560
-   --ffn-hidden-size 9728
-   --swiglu
-   --vocab-size 151936
-   --disable-bias-linear
-   # attn head
-   --num-attention-heads 32
-   --group-query-attention
-   --num-query-groups 8
-   --kv-channels 128
-   --qk-layernorm
-   # norm
-   --normalization "RMSNorm"
-   --norm-epsilon 1e-6
-   # rope
-   --use-rotary-position-embeddings
-   --rotary-base 1000000
-)
-```
-
-我们在 [scripts/models](../../../scripts/models) 提供了常用模型的配置，可以直接复用。如果你也在使用 megatron 进行 pretrain/sft 的话，可以直接复用 pretrain/sft 中的模型配置。
+FSDP 从 HuggingFace checkpoint 中自动读取模型配置，无需手动配置模型参数。
 
 注意：
 
-- slime 会加载 `PYTHONPATH` 中的 megatron 的所有参数，所以可以在环境中的 megatron 里找参数以及参数的说明；
-- slime 会使用 data packing (或称 varlen 或 thd) 进行训练，无需配置 `--seq-length` 或 `--max-positional-embedding`，这两个参数不会影响训练模型的最大 context length。
+- slime 会使用 data packing (或称 varlen 或 thd) 进行训练。
 
-#### 设置各种并行与重计算
+#### 性能配置
 
-megatron 是目前优化最为齐全的训练框架，大家使用 megatron 的一个主要目的就是追求其卓越的性能，这里简单介绍一些 megatron 的并行和重计算的配置方法。
+FSDP 使用纯数据并行（1D device mesh）。以下参数控制训练性能：
 
-- 这里我们简单陈列 megatron 的并行策略，关于这些并行策略之间的 trade-off 请参考更专业的一些讨论：
-  - `--tensor-model-parallel-size`：tp
-  - `--sequence-parallel`：megatron 的 sp 是 tp 的一种优化，推荐在使用 tp 的时候一直开启 sp。
-  - `--pipeline-model-parallel-size`: pp
-  - `--context-parallel-size`：megatron 的 cp，也就是序列并行，一般对应 ring attention；
-  - `--expert-model-parallel-size`：moe 的 ep，每张卡上有 `num_experts / ep_size` 个 expert；
-  - `--expert-tensor-parallel-size`：megatron 支持 moe 的 expert 与其他部分采用不同的 tp_size，我们一般称为 etp。
-- 对于重计算，megatron 中一般是配置如下的几个 flag：
-  - `--recompute-granularity` 这个值可以选 full 或者 selective，full 就是完全重计算，selective 会少重计算一些，不配置就是不重算；
-  - `--recompute-method`：一般用 uniform 就行；
-  - `--recompute-num-layers`：多少层分一组来做重算，一般 1 就行。
-  
+- `--gradient-checkpointing`：启用梯度检查点，以额外计算换取更少的 GPU 显存占用。
+- `--fsdp-cpu-offload`：将 FSDP 参数卸载到 CPU 以节省 GPU 显存。
+- `--use-dynamic-batch-size`：启用动态批处理，高效打包样本。
+- `--max-tokens-per-gpu`：启用动态批处理时，每张 GPU 处理的最大 Token 数。
 
-#### 加载 megatron ckpt
+#### 加载 checkpoint
 
-megatron 支持多种其自定义的 ckpt 格式，这里介绍 2 种比较主流的格式，
+在使用 slime 的时候，有 3 个参数用来加载和保存 checkpoint：
 
-- 曾经比较主流的 torch 格式（对应 `--ckpt-format torch`）；
-- 现在推荐使用的 torch_dist 格式（对应  `--ckpt-format torch_dist`）
-
-torch 格式是 megatron 的老存储格式，里面的结构大约是一些 `mp_rank_xxx` 的文件夹，每个文件夹对应了在对应的并行划分下，每个 rank 存储的 ckpt。也是因为如此，在加载 torch 格式的 ckpt 的时候，需要保证 ckpt 的并行策略和训练任务的并行策略是相同的。
-
-我们推荐使用 torch_dist 格式 ckpt，因为 torch_dist 格式可以支持自动并行切分，也就是不同并行的训练任务都可以共用同一个 ckpt，会方便很多。torch_dist 这也是开源 megatron 目前的默认格式。torch_dist 格式的 ckpt 中一般是一堆 `.distcp` 文件。在使用 torch_dist 时，可以使用 [README](../../../README_zh.md) 中介绍的 ckpt 转化方法从 huggingface 转化为 torch_dist，反之亦然。
-
-在存储结构上，megatron 的 ckpt 一般是这样的结构，这里假设存储的路径为 `/ckpt/`：
-
-```bash
---/ckpt/
-    |-- latest_checkpointed_iteration.txt
-    |-- iter_0000100/
-         |-- _0_0.distcp
-         |-- _0_1.distcp
-         |-- ...
-    |-- iter_0000200/
-    |-- iter_0000300/
-    |-- ...
-```
-
-其中 `latest_checkpointed_iteration.txt` 中记录了训练最新的训练步。在加载模型时，不能直接传入 `/ckpt/iter_xxxxxxx`，而是要传入 `/ckpt/`，并用 `--ckpt-step` 来选取对应的训练步（如果不使用 `--ckpt-step`，则会通过 `latest_checkpointed_iteration.txt` 读取对应的训练步。）
-
-在使用 slime 的时候，有 3 个参数用来加载和保存 ckpt：
-
-- `--ref-load`：reference model 用的 megatron ckpt；
-- `--load`：actor 用的 megatron ckpt，如果没有设置 `--load`，或者设置的目录不存在，目录中没有 `latest_checkpointed_iteration.txt`，都会直接从 `--ref-load` 的 ckpt 进行初始化；
+- `--ref-load`：reference model 用的 HuggingFace checkpoint；
+- `--load`：actor 用的 checkpoint，如果没有设置 `--load`，或者设置的目录不存在或不包含有效的 checkpoint，都会直接从 `--ref-load` 进行初始化；
 - `--save`：actor 保存的路径。
 
-注意：
-
-- 不管进行何种方式存储 ckpt，即无论如何设置 `--ckpt-format`，megatron 都可以加载 torch 或 torch_dist 格式
+如需将 FSDP checkpoint 转换回 HuggingFace 格式，可使用 `tools/convert_fsdp_to_hf.py`。
 
 ### 加载 sglang
 
@@ -148,9 +72,9 @@ sglang 的加载非常简单，只需要：
 
 注意：
 
-- 在第一个训练步之前，slime 会把 megatron 里的参数同步给 sglang，所以 `--hf-checkpoint` 中不需要有最新的训练参数，在续训得时候也不需要更换 hf ckpt；
+- 在第一个训练步之前，slime 会把训练后端的参数同步给 sglang，所以 `--hf-checkpoint` 中不需要有最新的训练参数，在续训的时候也不需要更换 hf ckpt；
 - sglang 默认会从 huggingface ckpt 中 `config.json` 读取模型的最大 context length，可以使用 `--sglang-context-length` 参数来对这个值进行覆盖，从而支持进行更长的推理；
-- 在训推一体的训练过程中，虽然 megatron 和 sglang 会先后 offload，但是还是需要为对方留有一些空间，需要通过减小 `--sglang-mem-fraction-static` 来调整 sglang 的显存占用总量。
+- 在训推一体的训练过程中，训练后端和 sglang 会先后 offload，但还是需要为对方留有一些空间，需要通过减小 `--sglang-mem-fraction-static` 来调整 sglang 的显存占用总量。
 - slime 支持透传 sgl-router 的参数，方式是在原参数名前加上 `router` 前缀。例如，sgl-router 的 `--balance-abs-threshold` 参数需要设置为 `--router-balance-abs-threshold`。由于 sgl-router 默认使用 cache-aware routing，可能会导致请求分配不均衡的问题。可以通过设置 `--router-balance-abs-threshold 0` 来强制均衡分配，但这可能会影响多轮对话场景下 prefix cache 的命中率。
 
 对于一些 sglang 的自定义以及 slime 引入 sglang 的原理，请见 sglang 使用方法一节。
@@ -397,28 +321,3 @@ sglang:
 - `overrides`：SGLang `ServerArgs` 字段覆盖字典，会叠加在 `--sglang-*` CLI 参数之上
 - `num_gpus_per_engine`：每组的 TP 大小覆盖
 
-## megatron 使用方法
-
-slime 通过复用 `megatron.training` 目录下的常规函数，如 `parse_args`， `save_checkpoint`，`load_checkpoint`，从而实现对不同版本以及轻度魔改的 megatron 的支持。所以在使用时，需要保证 `PYTHONPATH` 中能访问到 megatron，例如在运行时加入 `export PYTHONPATH=/root/Megatron-LM`。
-
-### 参数配置
-
-slime 通过直接引入 `from megatron.training.arguments import parse_args` 引入了当前环境中 megatron 的所有参数。如果当前使用的 megatron 有在 `parse_args` 之外的参数，可以通过像 [train.py](https://github.com/THUDM/slime/blob/main/train.py) 中传入参数来进行配置，例如：
-
-```python
-if __name__ == "__main__":
-    try:
-        from pretrain_gpt import extra_args_provider
-    except:
-        extra_args_provider = None
-    args = parse_args(extra_args_provider)
-    train(args)
-```
-
-### 自定义参数
-
-在一些定制版 megatron 的实现中，需要在初始化，或者训练步的前后进行特殊的操作。目前我们加入如下的插件：
-
-- `--custom-megatron-init-path`：会增加一些 init 的调用；
-- `--custom-megatron-before-log-prob-hook-path`：会在计算 log prob 之前调用；
-- `--custom-megatron-before-train-step-hook-path`：会在每个训练步之前调用。可以考虑用这种方式混入特殊的训练 loss 之类的。

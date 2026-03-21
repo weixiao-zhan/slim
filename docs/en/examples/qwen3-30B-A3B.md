@@ -3,20 +3,7 @@
 
 ## Environment Preparation
 
-The environment setup, model download, data, and checkpoint conversion are the same as for the Qwen3-4B model. You can refer to [Example: Qwen3-4B Model](qwen3-4B.md), replacing mentions of Qwen3-4B with Qwen3-30B-A3B.
-
-To convert huggingface checkpoint to torch_dist, please try:
-
-```bash
-cd slime/
-pip install -e . --no-deps
-source scripts/models/qwen3-30B-A3B.sh
-PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
-   tools/convert_hf_to_torch_dist.py \
-   ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/Qwen3-30B-A3B/ \
-   --save /root/Qwen3-30B-A3B_torch_dist/
-```
+The environment setup, model download, and data are the same as for the Qwen3-4B model. You can refer to [Example: Qwen3-4B Model](qwen3-4B.md), replacing mentions of Qwen3-4B with Qwen3-30B-A3B. No checkpoint conversion is needed -- FSDP loads HuggingFace checkpoints directly.
 
 ## Run Training
 
@@ -31,32 +18,18 @@ bash scripts/run-qwen3-30B-A3B.sh
 
 Here, we will briefly introduce the MoE-related parts in the [run-qwen3-30B-A3B.sh](https://github.com/THUDM/slime/blob/main/scripts/run-qwen3-30B-A3B.sh) script.
 
-1.  To support running Qwen3-30B-A3B in an 8xH800 environment, we need to enable Megatron's CPU Adam to save GPU memory. The corresponding configuration is:
-
-    ```bash
-    OPTIMIZER_ARGS=(
-       ...
-       --optimizer-cpu-offload
-       --overlap-cpu-optimizer-d2h-h2d
-       --use-precision-aware-optimizer
-    )
-    ```
-
-2.  Enable MoE optimization supported by Megatron. The current configuration is tp4, ep8:
+1.  To support running Qwen3-30B-A3B in an 8xH800 environment, you can enable FSDP CPU offloading and gradient checkpointing to save GPU memory:
 
     ```bash
     PERF_ARGS=(
-       --tensor-model-parallel-size 4
-       --sequence-parallel
-       --pipeline-model-parallel-size 1
-       --context-parallel-size 1
-       --expert-model-parallel-size 8
-       --expert-tensor-parallel-size 1
-       ...
+       --gradient-checkpointing
+       --fsdp-cpu-offload
+       --use-dynamic-batch-size
+       --max-tokens-per-gpu 4608
     )
     ```
 
-3.  Enable MoE optimization supported by SGLang. The current configuration is ep8:
+2.  Enable MoE optimization supported by SGLang. The current configuration is ep8:
 
     ```bash
     SGLANG_ARGS=(
@@ -91,15 +64,13 @@ And replace `--hf-checkpoint` with:
 
 This will trigger FP8 inference. Currently, we directly cast the BF16 weights to FP8. In the future, we will gradually add more sophisticated quantization schemes that have less impact on precision.
 
-⚠️ The Megatron checkpoint for training still needs to be the one that was originally converted from the BF16 Hugging Face model.
-
 ### Multi-Node Support
 
 For a multi-node environment, the following modifications are necessary:
 
   - Place the training model and data on a path accessible by all nodes.
   - Set the `MASTER_ADDR` to an address that is accessible by all nodes.
-  - Remove configurations related to CPU Adam. This is because a distributed optimizer is used, which significantly reduces the optimizer's video memory (VRAM) usage in a multi-node setup.
+  - Remove `--fsdp-cpu-offload` if not needed. Multi-node FSDP sharding reduces per-GPU memory usage.
 
 In addition, you can make the following changes:
 

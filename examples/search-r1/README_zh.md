@@ -43,19 +43,10 @@ python $WORK_DIR/scripts/data_process/qa_search_test_merge.py \
 
 **注意：** 如果您计划使用本地搜索后端，请参阅[附录](#附录配置本地检索器)了解如何设置本地检索服务器。
 
-初始化 Qwen2.5-3B 模型：
+下载 Qwen2.5-3B 模型：
 
 ```bash
-# hf checkpoint
 huggingface-cli download Qwen/Qwen2.5-3B --local-dir /root/Qwen2.5-3B
-
-# mcore checkpoint
-cd /root/slime
-source scripts/models/qwen2.5-3B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen2.5-3B \
-    --save /root/Qwen2.5-3B_torch_dist
 ```
 
 ## 配置说明

@@ -33,40 +33,18 @@ hf download --repo-type dataset zhuzilin/aime-2024  --local-dir /root/aime-2024
 hf download font-info/qwen3-4b-sft-SGLang-RL --local-dir /root/font-info/qwen3-4b-sft
 ```
 
-2. Create torch dist
-For SFT 
-```bash
-source scripts/models/qwen3-4B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen/Qwen3-4B-Instruct-2507 \
-    --rotary-base 5000000 \
-    --save /root/Qwen/Qwen3-4B-Instruct-2507_torch_dist
-```
-
-Or RL only
-```bash
-source scripts/models/qwen3-4B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/font-info/qwen3-4b-sft \
-    --rotary-base 5000000 \
-    --save /root/font-info/qwen3-4b-sft_torch_dist
-
-```
-
-3. SFT:
+2. SFT:
 ```bash
 python examples/retool/sft_data_processing.py
 bash examples/retool/retool_qwen3_4b_sft.sh
 ```
 
-4. RL:
+3. RL:
 ```bash
 bash examples/retool/retool_qwen3_4b_rl.sh
 ```
 
-5. Use in your training scripts by importing the generate function:
+4. Use in your training scripts by importing the generate function:
 ```python
 from generate_with_retool import generate, reward_func
 ```

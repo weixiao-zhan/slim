@@ -43,19 +43,10 @@ python $WORK_DIR/scripts/data_process/qa_search_test_merge.py \
 
 **Note:** If you plan to use local search backend, see the [Appendix](#appendix-setting-up-local-retriever) for instructions on setting up the local retrieval server.
 
-Initialize the Qwen2.5-3B model:
+Download the Qwen2.5-3B model:
 
 ```bash
-# hf checkpoint
 hf download Qwen/Qwen2.5-3B --local-dir /root/Qwen2.5-3B
-
-# mcore checkpoint
-cd /root/slime
-source scripts/models/qwen2.5-3B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/Qwen2.5-3B \
-    --save /root/Qwen2.5-3B_torch_dist
 ```
 
 ## Configuration

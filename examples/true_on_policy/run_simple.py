@@ -86,7 +86,7 @@ def execute():
 
     ci_args = "--ci-test " "--ci-disable-kl-checker "
 
-    misc_args = "--actor-num-nodes 1 " f"--actor-num-gpus-per-node {NUM_GPUS} " "--colocate " "--train-backend fsdp "
+    misc_args = "--actor-num-nodes 1 " f"--actor-num-gpus-per-node {NUM_GPUS} " "--colocate "
 
     if MODEL_NAME == "Qwen3-4B":
         misc_args += (
@@ -128,7 +128,6 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=None,
         extra_env_vars={
             **true_on_policy_envs,
             "SGLANG_DUMPER_ENABLE": "1" if MODE == "debug_one_sample" else "0",

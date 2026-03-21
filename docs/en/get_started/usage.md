@@ -6,7 +6,7 @@
 When using slime, parameters are primarily passed for the following purposes:
 
 1.  To allocate a portion of the GPUs in the cluster for training and another portion for inference.
-2.  To load Megatron for the training portion.
+2.  To configure the FSDP training backend.
 3.  To load SGLang for the inference portion.
 4.  To configure the hyperparameters required for RL training.
 
@@ -30,111 +30,36 @@ For co-located training and inference, you also need to configure:
 
 Additionally, slime supports Prefill and Decode disaggregation (PD Disaggregation). You can set the number of servers used for Prefill by setting the `--prefill-num-servers` argument.
 
-### Choosing Training Backend
+### Training Backend
 
-slime supports multiple training backends, which can be selected via the `--train-backend` parameter:
+slime uses PyTorch FSDP2 as its training backend. FSDP loads HuggingFace format weights directly via `AutoModelForCausalLM.from_pretrained()`, so no checkpoint conversion is needed.
 
-- `megatron` (default): Uses Megatron-LM as the training backend, supporting efficient training of large-scale models.
-- `fsdp` (experimental): Uses PyTorch FSDP as the training backend, allowing direct loading of HuggingFace format weights without conversion.
+#### Model Configuration
 
-### Loading Megatron
-
-Unlike tools such as SGLang, vLLM, or Hugging Face Trainer, Megatron cannot directly read Hugging Face checkpoints. Instead, the user must configure the parameters for the model to be trained and load Megatron's own checkpoint format.
-
-Generally, we need to perform three preparatory steps:
-
-  - Configure model parameters.
-  - Configure parallelism and other optimizations.
-  - Configure the checkpoint to be loaded.
-
-For details on some of Megatron's customizations and the principles behind how slime incorporates Megatron, please see the "How to Use Megatron" section.
-
-#### Configuring Model Parameters
-
-Taking qwen3 4B as an example, we need these parameters:
-
-```bash
-MODEL_ARGS=(
-   --num-layers 36
-   --hidden-size 2560
-   --ffn-hidden-size 9728
-   --swiglu
-   --vocab-size 151936
-   --disable-bias-linear
-   # attn head
-   --num-attention-heads 32
-   --group-query-attention
-   --num-query-groups 8
-   --kv-channels 128
-   --qk-layernorm
-   # norm
-   --normalization "RMSNorm"
-   --norm-epsilon 1e-6
-   # rope
-   --use-rotary-position-embeddings
-   --rotary-base 1000000
-)
-```
-
-We provide configurations for common models in [scripts/models](../../../scripts/models), which you can reuse directly. If you are also using Megatron for pre-training/SFT, you can directly reuse the model configurations from your pre-training/SFT setup.
+FSDP reads model configuration automatically from the HuggingFace checkpoint. No manual model parameter configuration is required.
 
 Note:
 
-  - slime will load all parameters of Megatron found in the `PYTHONPATH`, so you can find parameters and their descriptions within the Megatron in your environment.
-  - slime uses data packing (also known as varlen or thd) for training. There is no need to configure `--seq-length` or `--max-positional-embedding`, as these parameters do not affect the maximum context length of the trained model.
+  - slime uses data packing (also known as varlen or thd) for training.
 
-#### Setting Up Parallelism and Recomputation
+#### Performance Configuration
 
-Megatron is currently the most comprehensively optimized training framework. A major reason for using Megatron is to pursue its excellent performance. Here is a brief introduction to configuring Megatron's parallelism and recomputation.
+FSDP uses pure data parallelism (1D device mesh). The following parameters control training performance:
 
-  - Here we list Megatron's parallelism strategies. For a more detailed discussion on the trade-offs between these strategies, please refer to more specialized discussions:
-      - `--tensor-model-parallel-size`: TP
-      - `--sequence-parallel`: Megatron's SP is an optimization for TP. It is recommended to always enable SP when using TP.
-      - `--pipeline-model-parallel-size`: PP
-      - `--context-parallel-size`: Megatron's CP, also known as sequence parallelism, generally corresponds to ring attention.
-      - `--expert-model-parallel-size`: EP for MoE, where each GPU has `num_experts / ep_size` experts.
-      - `--expert-tensor-parallel-size`: Megatron supports using a different `tp_size` for the MoE experts than for other parts of the model, which we generally call ETP.
-  - For recomputation, the following flags are commonly configured in Megatron:
-      - `--recompute-granularity`: This can be set to `full` or `selective`. `full` means complete recomputation, while `selective` recomputes less. If not configured, no recomputation is done.
-      - `--recompute-method`: `uniform` is generally sufficient.
-      - `--recompute-num-layers`: The number of layers per group for recomputation. A value of 1 is usually fine.
+  - `--gradient-checkpointing`: Enable gradient checkpointing to reduce GPU memory usage at the cost of additional computation.
+  - `--fsdp-cpu-offload`: Offload FSDP parameters to CPU to save GPU memory.
+  - `--use-dynamic-batch-size`: Enable dynamic batching for efficient sample packing.
+  - `--max-tokens-per-gpu`: Maximum number of tokens processed per GPU when dynamic batching is enabled.
 
-#### Loading Megatron Checkpoints
-
-Megatron supports several of its custom checkpoint formats. Here are two of the more common ones:
-
-  - The once mainstream `torch` format (corresponding to `--ckpt-format torch`).
-  - The currently recommended `torch_dist` format (corresponding to `--ckpt-format torch_dist`).
-
-The `torch` format is Megatron's older storage format. Its structure consists of directories like `mp_rank_xxx`, where each directory corresponds to the checkpoint stored by each rank under a specific parallel partitioning. Because of this, when loading a `torch` format checkpoint, you must ensure that the checkpoint's parallelism strategy matches that of the training task.
-
-We recommend using the `torch_dist` format because it supports automatic parallel sharding, meaning that training tasks with different parallelism settings can share the same checkpoint, which is much more convenient. `torch_dist` is also the default format in the open-source Megatron. A `torch_dist` format checkpoint typically contains a set of `.distcp` files. When using `torch_dist`, you can convert from Hugging Face to `torch_dist` and vice versa using the checkpoint conversion method described in the [README](../../../README.md).
-
-In terms of storage structure, a Megatron checkpoint typically looks like this, assuming the storage path is `/ckpt/`:
-
-```bash
---/ckpt/
-    |-- latest_checkpointed_iteration.txt
-    |-- iter_0000100/
-         |-- _0_0.distcp
-         |-- _0_1.distcp
-         |-- ...
-    |-- iter_0000200/
-    |-- iter_0000300/
-    |-- ...
-```
-
-The `latest_checkpointed_iteration.txt` file records the latest training step. When loading a model, you should not directly pass `/ckpt/iter_xxxxxxx`, but rather pass `/ckpt/` and use `--ckpt-step` to select the corresponding training step (if `--ckpt-step` is not used, the step will be read from `latest_checkpointed_iteration.txt`).
+#### Loading Checkpoints
 
 When using slime, there are three parameters for loading and saving checkpoints:
 
-  - `--ref-load`: The Megatron checkpoint for the reference model.
-  - `--load`: The Megatron checkpoint for the actor. If `--load` is not set, or if the specified directory does not exist or does not contain `latest_checkpointed_iteration.txt`, the actor will be initialized from the `--ref-load` checkpoint.
+  - `--ref-load`: The HuggingFace checkpoint for the reference model.
+  - `--load`: The checkpoint for the actor. If `--load` is not set, or if the specified directory does not exist or does not contain a valid checkpoint, the actor will be initialized from the `--ref-load` checkpoint.
   - `--save`: The path where the actor's checkpoints are saved.
 
-Note:
-
-  - Regardless of the checkpoint storage method (i.e., however `--ckpt-format` is set), Megatron can load both `torch` and `torch_dist` formats.
+To convert FSDP checkpoints back to HuggingFace format, use `tools/convert_fsdp_to_hf.py`.
 
 ### Loading SGLang
 
@@ -144,9 +69,9 @@ Loading SGLang is very simple. You only need:
 
 Note:
 
-  - Before the first training step, slime will synchronize the parameters from Megatron to SGLang. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
+  - Before the first training step, slime will synchronize the parameters from the training backend to SGLang. Therefore, the `--hf-checkpoint` does not need to contain the latest training parameters, and you do not need to change the HF checkpoint when resuming training.
   - By default, SGLang reads the maximum context length from the `config.json` in the Hugging Face checkpoint. You can use the `--sglang-context-length` parameter to override this value to support longer inference.
-  - During co-located training and inference, although Megatron and SGLang will offload sequentially, they still need to leave some memory for each other. You need to adjust SGLang's total VRAM usage by reducing `--sglang-mem-fraction-static`.
+  - During co-located training and inference, the training backend and SGLang will offload sequentially, but they still need to leave some memory for each other. You need to adjust SGLang's total VRAM usage by reducing `--sglang-mem-fraction-static`.
   - slime supports passing through sgl-router parameters by adding a `router` prefix to the original parameter name. For example, sgl-router's `--balance-abs-threshold` parameter should be set as `--router-balance-abs-threshold`. Since sgl-router uses cache-aware routing by default, it may cause uneven request distribution. You can set `--router-balance-abs-threshold 0` to force balanced distribution, but this may affect prefix cache hit rate in multi-turn conversation scenarios.
 
 For details on some of SGLang's customizations and the principles behind how slime incorporates SGLang, please see the "How to Use SGLang" section.
@@ -395,28 +320,3 @@ Each model gets its own router. The per-model router info is accessible via `arg
 - `overrides`: Dict of SGLang `ServerArgs` field overrides applied on top of `--sglang-*` CLI args
 - `num_gpus_per_engine`: Per-group TP size override
 
-## How to Use Megatron
-
-slime supports different and lightly modified versions of Megatron by reusing common functions from the `megatron.training` directory, such as `parse_args`, `save_checkpoint`, and `load_checkpoint`. Therefore, when using it, you must ensure that Megatron is accessible in the `PYTHONPATH`, for example, by adding `export PYTHONPATH=/root/Megatron-LM` at runtime.
-
-### Parameter Configuration
-
-slime directly imports all parameters of the Megatron in the current environment by using `from megatron.training.arguments import parse_args`. If the version of Megatron you are using has parameters defined outside of `parse_args`, you can configure them by passing them in, similar to how it's done in [train.py](https://github.com/THUDM/slime/blob/main/train.py), for example:
-
-```python
-if __name__ == "__main__":
-    try:
-        from pretrain_gpt import extra_args_provider
-    except:
-        extra_args_provider = None
-    args = parse_args(extra_args_provider)
-    train(args)
-```
-
-### Custom Parameters
-
-In some customized Megatron implementations, special operations need to be performed during initialization or before/after a training step. We have added the following plugins for this purpose:
-
-  - `--custom-megatron-init-path`: Adds some initialization calls.
-  - `--custom-megatron-before-log-prob-hook-path`: Is called before calculating the log probability.
-  - `--custom-megatron-before-train-step-hook-path`: Is called before each training step. You could use this to mix in special training losses, for example.

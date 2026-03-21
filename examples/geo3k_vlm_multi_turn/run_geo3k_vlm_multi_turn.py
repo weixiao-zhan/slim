@@ -15,18 +15,9 @@ assert MODEL_NAME in {
 
 NUM_GPUS = int(os.environ.get("SLIME_SCRIPT_NUM_GPUS", "4"))
 EXTERNAL_RAY = int(os.environ.get("SLIME_SCRIPT_EXTERNAL_RAY", "0"))
-TRAIN_BACKEND = os.environ.get("SLIME_SCRIPT_TRAIN_BACKEND", "fsdp").lower()
-assert TRAIN_BACKEND in {"fsdp", "megatron"}
-
 DATASET_NAME = "VeraIsHere/geo3k_imgurl_processed"
 DATA_ROOT = "/root/datasets/geo3k_imgurl_processed"
 TRAIN_DATA_PATH = os.path.join(DATA_ROOT, "train.parquet")
-
-
-def get_megatron_model_type(model_name: str) -> str:
-    model_type = model_name.replace("-Instruct", "").replace("-Thinking", "")
-    model_type = model_type.replace("Qwen3-VL-", "qwen3-")
-    return model_type.replace("-2B", "-1.7B")
 
 
 def prepare():
@@ -105,46 +96,15 @@ def execute():
     )
 
     fsdp_args = (
-        "--train-backend fsdp "
         "--gradient-checkpointing "
         "--sglang-attention-backend fa3 "
         "--attn-implementation flash_attention_3 "
         "--update-weight-buffer-size 536870912 "
     )
 
-    megatron_args = (
-        "--train-backend megatron "
-        f"--load /root/models/{MODEL_NAME} "
-        "--tensor-model-parallel-size 4 "
-        "--sequence-parallel "
-        "--pipeline-model-parallel-size 1 "
-        "--context-parallel-size 1 "
-        "--expert-model-parallel-size 1 "
-        "--expert-tensor-parallel-size 1 "
-        "--recompute-granularity full "
-        "--recompute-method uniform "
-        "--recompute-num-layers 1 "
-        "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
-        "--attention-dropout 0.0 "
-        "--hidden-dropout 0.0 "
-        "--accumulate-allreduce-grads-in-fp32 "
-        "--attention-softmax-in-fp32 "
-        "--attention-backend flash "
-        "--megatron-to-hf-mode bridge "
-    )
-
     misc_args = (
         "--actor-num-nodes 1 " f"--actor-num-gpus-per-node {NUM_GPUS} " f"--rollout-num-gpus {NUM_GPUS} " "--colocate "
     )
-
-    if TRAIN_BACKEND == "megatron":
-        backend_args = megatron_args
-        megatron_model_type = get_megatron_model_type(MODEL_NAME)
-        os.environ["MODEL_ARGS_ROTARY_BASE"] = "5000000"
-    else:
-        backend_args = fsdp_args
-        megatron_model_type = None
 
     train_args = (
         f"{ckpt_args} "
@@ -152,7 +112,7 @@ def execute():
         f"{optimizer_args} "
         f"{grpo_args} "
         f"{sglang_args} "
-        f"{backend_args} "
+        f"{fsdp_args} "
         f"{misc_args} "
         f"{wandb_args} "
         # f"{get_default_wandb_args(__file__)} "
@@ -161,7 +121,6 @@ def execute():
     execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=megatron_model_type,
         extra_env_vars=({"WANDB_API_KEY": os.environ["WANDB_API_KEY"]} if os.environ.get("WANDB_API_KEY") else {}),
     )
 

@@ -136,9 +136,9 @@ class UpdateWeightFromTensor(UpdateWeight):
             return
 
         monkey_patch_torch_reductions()
-        # Use flattened bucket approach similar to Megatron
+        # Use flattened bucket approach for efficient weight transfer
         logger.info("Using flattened tensor bucket")
-        # Group tensors by dtype (same as Megatron)
+        # Group tensors by dtype
         named_tensors_by_dtypes = {}
         for name, tensor in named_tensors:
             dtype = tensor.dtype
@@ -172,7 +172,7 @@ class UpdateWeightFromTensor(UpdateWeight):
         )
 
         if dist.get_rank() == self._ipc_gather_src:
-            # Handle flattened bucket format (same as Megatron approach)
+            # Handle flattened bucket format
             # Each rank may have multiple dtype buckets
             # TODO: here we assume all ranks have the same number of dtypes
             num_dtypes = len(gathered_serialized_batches[0])

@@ -7,7 +7,7 @@
 
 **slime** is an LLM post-training framework for RL scaling, providing two core capabilities:
 
-1.  **High-Performance Training**: Supports efficient training in various modes by connecting Megatron with SGLang;
+1.  **High-Performance Training**: Supports efficient training in various modes by connecting HuggingFace Transformers + PyTorch FSDP2 with SGLang;
 2.  **Flexible Data Generation**: Enables arbitrary training data generation workflows through custom data generation interfaces and server-based engines.
 
 slime is the RL-framework behind [GLM-5](https://z.ai/blog/glm-5), [GLM-4.7](https://z.ai/blog/glm-4.7), [GLM-4.6](https://z.ai/blog/glm-4.6), [GLM-4.5](https://z.ai/blog/glm-4.5) and apart from models from Z.ai, we also supports the following models:
@@ -36,7 +36,7 @@ slime is the RL-framework behind [GLM-5](https://z.ai/blog/glm-5), [GLM-4.7](htt
 
 **Module Descriptions**:
 
-- **training (Megatron)**: Responsible for the main training process, reads data from the Data Buffer, and synchronizes parameters to the rollout module after training.
+- **training (FSDP)**: Responsible for the main training process, reads data from the Data Buffer, and synchronizes parameters to the rollout module after training.
 - **rollout (SGLang + router)**: Generates new data (including rewards/verifier outputs) and stores it in the Data Buffer.
 - **data buffer**: A bridge module that manages prompt initialization, custom data, and rollout generation methods.
 
@@ -81,7 +81,7 @@ These projects showcase slime's versatility—from training code-generation mode
 
 Arguments in slime are divided into three categories:
 
-1.  **Megatron arguments**: slime reads all arguments in Megatron. You can configure Megatron by passing arguments like `--tensor-model-parallel-size 2`.
+1.  **FSDP arguments**: slime reads FSDP training arguments. You can configure FSDP by passing arguments like `--gradient-checkpointing`, `--fsdp-cpu-offload`.
 2.  **SGLang arguments**: All arguments for the installed SGLang are supported. These arguments must be prefixed with `--sglang-`. For example, `--mem-fraction-static` should be passed as `--sglang-mem-fraction-static`.
 3.  **slime-specific arguments**: Please refer to: [slime/utils/arguments.py](slime/utils/arguments.py)
 
@@ -106,7 +106,7 @@ pre-commit run --all-files --show-diff-on-failure --color=always
 ## FAQ & Acknowledgements
 
 - For frequently asked questions, please see the [Q\&A](docs/en/get_started/qa.md)
-- Special thanks to the following projects & communities: SGLang, Megatron‑LM, mbridge, OpenRLHF, veRL, Pai-Megatron-Patch and others.
+- Special thanks to the following projects & communities: SGLang, OpenRLHF, veRL, and others.
 - To quote slime, please use:
 
 ```bibtex

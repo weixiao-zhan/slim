@@ -123,8 +123,7 @@ ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-s
 
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/:${SCRIPT_DIR}\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
+    \"PYTHONPATH\": \"${SCRIPT_DIR}\"
   }
 }"
 

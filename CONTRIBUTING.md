@@ -30,7 +30,7 @@ Our goal for open-source collaboration is focused on **bug fixes** and **general
 | **Design / abstraction proposals** | e.g., universal data standards, eval standards, tool base classes. Standard-setting involves non-technical factors; slime intentionally avoids such content to keep things flexible for both the community and internal teams. |
 | **Features that cannot be clearly verified** | Correctness is critically important for a training framework. If a feature cannot be verified through CI or routine internal training, it becomes difficult for us to ensure timely fixes, which could affect the project's long-term reliability. |
 | **Features independent of the RL framework** | e.g., full algorithm reproduction pipelines. While these lower the barrier to entry, they are difficult to include in routine verification. slime aims to be lightweight — more like Flask than Django. We recommend building such pipelines in separate repositories; we are happy to reference them in the README. |
-| **Major modifications to Megatron** | We do not plan to maintain a Megatron fork through slime. The goal is to switch Megatron versions relatively painlessly; Megatron performance optimization and feature completion are not primary objectives. |
+| **Major modifications to training backends** | minislime uses FSDP as the sole training backend. We aim to keep the training backend simple and focus on the RL orchestration layer. |
 
 ### Why This Policy?
 
@@ -76,7 +76,7 @@ slime 承担了智谱内部的大量实验，包括 GLM 4.5 至 5 的全部 RL �
 | **带有项目规划建议的标准或抽象** | 例如引入某种通用数据标准、eval 标准、工具构建基类等。标准的设立在大多数团队中会涉及到非技术因素，slime 的设计中故意避开了类似的内容，一方面不希望将智谱内部的管理偏好投射给社区，另一方面也便于内部不同方向的团队进行合适的选型。 |
 | **无法进行明确验证的功能** | 训练框架的正确性至关重要。如果一个功能不能通过 CI 或智谱内部常规训练进行验证，我们就难以及时发现和修复问题，这对项目的长期可靠性会带来不小的风险。 |
 | **与 RL 框架较为独立的功能** | 例如整套算法复现流程。这类内容较难纳入日常验证流程，不太容易持续保证正确性。slime 是一个相对轻量的框架，更像是 Flask 而非 Django。建议在独立的 repo 中搭建，我们也非常愿意在 README 中引用所有使用了 slime 的项目链接。 |
-| **对 Megatron 的大幅度改动** | 目前我们没有计划通过 slime 维护一套 Megatron fork。slime 的目标是能够相对无痛地切换 Megatron 版本，Megatron 的性能优化和功能补全不在主要目标中。 |
+| **对训练后端的大幅度改动** | minislime 使用 FSDP 作为唯一的训练后端。我们旨在保持训练后端简洁，重点放在 RL 编排层。 |
 
 ### 为什么需要这样的策略？
 

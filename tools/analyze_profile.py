@@ -483,9 +483,8 @@ def print_analysis(r: TraceAnalysis):
 
     # ── Communication ───────────────────────────────────────────────────
     section("Communication Overhead")
-    comm_total = r.nccl_kernel_dur_us + r.deep_ep_dur_us
+    comm_total = r.nccl_kernel_dur_us
     print(f"  NCCL AllGather (GPU kernel): {r.nccl_kernel_dur_us / 1000:.1f} ms")
-    print(f"  DeepEP (MoE all-to-all):     {r.deep_ep_dur_us / 1000:.1f} ms")
     print(f"  Gloo Broadcast (CPU):        {r.gloo_total_us / 1000:.1f} ms")
     print(f"  Communication / Total Kernel: {comm_total / total * 100:.1f}%")
 
@@ -519,19 +518,7 @@ def print_analysis(r: TraceAnalysis):
             )
         )
 
-    # 3. DeepEP dispatch latency
-    dep_cat = r.kernel_categories.get("DeepEP Dispatch (MoE)")
-    if dep_cat and dep_cat.total_dur / total > 0.15:
-        issues.append(
-            (
-                "DeepEP Dispatch Dominance",
-                f"DeepEP dispatch takes {dep_cat.total_dur / 1000:.1f}ms ({dep_cat.total_dur / total * 100:.1f}% of kernel time). "
-                f"MoE expert parallelism communication is a major cost.",
-                "high",
-            )
-        )
-
-    # 4. MoE routing overhead
+    # 3. MoE routing overhead
     topk_cat = r.kernel_categories.get("TopK / MoE Routing")
     if topk_cat and topk_cat.total_dur / total > 0.05:
         issues.append(
@@ -583,29 +570,10 @@ def print_analysis(r: TraceAnalysis):
             (
                 "Reduce CUDA Graph Re-capture / Launch Latency",
                 [
-                    "The large cudaGraphLaunch (13-16ms) occurs once per decode step — this is the MoE expert "
-                    "portion that runs OUTSIDE the CUDA graph (DeepEP dispatch/combine + NCCL allgather).",
-                    "The 3-launch pattern per step = (1) pre-MoE graph, (2) post-MoE graph, (3) MoE-expert graph.",
                     "Optimization: try increasing decode batch size to amortize graph launch overhead per token.",
                     "Check if `--sglang-disable-cuda-graph` helps isolate whether the overhead is in graph "
                     "management vs. actual compute.",
                     "Consider padding batch sizes to avoid frequent graph re-capture for different sizes.",
-                ],
-            )
-        )
-
-    if any("DeepEP" in i[0] for i in issues):
-        recs.append(
-            (
-                "Optimize MoE Expert Parallelism (DeepEP)",
-                [
-                    f"DeepEP dispatch+combine = {r.deep_ep_dur_us / 1000:.1f}ms/step = "
-                    f"{r.deep_ep_dur_us / total * 100:.1f}% of GPU time — this is all-to-all expert communication.",
-                    "dispatch (76.8us avg × 1556 calls) dominates over combine (29.4us avg).",
-                    "Consider: reduce number of MoE layers, or reduce EP degree if not fully utilizing all experts.",
-                    "Ensure NVLink/NVSwitch bandwidth is saturated (H100 should be 900 GB/s bidirectional).",
-                    "Check if low-latency mode for DeepEP is enabled — the clean_buffer kernel (700us avg) suggests "
-                    "low-latency mode is active.",
                 ],
             )
         )
@@ -648,9 +616,9 @@ def print_cross_rank_summary(analyses: list[TraceAnalysis]):
     header("Cross-Rank Comparison")
     print(
         f"  {'Rank':<25s}  {'Span(ms)':>9s}  {'Busy(ms)':>9s}  {'Util%':>6s}  "
-        f"{'Kernel(ms)':>10s}  {'DeepEP(ms)':>10s}  {'GEMM(ms)':>9s}  {'NCCL(ms)':>9s}"
+        f"{'Kernel(ms)':>10s}  {'GEMM(ms)':>9s}  {'NCCL(ms)':>9s}"
     )
-    print(f"  {'─' * 25}  {'─' * 9}  {'─' * 9}  {'─' * 6}  {'─' * 10}  {'─' * 10}  {'─' * 9}  {'─' * 9}")
+    print(f"  {'─' * 25}  {'─' * 9}  {'─' * 9}  {'─' * 6}  {'─' * 10}  {'─' * 9}  {'─' * 9}")
 
     for r in analyses:
         gemm_dur = sum(
@@ -661,7 +629,7 @@ def print_cross_rank_summary(analyses: list[TraceAnalysis]):
         print(
             f"  {r.rank_name:<25s}  {r.gpu_active_span_us / 1000:9.1f}  {r.gpu_busy_time_us / 1000:9.1f}  "
             f"{r.gpu_util_pct:6.1f}  {r.total_kernel_time_us / 1000:10.1f}  "
-            f"{r.deep_ep_dur_us / 1000:10.1f}  {gemm_dur / 1000:9.1f}  {r.nccl_kernel_dur_us / 1000:9.1f}"
+            f"{gemm_dur / 1000:9.1f}  {r.nccl_kernel_dur_us / 1000:9.1f}"
         )
 
     utils = [r.gpu_util_pct for r in analyses]

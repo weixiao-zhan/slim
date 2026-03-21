@@ -16,11 +16,10 @@ set -ex
 export PYTHONBUFFERED=16
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/../../scripts/models/qwen2.5-3B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen2.5-3B/
-   --ref-load /root/Qwen2.5-3B_torch_dist/
+   --ref-load /root/Qwen2.5-3B/
    # --load /root/Qwen2.5-3B_slime/
    # --save /root/Qwen2.5-3B_slime/
    # --save-interval 20
@@ -51,18 +50,7 @@ ROLLOUT_ARGS=(
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 2
-   --sequence-parallel
-   --pipeline-model-parallel-size 1
-   --context-parallel-size 1
-   --expert-model-parallel-size 1
-   --expert-tensor-parallel-size 1
-
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
-
-   # --micro-batch-size 1
+   --gradient-checkpointing
    --use-dynamic-batch-size
    --max-tokens-per-gpu 9216
 )
@@ -102,14 +90,6 @@ SGLANG_ARGS=(
 )
 
 MISC_ARGS=(
-   # default dropout in megatron is 0.1
-   --attention-dropout 0.0
-   --hidden-dropout 0.0
-   # should be good for model performance
-   --accumulate-allreduce-grads-in-fp32
-   --attention-softmax-in-fp32
-   # need to comment this when using model with MLA
-   --attention-backend flash
 )
 
 CUSTOM_ARGS=(
@@ -127,8 +107,7 @@ ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-s
 
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/:${SCRIPT_DIR}\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
+    \"PYTHONPATH\": \"${SCRIPT_DIR}\"
   }
 }"
 
@@ -139,7 +118,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-gpus-per-node 4 \
    --rollout-num-gpus 4 \
    --colocate \
-   ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \

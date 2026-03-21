@@ -4,15 +4,7 @@
 
 pip install -U transformers
 
-# IMPORTANT: This branch is specially modified for slime's current Megatron
-# version and Qwen3.5 from the main Megatron Bridge. Other models are not verified!
-# To restore the original Megatron Bridge, run:
-#   pip install git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl --no-build-isolation
-# TODO: Remove this once Megatron & Megatron Bridge are upgraded upstream.
-pip install git+https://github.com/coding-famer/Megatron-Bridge-slime.git@qwen35 --no-build-isolation
-
 # Configuration
-TRAIN_BACKEND="megatron"
 MODEL_NAME="Qwen3_5-35B-A3B"
 DATASET_NAME=${SLIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
 NUM_GPUS=${SLIME_SCRIPT_NUM_GPUS:-8}
@@ -68,7 +60,6 @@ fi
 CKPT_ARGS=(
    --hf-checkpoint /root/models/${MODEL_NAME}
    --load /root/models/${MODEL_NAME}
-   --megatron-to-hf-mode bridge
 )
 
 ROLLOUT_ARGS=(
@@ -135,7 +126,7 @@ if [ -n "$WANDB_API_KEY" ]; then
    WANDB_ARGS=(
       --use-wandb
       --wandb-project slime-geo3k-vlm
-      --wandb-group ${MODEL_NAME_LOWER}-${TRAIN_BACKEND}
+      --wandb-group ${MODEL_NAME_LOWER}-fsdp
       --wandb-key ${WANDB_API_KEY}
       --disable-wandb-random-suffix
    )
@@ -147,33 +138,10 @@ MISC_ARGS=(
    --colocate
 )
 
-# Backend-specific args
-# megatron backend
 BACKEND_ARGS=(
-   --train-backend megatron
-   # Qwen3.5-35B-A3B has num_query_groups = 2
-   --tensor-model-parallel-size 2
-   --sequence-parallel
-   --pipeline-model-parallel-size 1
-   --context-parallel-size 1
-   --expert-model-parallel-size 8
-   --expert-tensor-parallel-size 1
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
-   --attention-dropout 0.0
-   --hidden-dropout 0.0
-   --accumulate-allreduce-grads-in-fp32
-   --attention-softmax-in-fp32
-   --attention-backend flash
-
-   # Packing is not supported for GDN currently
-   --qkv-format bshd
+   --gradient-checkpointing
    --micro-batch-size 1
 )
-
-SLIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
-source "${SLIME_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
 
 # Start Ray if not using external Ray
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
@@ -185,8 +153,6 @@ fi
 # Build runtime env
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
   }
 }"
@@ -197,7 +163,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node ${NUM_GPUS} \
    --multimodal-keys "${MULTIMODAL_KEYS}" \
-   ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${EVAL_ARGS[@]} \

@@ -13,7 +13,6 @@ micromamba create -n slime python=3.12 pip -c conda-forge -y
 micromamba activate slime
 export CUDA_HOME="$CONDA_PREFIX"
 export SGLANG_COMMIT="bbe9c7eeb520b0a67e92d133dfc137a3688dc7f2"
-export MEGATRON_COMMIT="3714d81d418c9f1bca4594fc35f9e8289f652862"
 
 export BASE_DIR=${BASE_DIR:-"/root"}
 cd $BASE_DIR
@@ -37,10 +36,8 @@ pip install -e "python[all]"
 pip install cmake ninja
 
 # flash attn
-# the newest version megatron supports is v2.7.4.post1
 MAX_JOBS=64 pip -v install flash-attn==2.7.4.post1 --no-build-isolation
 
-pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps
 pip install --no-build-isolation "transformer_engine[pytorch]==2.10.0"
 pip install flash-linear-attention==0.4.1
 NVCC_APPEND_FLAGS="--threads 4" \
@@ -49,14 +46,6 @@ NVCC_APPEND_FLAGS="--threads 4" \
   --config-settings "--build-option=--cpp_ext --cuda_ext --parallel 8" git+https://github.com/NVIDIA/apex.git@10417aceddd7d5d05d7cbf7b0fc2daad1105f8b4
 
 pip install git+https://github.com/fzyzcjy/torch_memory_saver.git@dc6876905830430b5054325fa4211ff302169c6b --no-cache-dir --force-reinstall
-pip install git+https://github.com/fzyzcjy/Megatron-Bridge.git@dev_rl --no-build-isolation
-pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
-
-# megatron
-cd $BASE_DIR
-git clone https://github.com/NVIDIA/Megatron-LM.git --recursive && \
-  cd Megatron-LM/ && git checkout ${MEGATRON_COMMIT} && \
-  pip install -e .
 
 # install slime and apply patches
 
@@ -79,5 +68,3 @@ pip install "numpy<2"
 # apply patch
 cd $BASE_DIR/sglang
 git apply $SLIME_DIR/docker/patch/v0.5.9/sglang.patch
-cd $BASE_DIR/Megatron-LM
-git apply $SLIME_DIR/docker/patch/v0.5.9/megatron.patch

@@ -31,16 +31,7 @@ This example connects `slime` with [`strands-sglang`](https://github.com/horizon
 ## Prepare Model
 
 ```bash
-# hf checkpoint
 huggingface-cli download Qwen/Qwen3-8B --local-dir /root/models/Qwen/Qwen3-8B
-
-# mcore checkpoint
-cd /root/slime
-source scripts/models/qwen3-8B.sh
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/models/Qwen/Qwen3-8B \
-    --save /root/models/Qwen/Qwen3-8B_torch_dist
 ```
 
 ## Prepare Dataset

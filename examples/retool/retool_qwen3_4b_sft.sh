@@ -24,11 +24,10 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "/root/slime/scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/Qwen/Qwen3-4B-Instruct-2507/
-   --ref-load /root/Qwen/Qwen3-4B-Instruct-2507_torch_dist
+   --ref-load /root/Qwen/Qwen3-4B-Instruct-2507/
 #    --load ./models/Qwen/Qwen3-4B-Instruct_slime/
    --save /root/Qwen/Qwen3-4B-Instruct-2507_sft_slime/
    --save-interval 1000
@@ -51,18 +50,7 @@ SFT_ARGS=(
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 1
-   --sequence-parallel
-   --pipeline-model-parallel-size 1
-   --context-parallel-size 1
-   --expert-model-parallel-size 1
-   --expert-tensor-parallel-size 1
-
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
-
-   # --micro-batch-size 1
+   --gradient-checkpointing
    --use-dynamic-batch-size
    --max-tokens-per-gpu 9216
 )
@@ -86,14 +74,6 @@ WANDB_ARGS=(
 )
 
 MISC_ARGS=(
-   # default dropout in megatron is 0.1
-   --attention-dropout 0.0
-   --hidden-dropout 0.0
-   # should be good for model performance
-   --accumulate-allreduce-grads-in-fp32
-   --attention-softmax-in-fp32
-   # need to comment this when using model with MLA
-   --attention-backend flash
 )
 
 # launch the master node of ray in container
@@ -102,11 +82,8 @@ export no_proxy="127.0.0.1,${MASTER_ADDR}"
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 
-# Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
     \"PYTORCH_CUDA_ALLOC_CONF\": \"expandable_segments:True\"
   }
@@ -117,7 +94,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train_async.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 8 \
-   ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${SFT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \

@@ -28,15 +28,15 @@ We give examples of the algorithms for solving the training-inference mismatch i
 
 ### [Baseline: No Mismatch Correction] Standard PPO
 
-This is the basic PPO algorithm with potentially training-inference mismatch issue when the output of SGLang and Megatron does not exactly match.
+This is the basic PPO algorithm with potentially training-inference mismatch issue when the output of SGLang and FSDP does not exactly match.
 
 $$
 L_{\text{PPO}}(\theta)
 = - \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi_{\textcolor{red}{\text{SGLang}}}} \left[
   \min \left(
-    \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{Megatron}}}(y \mid x)} A_t,
+    \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{FSDP}}}(y \mid x)} A_t,
     \mathrm{clip}\left(
-      \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{Megatron}}}(y \mid x)},
+      \frac{\pi_\theta(y \mid x)}{\pi_{\textcolor{blue}{\text{FSDP}}}(y \mid x)},
       1 - \epsilon,
       1 + \epsilon
     \right) A_t
@@ -68,7 +68,7 @@ Advantages:
 
 ### Decoupled, 3-policy PPO Importance Sampling  
 
-[Decoupled PPO](https://arxiv.org/pdf/2110.00641) achieves batch-independent PPO by decoupling two roles: Proximal Policy (anchor policy for PPO clipping, control update size) and Behavior Policy (for off-policy correction in importance sampling). Therefore, there are totally 3 roles engaged in this mode, **target policy** $\pi_\theta$, **proximal policy** $\pi_{\textcolor{blue}{\text{old}}}$, and **behavior policy** $\pi_{\textcolor{red}{\text{SGLang}}}$. $\pi_{\textcolor{blue}{\text{old}}}$ is recomputed with Megatron at the beginning of each training step.
+[Decoupled PPO](https://arxiv.org/pdf/2110.00641) achieves batch-independent PPO by decoupling two roles: Proximal Policy (anchor policy for PPO clipping, control update size) and Behavior Policy (for off-policy correction in importance sampling). Therefore, there are totally 3 roles engaged in this mode, **target policy** $\pi_\theta$, **proximal policy** $\pi_{\textcolor{blue}{\text{old}}}$, and **behavior policy** $\pi_{\textcolor{red}{\text{SGLang}}}$. $\pi_{\textcolor{blue}{\text{old}}}$ is recomputed with the FSDP training backend at the beginning of each training step.
 
 $$
 L_{\text{PPO-decoupled}}(\theta)

@@ -5,7 +5,7 @@ This document will guide you through setting up the environment and getting star
 
 ## Basic Environment Setup
 
-Since slime may contain temporary patches for sglang/megatron, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
+Since slime may contain temporary patches for sglang, to avoid potential environment configuration issues, we strongly recommend **users to use our latest Docker image**, which comes pre-configured with all dependencies.
 
 ### Hardware Support
 
@@ -16,7 +16,7 @@ Since slime may contain temporary patches for sglang/megatron, to avoid potentia
 
 **Important Notes**:
 - Latest Docker images are compatible with both B-series and H-series GPUs without additional configuration
-- Megatron backend on H-series GPUs has CI protection, thoroughly validated, recommended for production environments
+- FSDP backend on H-series GPUs has CI protection, thoroughly validated, recommended for production environments
 - B-series basic functionality is stable and suitable for development/testing, but currently lacks CI protection
 - Both hardware platforms use identical installation and startup procedures
 
@@ -65,45 +65,18 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
   --local-dir /root/aime-2024
 ```
 
-## Model Weight Conversion
+## Checkpoint Conversion
 
-### Convert from Hugging Face Format to Megatron Format
+FSDP loads HuggingFace checkpoints directly, so no conversion is needed before training.
 
-When using Megatron as the training backend, you need to first convert Hugging Face format model weights to Megatron `torch_dist` format.
-
-First, load the configuration file of the target model. The `slime/scripts/models` directory contains configuration files for supported models. You need to `source` the corresponding model script to load the configuration parameters into the current environment. Here we use GLM4-9B model as an example, and it's similar for Qwen3-4B, GLM-4.7-Flash, Qwen3-30B-A3B, etc.
+To convert FSDP checkpoints saved during training back to HuggingFace format, use:
 
 ```bash
-cd /root/slime
-source scripts/models/glm4-9B.sh
-```
-
-Next, run the conversion script. Please note the following parameters:
-- `--hf-checkpoint`: Specify the path of the downloaded Hugging Face model weights.
-- `--save`: Specify the save path for the converted `torch_dist` format weights.
-
-```bash
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
-```
-
-For larger models, you can use `torchrun` to start the conversion script to convert with multi-gpus or even multi-nodes.
-Note: When converting the kimi-k2 model weights, you need to open config.json in the model path and change "model_type": "kimi_k2" to "model_type": "deepseek_v3".
-
-### Convert from Megatron Format to Hugging Face Format
-
-You can use the following script to convert the saved Megatron checkpoints back to Hugging Face format:
-
-```bash
-PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
-  --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
+python tools/convert_fsdp_to_hf.py \
+  --input-dir /path/to/fsdp_ckpt/ \
+  --output-dir /root/GLM-Z1-9B-0414-converted \
   --origin-hf-dir /root/GLM-Z1-9B-0414
 ```
-
-Note that as Megatron will do padding to embedding for better performance, it may happen that the converted embedding is not correct. In that case, please manually set `--vocab-size` during convertion.
 
 ## Training Script and Parameter Overview
 
@@ -116,30 +89,18 @@ bash scripts/run-glm4-9B.sh
 
 We still use the run-glm4-9B.sh script as an example to briefly analyze the main parameters.
 
-### MODEL_ARGS: Model Configuration Parameters
+### Model Configuration
 
-```bash
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
-```
-
-This part loads model configuration from the `scripts/models/glm4-9B.sh` file through the `source` command. These configurations are all hyperparameters required by Megatron. Since Megatron cannot directly read model configuration from checkpoints, it needs to be manually specified. We provide configuration examples for some commonly used models in the `scripts/models/` directory.
-
-> ⚠️ **Note**:
-> Please make sure to check whether the parameters in the model configuration file (such as `--rotary-base`) completely match the model you are currently using. Different versions of the same model structure may use different configuration values. If you need to modify, you can directly override after `source`, for example:
-> ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
-> MODEL_ARGS+=(--rotary-base 10000)
-> ```
+FSDP loads model configuration automatically from the HuggingFace checkpoint via `AutoModelForCausalLM.from_pretrained()`. No manual model configuration (MODEL_ARGS) is needed.
 
 ### CKPT_ARGS: Checkpoint and Path Parameters
 
 ```bash
 CKPT_ARGS=(
-   # To load tokenizer and other information, won't actually use model weight parameters from hf path
+   # HuggingFace checkpoint path (used for model loading and tokenizer)
    --hf-checkpoint /root/GLM-Z1-9B-0414
-   # Reference Model's Megatron format checkpoint
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
+   # Reference model checkpoint (HuggingFace format)
+   --ref-load /root/GLM-Z1-9B-0414
    # Actor model loading path. Should typically match --save for checkpoint resumption
    # If empty or doesn't contain a valid checkpoint, loads from --ref-load instead
    --load /root/GLM-Z1-9B-0414_slime/
@@ -225,30 +186,22 @@ EVAL_ARGS=(
 )
 ```
 
-### PERF_ARGS: Performance and Parallelism Parameters
+### PERF_ARGS: Performance Parameters
 
-This part mainly contains Megatron's parallel configuration. `--use-dynamic-batch-size` and `--max-tokens-per-gpu` are slime-specific optimizations.
+This part contains FSDP training performance configuration. `--use-dynamic-batch-size` and `--max-tokens-per-gpu` are slime-specific optimizations.
 
-- `--max-tokens-per-gpu`: Maximum number of tokens processed per GPU. After enabling dynamic batching (`use_dynamic_batch_size`), the system will intelligently pack samples of varying lengths so that the total token count of each micro-batch approaches this limit, thereby improving training efficiency. If a single sample length exceeds this value, it will form an independent batch. In context parallel (CP) mode, `N` CP cards share the total length of `N * max_tokens_per_gpu`.
-- `--use-dynamic-batch-size`: Enable dynamic batching. At this time, `--micro-batch-size` will be ignored.
+- `--max-tokens-per-gpu`: Maximum number of tokens processed per GPU. After enabling dynamic batching (`use_dynamic_batch_size`), the system will intelligently pack samples of varying lengths so that the total token count of each micro-batch approaches this limit, thereby improving training efficiency. If a single sample length exceeds this value, it will form an independent batch.
+- `--use-dynamic-batch-size`: Enable dynamic batching.
+- `--gradient-checkpointing`: Enable gradient checkpointing to reduce GPU memory usage at the cost of additional computation.
+- `--fsdp-cpu-offload`: Offload FSDP parameters to CPU to save GPU memory.
 
 > 💡 **Tip**:
 > slime always trains models through data packing methods and strictly ensures that per sample loss or per token loss is correct. Therefore, enabling dynamic batch size will not affect loss calculation, and it is strongly recommended to enable it.
 
 ```bash
 PERF_ARGS=(
-   --tensor-model-parallel-size 2
-   --sequence-parallel
-   --pipeline-model-parallel-size 1
-   --context-parallel-size 2
-   --expert-model-parallel-size 1
-   --expert-tensor-parallel-size 1
+   --gradient-checkpointing
 
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
-
-   # --micro-batch-size 1 # This item is ignored when dynamic batching is enabled
    --use-dynamic-batch-size
    --max-tokens-per-gpu 4608
 )
@@ -333,7 +286,7 @@ ray job submit ... \
 At this time, training and inference will share all 8 GPUs.
 
 > ⚠️ **Note**:
-> In training-inference integration mode, Megatron will occupy a certain amount of GPU memory before it can be offloaded after initialization. You need to adjust the `--sglang-mem-fraction-static` parameter to reduce SGLang's GPU memory usage ratio to avoid insufficient GPU memory. We usually recommend 0.8.
+> In training-inference integration mode, the training backend will occupy a certain amount of GPU memory before it can be offloaded after initialization. You need to adjust the `--sglang-mem-fraction-static` parameter to reduce SGLang's GPU memory usage ratio to avoid insufficient GPU memory. We usually recommend 0.8.
 
 ### Dynamic Sampling
 
@@ -399,16 +352,10 @@ hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
 And replace `--hf-checkpoint` with:
 
 ```bash
-   # Used to load tokenizer and other information, actually won't use model weight parameters from hf path
    --hf-checkpoint /root/Qwen3-4B-FP8
-
-   # The megatron checkpoint still needs to be the dist weights converted from bf16 huggingface at the beginning, not modified because of FP8 rollout.
-   --ref-load /root/Qwen3-4B_torch_dist
 ```
 
 This will trigger fp8 inference. Currently, we will directly cast bf16 weights to fp8, and we will gradually add quantization schemes with less impact on accuracy in the future.
-
-⚠️ The training megatron checkpoint still needs to be the one converted from bf16 huggingface at the beginning.
 
 ## Multiturn Adaptation
 
@@ -559,14 +506,8 @@ After the Ray cluster has started, you can submit a job from node 0, for example
 
 ```bash
 ray job submit --address="http://127.0.0.1:8265" \
-   --runtime-env-json='{
-     "env_vars": {
-        "PYTHONPATH": "/root/Megatron-LM/",
-        ... # e.g., no_proxy, API variables, etc.
-     }
-   }' \
    -- python3 train.py \
-   --... # Other Megatron/SGLang/slime arguments
+   --... # Other SGLang/slime arguments
 ```
 
 Optionally, the following environment variables may be needed based on your environment. For example, when there are multiple IPs and the wrong one is chosen in a Docker or SLURM envionment. We provide an example used in a SLURM + enroot multi-node system as follows:

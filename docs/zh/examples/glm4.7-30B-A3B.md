@@ -2,7 +2,7 @@
 
 ## 环境准备
 
-搭建环境、数据与 ckpt 转换均与 Qwen3-4B 模型相同，可以参考 [示例：Qwen3-4B](qwen3-4B.md)，将文中 Qwen3-4B 的部分转换为 GLM-4.7-Flash 即可。
+搭建环境和数据均与 Qwen3-4B 模型相同，可以参考 [示例：Qwen3-4B](qwen3-4B.md)，将文中 Qwen3-4B 的部分转换为 GLM-4.7-Flash 即可。无需进行 checkpoint 格式转换，FSDP 可直接加载 HuggingFace checkpoint。
 
 ### 前置条件
 
@@ -16,21 +16,6 @@ pip install "transformers>=5.0"
 
 ```bash
 hf download THUDM/GLM-4.7-Flash --local-dir /root/GLM-4.7-Flash
-```
-
-### 转换 Checkpoint
-
-可以用如下方法把 Hugging Face checkpoint 转化为 torch_dist 格式：
-
-```bash
-cd /root/slime
-pip install -e . --no-deps
-source scripts/models/glm4.7-30B-A3B.sh
-PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
-   tools/convert_hf_to_torch_dist.py \
-   ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/GLM-4.7-Flash/ \
-   --save /root/GLM-4.7-Flash_torch_dist/
 ```
 
 ## 执行训练
@@ -50,31 +35,18 @@ bash scripts/run-glm4.7-30B-A3B-8gpus.sh
 
 GLM-4.7-Flash 是一个 MoE（混合专家）模型，包含 64 个路由专家（top-4 激活）和 1 个共享专家。共 47 层：1 层 dense 层 + 46 层 MoE 层。
 
-1. 为了支持在 8×H100 环境中运行 GLM-4.7-Flash，我们需要开启 Megatron 的 CPU Adam 以节省显存：
-
-   ```bash
-   OPTIMIZER_ARGS=(
-      ...
-      --optimizer-cpu-offload
-      --overlap-cpu-optimizer-d2h-h2d
-      --use-precision-aware-optimizer
-   )
-   ```
-
-2. 开启 Megatron 支持的 MoE 优化，单机 8×H100 配置为 TP=1, EP=8：
+1. 为了支持在 8×H100 环境中运行 GLM-4.7-Flash，可以开启 FSDP CPU offload 和梯度检查点以节省显存：
 
    ```bash
    PERF_ARGS=(
-      --tensor-model-parallel-size 1
-      --pipeline-model-parallel-size 1
-      --context-parallel-size 1
-      --expert-model-parallel-size 8
-      --expert-tensor-parallel-size 1
-      ...
+      --gradient-checkpointing
+      --fsdp-cpu-offload
+      --use-dynamic-batch-size
+      --max-tokens-per-gpu 4608
    )
    ```
 
-3. 开启 SGLang 支持的 MoE 优化，使用 DP attention：
+2. 开启 SGLang 支持的 MoE 优化，使用 DP attention：
 
    ```bash
    SGLANG_ARGS=(
@@ -122,13 +94,9 @@ SPEC_ARGS=(
 )
 ```
 
-- `--mtp-num-layers 1`：告知 Megatron 从 checkpoint 中加载 MTP 层。
+- `--mtp-num-layers 1`：告知训练后端从 checkpoint 中加载 MTP 层。
 - `--enable-mtp-training`：启用 MTP 层的梯度计算。不设置此标志时，MTP 层会被加载但冻结。
 - `--mtp-loss-scaling-factor 0.2`：MTP loss 相对于主策略 loss 的权重，默认为 0.2。
-
-> **注意**：MTP 训练需要 MTP checkpoint bridge 正确转换 HuggingFace 和 Megatron 格式之间的权重。`GLM4MoELiteBridge`（位于 `slime_plugins/mbridge/glm4moe_lite.py`）扩展了 DeepSeek V3 bridge，实现了动态 MTP 层索引以支持 GLM-4.7-Flash 的 47 层架构。
->
-> 对于其他支持 MTP 训练的模型（如 MiMo），可参考 `scripts/run-mimo-7B-rl-eagle.sh`。
 
 ### 多机支持
 
@@ -144,8 +112,7 @@ bash scripts/run-glm4.7-30B-A3B.sh
 
 - 将训练模型、数据放在所有机器都可以访问到的路径上；
 - 设置各台机器都可以访问到的 `MASTER_ADDR`；
-- 去掉 CPU Adam 相关的配置，因为使用了 distributed optimizer，多机环境下 optimizer 的显存占比会明显下降。
-- 调整并行度：例如 TP=4, PP=2, EP=8, CP=2。
+- 如果不需要，可以去掉 `--fsdp-cpu-offload`，多机 FSDP 分片会降低每张 GPU 的显存占用。
 
 当总卡数并不能被 expert 总数（64）乘除时，可以使用 `--sglang-ep-num-redundant-experts` 来增加冗余的 expert。例如对于 24 卡的场景：
 

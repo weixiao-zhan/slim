@@ -5,13 +5,7 @@ We will publish 2 kinds of docker images:
 2. latest version, which aligns to `lmsysorg/sglang:latest`.
 
 current stable version is:
-- sglang v0.5.9 (bbe9c7eeb520b0a67e92d133dfc137a3688dc7f2), megatron dev 3714d81d418c9f1bca4594fc35f9e8289f652862
-
-history versions:
-- sglang v0.5.7 nightly-dev-20260107-dce8b060 (dce8b0606c06d3a191a24c7b8cbe8e238ab316c9), megatron dev 3714d81d418c9f1bca4594fc35f9e8289f652862
-- sglang v0.5.6 nightly-dev-20251208-5e2cda61 (5e2cda6158e670e64b926a9985d65826c537ac82), megatron v0.14.0 (23e00ed0963c35382dfe8a5a94fb3cda4d21e133)
-- sglang v0.5.5.post1 (303cc957e62384044dfa8e52d7d8af8abe12f0ac), megatron v0.14.0 (23e00ed0963c35382dfe8a5a94fb3cda4d21e133)
-- sglang v0.5.0rc0-cu126 (8ecf6b9d2480c3f600826c7d8fef6a16ed603c3f), megatron 48406695c4efcf1026a7ed70bb390793918dd97b
+- sglang v0.5.9 (bbe9c7eeb520b0a67e92d133dfc137a3688dc7f2)
 
 The command to build:
 
@@ -19,10 +13,8 @@ The command to build:
 just release
 ```
 
-Before each update, we will test the following models with 64xH100:
+Before each update, we will test the following models:
 
-- Qwen3-4B sync
-- Qwen3-4B async
-- Qwen3-30B-A3B sync
-- Qwen3-30B-A3B fp8 sync
-- GLM-4.5-355B-A32B sync
+- Qwen3-1.7B FSDP math
+- Qwen3-4B FSDP true-on-policy
+- Qwen3-VL-4B FSDP

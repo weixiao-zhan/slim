@@ -235,7 +235,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         if args.rollout_max_context_len is not None:
             max_context_length = args.rollout_max_context_len
         else:
-            max_context_length = args.context_parallel_size * args.max_tokens_per_gpu
+            max_context_length = args.max_tokens_per_gpu
         if total_length >= max_context_length:
             sample.status = Sample.Status.TRUNCATED
             break

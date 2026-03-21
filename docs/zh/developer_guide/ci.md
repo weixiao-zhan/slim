@@ -20,9 +20,8 @@ slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——�
 | Label | Job | 说明 |
 |---|---|---|
 | `run-ci-short` | `e2e-test-short` | Qwen2.5-0.5B 轻量级冒烟测试（4 GPU），用于快速反馈。 |
-| `run-ci-fsdp` | `e2e-test-fsdp` | FSDP 后端测试（true on-policy、VL、megatron-fsdp 对齐）。 |
-| `run-ci-megatron` | `e2e-test-megatron` | 核心 Megatron 训练测试，覆盖 Dense、MoE、PPO、MTP、OPD 等。 |
-| `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查、megatron-fsdp 对齐）。 |
+| `run-ci-fsdp` | `e2e-test-fsdp` | FSDP 后端测试（true on-policy、VL 等）。 |
+| `run-ci-precision` | `e2e-test-precision` | 数值精度校验（并行一致性检查等）。 |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint 保存/加载正确性（同步和异步保存）。 |
 | `run-ci-image` | `e2e-test-image` | 在 `slimerl/slime-test:latest` 镜像上运行**全部**测试（用于镜像验证）。 |
 | `run-ci-changed` | `e2e-test-changed` | **动态**检测 PR 中新增或修改的测试文件，仅运行这些测试。 |
@@ -51,16 +50,6 @@ slime 使用 GitHub Actions 进行 CI。测试通过 **PR label** 触发——�
 - 在合并前做全面的测试检查。
 
 由于包含所有测试，GPU 占用时间较长——日常开发请优先使用更有针对性的 label。
-
-### `run-ci-megatron` — 核心 Megatron 测试
-
-这是验证 Megatron 后端改动的主要 label，覆盖：
-
-- Dense 模型：GLM4-9B、Qwen3-4B（PPO）
-- MoE 模型：Qwen3-30B-A3B（有/无 DeepEP + FP8）、Moonlight-16B-A3B
-- 特殊场景：MiMo-7B MTP、Qwen2.5-0.5B debug rollout-then-train、OPD（sglang teacher 模式）
-
-所有测试使用 8 张 GPU。如果你正在修改 Megatron 训练逻辑、loss 计算或 checkpoint 转换，应该使用这个 label。
 
 ## 编写新测试
 

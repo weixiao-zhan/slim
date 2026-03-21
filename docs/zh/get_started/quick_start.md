@@ -4,7 +4,7 @@
 
 ## 基础环境搭建
 
-由于 slime 可能会包含针对 sglang/megatron 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
+由于 slime 可能会包含针对 sglang 的临时补丁（patch）。为避免潜在的环境配置问题，强烈建议**用户使用我们提供的最新 Docker 镜像**，它已预置好所有依赖。
 
 ### 硬件支持说明
 
@@ -15,7 +15,7 @@
 
 **重要说明**：
 - 最新的 Docker 镜像对 B 卡和 H 卡通用，无需额外配置
-- Megatron 后端在 H 卡上具有 CI 保护，经过充分测试验证，推荐生产环境使用
+- FSDP 后端在 H 卡上具有 CI 保护，经过充分测试验证，推荐生产环境使用
 - B 卡基本功能稳定，可作为开发和测试参考，但暂无 CI 保护
 - 两种硬件平台使用完全相同的安装和启动流程
 
@@ -64,45 +64,18 @@ hf download --repo-type dataset zhuzilin/aime-2024 \
   --local-dir /root/aime-2024
 ```
 
-## 模型权重转换
+## Checkpoint 转换
 
-### Hugging Face 格式 转换为 Megatron 格式
+FSDP 可直接加载 HuggingFace checkpoint，训练前无需进行格式转换。
 
-当使用 Megatron 作为训练后端时，需要先将 Hugging Face 格式的模型权重转换为 Megatron `torch_dist` 格式。
-
-首先，加载目标模型的配置文件。`slime/scripts/models` 目录下包含了支持模型的配置文件。需要 `source` 对应模型的脚本，将配置参数加载到当前环境中。此处我们以 GLM4-9B 模型为例子，对于 Qwen3-4B，GLM-4.7-Flash，Qwen3-30B-A3B，是类似的。
+如需将训练过程中保存的 FSDP checkpoint 转换回 HuggingFace 格式，可使用：
 
 ```bash
-cd /root/slime
-source scripts/models/glm4-9B.sh
-```
-
-接下来，运行转换脚本。请注意以下参数：
-- `--hf-checkpoint`: 指定已下载的 Hugging Face 模型权重路径。
-- `--save`: 指定转换后 `torch_dist` 格式权重的保存路径。
-
-```bash
-PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
-    ${MODEL_ARGS[@]} \
-    --hf-checkpoint /root/GLM-Z1-9B-0414 \
-    --save /root/GLM-Z1-9B-0414_torch_dist
-```
-
-对于更大的模型，可以使用 `torchrun` 来启动转换脚本，从而使用多张 GPU 甚至多机进行权重转换。
-注意：kimi-k2模型权重转换时，需打开模型路径中的config.json，将"model_type": "kimi_k2"修改为"model_type": "deepseek_v3"。
-
-### Megatron 格式 转换为 Hugging Face 格式
-
-可以通过这样的方式将训练过程中保存的 Megatron 格式的权重转换回 Huggingface 格式：
-
-```bash
-PYTHONPATH=/root/Megatron-LM python tools/convert_torch_dist_to_hf.py \
-  --input-dir /path/to/torch_dist_ckpt/iter_xxx/ \
-  --output-dir /root/GLM-Z1-9B-0414-iter_xxx \
+python tools/convert_fsdp_to_hf.py \
+  --input-dir /path/to/fsdp_ckpt/ \
+  --output-dir /root/GLM-Z1-9B-0414-converted \
   --origin-hf-dir /root/GLM-Z1-9B-0414
 ```
-
-由于 Megatron 会对 embedding 做 padding，可能会出现转换出来的权重的 embedding 形状不匹配的问题。这时需要在转换时设置 `--vocab-size`。
 
 ## 训练脚本与参数概览
 
@@ -115,31 +88,19 @@ bash scripts/run-glm4-9B.sh
 
 我们还是以 run-glm4-9B.sh 脚本为例，简单分析主要参数的作用。
 
-### MODEL_ARGS: 模型配置参数
+### 模型配置
 
-```bash
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
-```
-
-此部分通过 `source` 命令从 `scripts/models/glm4-9B.sh` 文件中加载模型配置。这些配置均为 Megatron 所需的超参数。由于 Megatron 无法直接从检查点（checkpoint）中读取模型配置，因此需要手动指定。我们在 `scripts/models/` 目录下提供了一些常用模型的配置示例。
-
-> ⚠️ **注意**：
-> 请务必检查模型配置文件中的参数（如 `--rotary-base`）是否与您当前使用的模型完全匹配。同一模型结构的不同版本可能使用不同的配置值。如果需要修改，您可以在 `source` 之后直接覆盖，例如：
-> ```bash
-> source "${SCRIPT_DIR}/models/glm4-9B.sh"
-> MODEL_ARGS+=(--rotary-base 10000)
-> ```
+FSDP 通过 `AutoModelForCausalLM.from_pretrained()` 从 HuggingFace checkpoint 自动加载模型配置，无需手动配置 MODEL_ARGS。
 
 ### CKPT_ARGS: 检查点与路径参数
 
 ```bash
 CKPT_ARGS=(
-   # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
+   # HuggingFace checkpoint 路径（用于模型加载和 tokenizer）
    --hf-checkpoint /root/GLM-Z1-9B-0414
-   # 参考模型 (Reference Model) 的 Megatron 格式检查点
-   --ref-load /root/GLM-Z1-9B-0414_torch_dist
-   # Actor 模型的加载路径。若为空或不存在有效的checkpoint，则从 --ref-load 加载
+   # 参考模型 checkpoint（HuggingFace 格式）
+   --ref-load /root/GLM-Z1-9B-0414
+   # Actor 模型的加载路径。若为空或不存在有效的 checkpoint，则从 --ref-load 加载
    --load /root/GLM-Z1-9B-0414_slime/
    # 训练过程中模型的保存路径
    --save /root/GLM-Z1-9B-0414_slime/
@@ -223,31 +184,22 @@ EVAL_ARGS=(
 )
 ```
 
-### PERF_ARGS: 性能与并行参数
+### PERF_ARGS: 性能参数
 
-这部分主要包含 Megatron 的并行配置。`--use-dynamic-batch-size` 和 `--max-tokens-per-gpu` 是 slime 添加的特有优化。
+这部分包含 FSDP 训练的性能配置。`--use-dynamic-batch-size` 和 `--max-tokens-per-gpu` 是 slime 添加的特有优化。
 
--   `--max-tokens-per-gpu`: 每张 GPU 处理的最大 Token 数。启用动态批处理（`use_dynamic_batch_size`）后，系统会智能地将长短不一的样本打包，使每个 micro-batch 的总 Token 数接近此限制，从而提升训练效率。如果单个样本长度超过该值，它将独立形成一个 batch。在上下文并行（CP）模式下，`N` 张 CP 卡共享 `N * max_tokens_per_gpu` 的总长度。
--   `--use-dynamic-batch-size`: 启用动态批处理。此时会忽略 `--micro-batch-size`。
-
+-   `--max-tokens-per-gpu`: 每张 GPU 处理的最大 Token 数。启用动态批处理（`use_dynamic_batch_size`）后，系统会智能地将长短不一的样本打包，使每个 micro-batch 的总 Token 数接近此限制，从而提升训练效率。如果单个样本长度超过该值，它将独立形成一个 batch。
+-   `--use-dynamic-batch-size`: 启用动态批处理。
+-   `--gradient-checkpointing`: 启用梯度检查点，以额外计算换取更少的 GPU 显存占用。
+-   `--fsdp-cpu-offload`: 将 FSDP 参数卸载到 CPU 以节省 GPU 显存。
 
 > 💡 **提示**：
 >  slime 总是会通过 data packing 的方法训练模型，并且严格保证 per sample loss 或 per token loss 是正确的。因此，开启 dynamic batch size 不会对 loss 计算有影响，强烈推荐开启。
 
 ```bash
 PERF_ARGS=(
-   --tensor-model-parallel-size 2
-   --sequence-parallel
-   --pipeline-model-parallel-size 1
-   --context-parallel-size 2
-   --expert-model-parallel-size 1
-   --expert-tensor-parallel-size 1
+   --gradient-checkpointing
 
-   --recompute-granularity full
-   --recompute-method uniform
-   --recompute-num-layers 1
-
-   # --micro-batch-size 1 # 启用动态批处理后此项被忽略
    --use-dynamic-batch-size
    --max-tokens-per-gpu 4608
 )
@@ -333,7 +285,7 @@ ray job submit ... \
 此时，训练和推理将共享全部 8 张 GPU。
 
 > ⚠️ **注意**：
-> 在训推一体化模式下，Megatron 初始化后才能被 offload 掉，会占据一定量的显存。您需要通过调整 `--sglang-mem-fraction-static` 参数来降低 SGLang 的显存占用比例，以避免显存不足。通常我们建议为 0.8。
+> 在训推一体化模式下，训练后端初始化后才能被 offload 掉，会占据一定量的显存。您需要通过调整 `--sglang-mem-fraction-static` 参数来降低 SGLang 的显存占用比例，以避免显存不足。通常我们建议为 0.8。
 
 > 此外，[torch_memory_saver](https://github.com/fzyzcjy/torch_memory_saver) 里面的一些优化只能在训推一体模式中使用，因为需要释放 GPU 显存。训推分离模式暂不支持。
 
@@ -403,16 +355,10 @@ hf download Qwen/Qwen3-4B-FP8 --local-dir /root/Qwen3-4B-FP8
 并将 `--hf-checkpoint` 替换为：
 
 ```bash
-   # 用于加载 tokenizer 等其他信息，实际上不会使用 hf 路径中的模型权重参数
    --hf-checkpoint /root/Qwen3-4B-FP8
-
-   #  megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的 dist 权重，不因为 FP8 rollout 而去做修改。
-   --ref-load /root/Qwen3-4B_torch_dist
 ```
 
 即可触发 fp8 推理。目前我们会将 bf16 权重直接 cast 为 fp8，后续会逐渐添加对精度影响更小的量化方案。
-
-⚠️  训练的 megatron checkpoint 还需要是最开始用 bf16 的 huggingface 转换的。
 
 
 ## Multiturn 适配
@@ -565,14 +511,8 @@ ray start --address=${MASTER_ADDR}:6379 --num-gpus 8
 
 ```bash
 ray job submit --address="http://127.0.0.1:8265" \
-   --runtime-env-json='{
-     "env_vars": {
-        "PYTHONPATH": "/root/Megatron-LM/",
-        ... # e.g. no_proxy、接口变量等
-     }
-   }' \
    -- python3 train.py \
-   --...（其他 Megatron/SGLang/slime 参数）
+   --...（其他 SGLang/slime 参数）
 ```
 
 slime 针对大规模混合专家（MoE）模型的分布式训练进行了深度优化。我们提供了一些端到端的训练案例以供参考：

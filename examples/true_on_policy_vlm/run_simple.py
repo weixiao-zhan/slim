@@ -76,7 +76,6 @@ def execute():
         # "--fsdp-full-params "  # Uncomment this line to enable full params mode
         # Set the bucket size for weight update
         "--update-weight-buffer-size 536870912 "  # 512MB
-        "--train-backend fsdp "
         "--gradient-checkpointing "
         "--sglang-attention-backend fa3 "
         "--attn-implementation flash_attention_3 "
@@ -125,7 +124,6 @@ def execute():
     execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
-        megatron_model_type=None,
         extra_env_vars={
             **true_on_policy_envs,
         },

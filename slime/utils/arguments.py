@@ -578,8 +578,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "The maximum number of tokens per GPU for dynamic batch size. "
-                    "Note that when enabling context parallel (CP), the max tokens per gpu should be around "
-                    "`max_response_len // cp_size` instead of `max_response_len`."
+                    "Note: this value should typically be close to `max_response_len`."
                 ),
             )
             parser.add_argument(
@@ -605,7 +604,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
-            # change the default value of eval_interval from Megatron to None
             reset_arg(parser, "--eval-interval", type=int, default=None)
 
             parser.add_argument(
@@ -1096,7 +1094,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
-            # use together with --record-memory-history and --memory-snapshot-path (defined in Megatron)
+            # use together with --record-memory-history and --memory-snapshot-path
             parser.add_argument(
                 "--memory-snapshot-dir",
                 type=str,

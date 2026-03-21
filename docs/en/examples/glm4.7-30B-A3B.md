@@ -3,7 +3,7 @@
 
 ## Environment Preparation
 
-The environment setup, data, and checkpoint conversion are the same as for the Qwen3-4B model. You can refer to [Example: Qwen3-4B Model](qwen3-4B.md), replacing mentions of Qwen3-4B with GLM-4.7-Flash.
+The environment setup and data are the same as for the Qwen3-4B model. You can refer to [Example: Qwen3-4B Model](qwen3-4B.md), replacing mentions of Qwen3-4B with GLM-4.7-Flash. No checkpoint conversion is needed -- FSDP loads HuggingFace checkpoints directly.
 
 ### Prerequisites
 
@@ -17,21 +17,6 @@ pip install "transformers>=5.0"
 
 ```bash
 hf download THUDM/GLM-4.7-Flash --local-dir /root/GLM-4.7-Flash
-```
-
-### Convert Checkpoint
-
-To convert the Hugging Face checkpoint to torch_dist format:
-
-```bash
-cd /root/slime
-pip install -e . --no-deps
-source scripts/models/glm4.7-30B-A3B.sh
-PYTHONPATH=/root/Megatron-LM/ torchrun --nproc-per-node 8 \
-   tools/convert_hf_to_torch_dist.py \
-   ${MODEL_ARGS[@]} \
-   --hf-checkpoint /root/GLM-4.7-Flash/ \
-   --save /root/GLM-4.7-Flash_torch_dist/
 ```
 
 ## Run Training
@@ -51,31 +36,18 @@ Here, we will briefly introduce the key parts in the [run-glm4.7-30B-A3B-8gpus.s
 
 GLM-4.7-Flash is a Mixture-of-Experts (MoE) model with 64 routed experts (top-4 activation) and 1 shared expert. It has 47 layers: 1 dense layer + 46 MoE layers.
 
-1.  To support running GLM-4.7-Flash on 8×H100, we need to enable Megatron's CPU Adam to save GPU memory:
-
-    ```bash
-    OPTIMIZER_ARGS=(
-       ...
-       --optimizer-cpu-offload
-       --overlap-cpu-optimizer-d2h-h2d
-       --use-precision-aware-optimizer
-    )
-    ```
-
-2.  Enable MoE optimization in Megatron. For single-node 8×H100, we use TP=1, EP=8:
+1.  To support running GLM-4.7-Flash on 8×H100, you can enable FSDP CPU offloading and gradient checkpointing to save GPU memory:
 
     ```bash
     PERF_ARGS=(
-       --tensor-model-parallel-size 1
-       --pipeline-model-parallel-size 1
-       --context-parallel-size 1
-       --expert-model-parallel-size 8
-       --expert-tensor-parallel-size 1
-       ...
+       --gradient-checkpointing
+       --fsdp-cpu-offload
+       --use-dynamic-batch-size
+       --max-tokens-per-gpu 4608
     )
     ```
 
-3.  Enable MoE optimization in SGLang with DP attention:
+2.  Enable MoE optimization in SGLang with DP attention:
 
     ```bash
     SGLANG_ARGS=(
@@ -123,13 +95,9 @@ SPEC_ARGS=(
 )
 ```
 
-- `--mtp-num-layers 1`: Tells Megatron to load the MTP layer from the checkpoint.
+- `--mtp-num-layers 1`: Tells the training backend to load the MTP layer from the checkpoint.
 - `--enable-mtp-training`: Enables gradient computation for MTP layers. Without this flag, the MTP layer is loaded but frozen.
 - `--mtp-loss-scaling-factor 0.2`: Weight of the MTP loss relative to the main policy loss. Default is 0.2.
-
-> **Note**: MTP training requires the MTP checkpoint bridge to properly convert weights between HuggingFace and Megatron formats. The `GLM4MoELiteBridge` (in `slime_plugins/mbridge/glm4moe_lite.py`) extends the DeepSeek V3 bridge with dynamic MTP layer indexing to support GLM-4.7-Flash's 47-layer architecture.
->
-> For other models with MTP training support (e.g., MiMo), see `scripts/run-mimo-7B-rl-eagle.sh` as a reference.
 
 ### Multi-Node Support
 
@@ -145,8 +113,7 @@ Key modifications for multi-node:
 
   - Place the model and data on a path accessible by all nodes.
   - Set `MASTER_ADDR` to an address accessible by all nodes.
-  - Remove CPU Adam configurations (distributed optimizer reduces per-GPU memory usage).
-  - Adjust parallelism: e.g., TP=4, PP=2, EP=8, CP=2.
+  - Remove `--fsdp-cpu-offload` if not needed. Multi-node FSDP sharding reduces per-GPU memory usage.
 
 When the total number of GPUs is not a multiple or divisor of the total number of experts (64), you can use `--sglang-ep-num-redundant-experts` to add redundant experts. For example, in a 24-GPU scenario:
 

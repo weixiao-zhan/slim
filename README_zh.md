@@ -7,7 +7,7 @@
 
 **slime** 是为 RL scaling 设计的 LLM post‑training 框架，提供两大核心能力：
 
-1. **高性能训练**：通过连接 Megatron 与 SGLang，支持各种模式的高效训练；
+1. **高性能训练**：通过连接 HuggingFace Transformers + PyTorch FSDP2 与 SGLang，支持各种模式的高效训练；
 2. **灵活的数据生成**：通过自定义数据生成接口以及 server based engine，实现任意的数据训练数据生成流程。
 
 slime 是 [GLM-5](https://z.ai/blog/glm-5)、[GLM-4.7](https://z.ai/blog/glm-4.7)、[GLM-4.6](https://z.ai/blog/glm-4.6)、[GLM-4.5](https://z.ai/blog/glm-4.5) 背后的 RL 训练框架，除此之外，slime 还支持:
@@ -38,7 +38,7 @@ slime 是 [GLM-5](https://z.ai/blog/glm-5)、[GLM-4.7](https://z.ai/blog/glm-4.7
 
 **模块说明**：
 
-- **training (Megatron)**：负责主训练流程，从 Data Buffer 读取数据，训练完后将参数同步至 rollout 模块；
+- **training (FSDP)**：负责主训练流程，从 Data Buffer 读取数据，训练完后将参数同步至 rollout 模块；
 - **rollout (SGLang + router)**：生成新数据（含 reward/verifier），存储至 Data Buffer；
 - **data buffer**：桥梁模块，管理 prompt 初始化、自定义数据与 rollout 生成方法。
 
@@ -54,7 +54,7 @@ slime 是 [GLM-5](https://z.ai/blog/glm-5)、[GLM-4.7](https://z.ai/blog/glm-4.7
 
 参数分为三类：
 
-1. **megatron 参数**：slime 会读取 `PYTHONPATH` 中的 megatron 里设置的所有参数，可以通过传入如 `--tensor-model-parallel-size 2` 的方式配置 megatron；
+1. **FSDP 参数**：slime 会读取 FSDP 训练参数，可以通过传入如 `--gradient-checkpointing`、`--fsdp-cpu-offload` 的方式配置 FSDP；
 2. **sglang 参数**：支持环境中安装的 sglang 的所有参数，这些参数需要以 `--sglang` 起始，例如 `--mem-fraction-static` 需要通过 `--sglang-mem-fraction-static` 传入。
 3. **slime 自身的参数**：请见：[slime/utils/arguments.py](slime/utils/arguments.py)
 
@@ -79,7 +79,7 @@ slime 是 [GLM-5](https://z.ai/blog/glm-5)、[GLM-4.7](https://z.ai/blog/glm-4.7
 ## 常见 Q&A 与致谢
 
 - 常见问题请见 [Q&A](docs/zh/get_started/qa.md)
-- 特别感谢以下项目 & 社区：SGLang、Megatron‑LM、mbridge、OpenRLHF、veRL、Pai-Megatron-Patch 等。
+- 特别感谢以下项目 & 社区：SGLang、OpenRLHF、veRL 等。
 
 - 引用 slime 请使用：
 ```bibtex

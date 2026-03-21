@@ -169,7 +169,7 @@ HOOK_CASES = [
         "rollout_data_postprocess",
         "ROLLOUT_DATA_POSTPROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
-        "slime/backends/megatron_utils/actor.py",
+        "slime/backends/fsdp_utils/actor.py",
         "self.rollout_data_postprocess(self.args)",
         ("args",),
         invoke_rollout_data_postprocess,

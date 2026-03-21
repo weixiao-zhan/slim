@@ -45,7 +45,7 @@ class FSDPArgs:
         "gloo"  # CPU backend for FSDP CPU offload (e.g., "gloo"). Set to None to disable hybrid backend.
     )
 
-    deterministic_mode: bool = False  # This name must be the same as Megatron's
+    deterministic_mode: bool = False
 
     # Profile
     record_memory_history: bool = False

@@ -1,13 +1,10 @@
 #!/bin/bash
 
 # Qwen3 VL RL training on geo3k dataset
-# Supports both megatron and fsdp training backends
-# Usage: 
-#   SLIME_SCRIPT_TRAIN_BACKEND=fsdp ./run_geo3k_vlm.sh
+# Usage:
 #   SLIME_SCRIPT_MODEL_NAME=Qwen3-VL-2B-Instruct ./run_geo3k_vlm.sh
 
 # Configuration
-TRAIN_BACKEND=${SLIME_SCRIPT_TRAIN_BACKEND:-"megatron"}
 MODEL_NAME=${SLIME_SCRIPT_MODEL_NAME:-"Qwen3-VL-8B-Instruct"}
 DATASET_NAME=${SLIME_SCRIPT_DATASET_NAME:-"chenhegu/geo3k_imgurl"}
 NUM_GPUS=${SLIME_SCRIPT_NUM_GPUS:-8}
@@ -143,7 +140,7 @@ if [ -n "$WANDB_API_KEY" ]; then
    WANDB_ARGS=(
       --use-wandb
       --wandb-project slime-geo3k-vlm
-      --wandb-group ${MODEL_NAME_LOWER}-${TRAIN_BACKEND}
+      --wandb-group ${MODEL_NAME_LOWER}-fsdp
       --wandb-key ${WANDB_API_KEY}
       --disable-wandb-random-suffix
    )
@@ -155,47 +152,15 @@ MISC_ARGS=(
    --colocate
 )
 
-# Backend-specific args
-if [ "$TRAIN_BACKEND" = "fsdp" ]; then
-   BACKEND_ARGS=(
-      --train-backend fsdp
-      --gradient-checkpointing
-      --sglang-attention-backend fa3
-      --attn-implementation flash_attention_3
-      --update-weight-buffer-size 536870912
-   )
-   MODEL_ARGS=()
-else
-   # megatron backend (default)
-   BACKEND_ARGS=(
-      --train-backend megatron
-      --load /root/models/${MODEL_NAME}
-      --tensor-model-parallel-size 4
-      --sequence-parallel
-      --pipeline-model-parallel-size 1
-      --context-parallel-size 1
-      --expert-model-parallel-size 1
-      --expert-tensor-parallel-size 1
-      --recompute-granularity full
-      --recompute-method uniform
-      --recompute-num-layers 1
-      --use-dynamic-batch-size
-      --max-tokens-per-gpu 4096
-      --attention-dropout 0.0
-      --hidden-dropout 0.0
-      --accumulate-allreduce-grads-in-fp32
-      --attention-softmax-in-fp32
-      --attention-backend flash
-      --megatron-to-hf-mode bridge
-   )
-   
-   # get MODEL_ARGS from scripts/models for megatron backend
-   SLIME_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
-   MODEL_ARGS_FILE=$(echo "$MODEL_NAME" | sed 's/-Instruct//g; s/-Thinking//g; s/Qwen3-VL-/qwen3-/g; s/-2B/-1.7B/g')
-   # VL models require rotary-base 5000000
-   MODEL_ARGS_ROTARY_BASE=5000000 source "${SLIME_DIR}/scripts/models/${MODEL_ARGS_FILE}.sh"
-   
-fi
+BACKEND_ARGS=(
+   --gradient-checkpointing
+   --sglang-attention-backend fa3
+   --attn-implementation flash_attention_3
+   --update-weight-buffer-size 536870912
+   --load /root/models/${MODEL_NAME}
+   --use-dynamic-batch-size
+   --max-tokens-per-gpu 4096
+)
 
 # Start Ray if not using external Ray
 if [ "$USE_EXTERNAL_RAY" = "0" ]; then
@@ -207,8 +172,6 @@ fi
 # Build runtime env
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
   }
 }"
@@ -219,7 +182,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node ${NUM_GPUS} \
    --multimodal-keys "${MULTIMODAL_KEYS}" \
-   ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${EVAL_ARGS[@]} \

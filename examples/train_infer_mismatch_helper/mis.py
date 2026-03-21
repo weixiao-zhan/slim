@@ -2,12 +2,6 @@ from typing import Any
 
 import torch
 
-# NOTE:
-# - `compute_mis_weights` is a lightweight, standalone function that is useful to unit-test on CPU.
-# - `compute_mis_weights_with_cp` depends on Megatron context-parallel utilities, which are heavy and may not be
-#   available in minimal environments.
-# To keep `mis.py` importable for unit tests, we lazily import CP utilities inside `compute_mis_weights_with_cp`.
-
 
 def masked_sum(x: torch.Tensor, loss_mask: torch.Tensor, expand: bool = False) -> torch.Tensor:
     result = (x * loss_mask).sum()
@@ -307,79 +301,6 @@ def compute_mis_weights(
     return all_weights, all_modified_masks, metrics
 
 
-def compute_mis_weights_with_cp(
-    args,
-    *,
-    pg_loss: torch.Tensor,
-    train_log_probs: list[torch.Tensor],
-    rollout_log_probs: list[torch.Tensor],
-    loss_masks: list[torch.Tensor],
-    total_lengths: list[int],
-    response_lengths: list[int],
-    **kwargs: Any,
-) -> tuple[torch.Tensor, list[torch.Tensor], dict[str, torch.Tensor]]:
-    """
-    Compute the importance sampling (IS) weights and metrics with context parallel.
-    Args:
-        train_log_probs: List of log probs from training backend on this cp rank. 1D tensor each. Lengths can be different.
-        rollout_log_probs: List of log probs from inference backend on this cp rank. 1D tensor each.
-        loss_masks: List of loss masks. 1D tensor each.
-        total_lengths: List of total lengths.
-        response_lengths: List of response lengths.
-    Returns:
-        pg_loss: Policy gradient loss with IS weights applied (flattened along dim=0).
-        modified_masks: List of modified response masks with rejection applied (one per sequence).
-        is_metrics: The metrics for the importance sampling weights, a dict of flattened tensors.
-    """
-    # Lazy import to avoid importing Megatron dependencies when only `compute_mis_weights` is used.
-    from slime.backends.megatron_utils.cp_utils import all_gather_with_cp, slice_log_prob_with_cp
-
-    # Gather cp slice from other cp ranks
-    full_rollout_log_probs = [
-        all_gather_with_cp(log_prob, total_length, response_length)
-        for log_prob, total_length, response_length in zip(
-            rollout_log_probs, total_lengths, response_lengths, strict=False
-        )
-    ]
-    full_old_log_probs = [
-        all_gather_with_cp(old_log_prob, total_length, response_length)
-        for old_log_prob, total_length, response_length in zip(
-            train_log_probs, total_lengths, response_lengths, strict=False
-        )
-    ]
-
-    # Main logic for is (decoupled)
-    is_weights, modified_masks, is_metrics = compute_mis_weights(
-        args=args,
-        train_log_probs=full_old_log_probs,
-        rollout_log_probs=full_rollout_log_probs,
-        loss_masks=loss_masks,
-    )
-
-    # Slice out the value shards for this CP rank and concat them into a 1D tensor along dim=0 for loss.py computation.
-    def slice_cp_and_concat(
-        values: list[torch.Tensor], total_lengths: list[int], response_lengths: list[int]
-    ) -> torch.Tensor:
-        values = [
-            # TODO: A rename of this function?
-            slice_log_prob_with_cp(values[i], total_lengths[i], response_lengths[i])
-            for i in range(len(values))
-        ]
-        return torch.cat(values, dim=0)
-
-    result_metrics = {}
-    if is_weights is not None:
-        is_weights = slice_cp_and_concat(is_weights, total_lengths, response_lengths)
-        pg_loss = pg_loss * is_weights
-
-    for key, values in is_metrics.items():
-        key_name = f"mis_{key}"
-        values = slice_cp_and_concat(values, total_lengths, response_lengths)
-        result_metrics[key_name] = values
-
-    return pg_loss, modified_masks, result_metrics
-
-
 def add_ppl_metrics(
     train_log_prob: torch.Tensor,
     rollout_log_prob: torch.Tensor,
@@ -468,7 +389,7 @@ def compute_mis_weights_fsdp(
         train_log_probs: Training log probs, list of 1D tensors per sequence
         rollout_log_probs: Rollout log probs, list of 1D tensors per sequence
         loss_masks: Loss masks, list of 1D tensors per sequence
-        **kwargs: Additional arguments (cp_rank, cp_size, etc.) for compatibility
+        **kwargs: Additional arguments for compatibility
 
     Returns:
         pg_loss: Policy gradient loss with IS weights applied
