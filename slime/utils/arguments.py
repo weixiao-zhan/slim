@@ -107,6 +107,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
         def add_train_arguments(parser):
             parser.add_argument(
+                "--true-on-policy-mode",
+                action="store_true",
+                default=False,
+                help="Whether to enable true-on-policy mode.",
+            )
+            parser.add_argument(
                 "--train-env-vars",
                 type=json.loads,
                 default="{}",

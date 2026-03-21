@@ -26,7 +26,7 @@ class FSDPArgs:
     adam_eps: float = 1e-8
     warmup_ratio: float = 0.03
 
-    attn_implementation: str = "flash_attention_2"
+    attn_implementation: str = "sdpa"
 
     # Logging
     wandb_project: str = "slime-fsdp"

@@ -18,6 +18,21 @@ _ = exec_command, dataclass_cli
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
 
 
+def _get_nvidia_ld_library_path() -> dict[str, str]:
+    """Auto-detect nvidia lib paths from pip-installed packages for LD_LIBRARY_PATH."""
+    try:
+        import glob
+
+        nvidia_base = os.path.join(os.path.dirname(os.path.dirname(__import__("nvidia").__file__)), "nvidia")
+        lib_dirs = glob.glob(os.path.join(nvidia_base, "*/lib"))
+        if lib_dirs:
+            existing = os.environ.get("LD_LIBRARY_PATH", "")
+            return {"LD_LIBRARY_PATH": ":".join(lib_dirs) + (f":{existing}" if existing else "")}
+    except (ImportError, Exception):
+        pass
+    return {}
+
+
 def rsync_simple(path_src: str, path_dst: str):
     exec_command(f"mkdir -p {path_dst} && rsync -a --info=progress2 {path_src}/ {path_dst}")
 
@@ -78,6 +93,7 @@ def execute_train(
                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
                 "no_proxy": f"127.0.0.1,{master_addr}",
                 "MASTER_ADDR": master_addr,
+                **(_get_nvidia_ld_library_path()),
                 **(
                     {
                         "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "1",
@@ -95,9 +111,10 @@ def execute_train(
     )
 
     if get_bool_env_var("SLIME_SCRIPT_ENABLE_RAY_SUBMIT", "1"):
+        ray_dashboard_port = os.environ.get("RAY_DASHBOARD_PORT", "8265")
         exec_command(
             f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
-            f'ray job submit --address="http://127.0.0.1:8265" '
+            f'ray job submit --address="http://127.0.0.1:{ray_dashboard_port}" '
             f"--runtime-env-json='{runtime_env_json}' "
             f"-- python3 {train_script} "
             f"{train_args}"
