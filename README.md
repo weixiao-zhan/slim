@@ -2,13 +2,24 @@
 
 **mini-slime** is a lightweight fork of [slime](https://github.com/THUDM/slime) (v0.2.3) that is better suitted for research and prototype.
 
-We love slime — it is versatile, well-customizable. However, slime is [deprecating its FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron-only. 
+We love slime — it is versatile, well-customizable. 
 Meanwhile, we also love HF Transformers and PyTorch FSDP — they are simple and sufficient.
+However, slime is [deprecating its FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron-only. 
 
-## Roadmap
+Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while reducing the intrusion on dataset and enhensing concurrency. With FSDP backend, you can directly customize the HF model. 
 
-- [] multi-thread dataloading
-- [] Add PEFT
+### 🏗️ Roadmap
+
+- [ ] Add PEFT
+- [ ] Threadpooled generation (when GIL is deprecated, the agents will able to run truely concurrently)
+- [x] Improve dataset loading: dataset should be prepared in a format readily consumable by the tokenizer. Defer apply chat template to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
+- [x] Remove megatron dependency. No more mbridge converter and docker. Its `uv` friendly now.
+
+### 🚧 Known Broken Features
+
+- **R2 (Routing Replay) and R3 (Rollout Routing Replay)** were implemented for Megatron actor only. HF transformers does not support router replay yet.
+- **sglang v0.5.9** release won't load Qwen3-VL vision weight correctly. [fix](https://github.com/sgl-project/sglang/commit/d566816d838ce92d3ae044209f7d67eaa58ce74a)
+
 
 ## What Changed from Upstream slime
 
@@ -20,9 +31,6 @@ Meanwhile, we also love HF Transformers and PyTorch FSDP — they are simple and
 | Dependencies | Megatron-LM, mbridge, apex, TransformerEngine | HuggingFace Transformers, accelerate (now, its `uv` friendly!) |
 | Model size target | Up to 355B+ (multi-node, full parallelism) | Up to ~30B (where most small open-source models tops) |
 
-### Known Broken Features
-
-- **R2 (Routing Replay) and R3 (Rollout Routing Replay)** were implemented for Megatron actor only.
 
 ## Quick Start
 
