@@ -1,10 +1,79 @@
-[build-system]
-requires = [
-    "packaging",
-    "setuptools >= 49.4.0",
-    "wheel",
+[project]
+name = "minislime"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate",
+    "blobfile",
+    "datasets",
+    "httpx[http2]",
+    "mcp[cli]",
+    "numba",
+    "omegaconf",
+    "pillow",
+    "pybase64",
+    "pylatexenc",
+    "pyyaml",
+    "qwen_vl_utils",
+    "ray[default]",
+    "ring_flash_attn",
+    "sglang[all]>=0.5.9",
+    "sglang-router>=0.2.3",
+    "tensorboard",
+    "transformers",
+    "wandb",
 ]
-build-backend = "setuptools.build_meta"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.optional-dependencies]
+dev = [
+    "memray",
+    "pre-commit",
+    "pytest",
+]
+docs = [
+    "gguf>=0.10.0",
+    "ipykernel",
+    "ipywidgets",
+    "jupyter_client",
+    "markdown>=3.4.0",
+    "matplotlib",
+    "myst-parser",
+    "nbconvert",
+    "nbsphinx",
+    "nbstripout",
+    "pandoc",
+    "pydantic",
+    "sphinx",
+    "sphinx-autobuild",
+    "sphinx-book-theme",
+    "sphinx-copybutton",
+    "sphinx-tabs",
+    "sphinxcontrib-mermaid",
+    "urllib3<2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["slime", "slime_plugins"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [tool.isort]
 profile = "black"  # black-compatible
@@ -17,7 +86,6 @@ extend_skip = ["setup.py", "docs/source/conf.py"]
 known_first_party = ["slime", "slime_plugins"]
 known_third_party = ["megatron", "wandb", "ray", "transformers"]
 src_paths = ["slime", "slime_plugins"]
-
 
 [tool.black]
 line_length = 119
