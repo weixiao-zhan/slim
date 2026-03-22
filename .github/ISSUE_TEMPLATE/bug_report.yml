@@ -69,7 +69,6 @@ body:
         - GPU type and count:
         - OS:
         - SGLang version (if relevant):
-        - Megatron-LM version (if relevant):
     validations:
       required: true
 

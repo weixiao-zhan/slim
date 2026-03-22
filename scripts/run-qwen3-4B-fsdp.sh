@@ -95,7 +95,6 @@ SGLANG_ARGS=(
 )
 
 TRAIN_BACKEND_ARGS=(
-   --train-backend fsdp
    --update-weight-buffer-size 536870912
    --gradient-checkpointing
    --attn-implementation flash_attention_3

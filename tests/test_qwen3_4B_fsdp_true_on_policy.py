@@ -44,7 +44,7 @@ def execute(args):
         "--eval-top-p 0.7 "
     )
 
-    fsdp_args = "--train-backend fsdp " "--update-weight-buffer-size 536870912 "
+    fsdp_args = "--update-weight-buffer-size 536870912 "
 
     grpo_args = (
         "--advantage-estimator grpo "

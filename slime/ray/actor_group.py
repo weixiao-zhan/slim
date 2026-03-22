@@ -65,9 +65,7 @@ class RayTrainGroup:
 
         from slime.backends.fsdp_utils import FSDPTrainRayActor
 
-        actor_impl = FSDPTrainRayActor
-
-        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(actor_impl)
+        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(FSDPTrainRayActor)
 
         # Create worker actors
         self._actor_handlers = []
