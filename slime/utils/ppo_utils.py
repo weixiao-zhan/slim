@@ -4,7 +4,6 @@
 from argparse import Namespace
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 
 
@@ -353,5 +352,3 @@ def chunked_gae(
     returns = advantages + values
 
     return advantages, returns
-
-

@@ -5,12 +5,14 @@ import logging
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 import pybase64
 import sglang_router
+import torch
 from packaging.version import parse
 from tqdm import tqdm
 
@@ -66,9 +68,14 @@ class GenerateState(metaclass=SingletonMeta):
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        self.semaphore = asyncio.Semaphore(concurrency)
+        self.cpu_executor = ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="sglang_processor",
         )
+        self.apply_chat_template = getattr(args, "apply_chat_template", False)
+        self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
@@ -126,28 +133,62 @@ class GenerateState(metaclass=SingletonMeta):
 
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
     """Generate using traditional SGLang router with token-based workflow"""
-    if args.ci_test:
-        assert isinstance(sample.prompt, str)
-
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    loop = asyncio.get_event_loop()
 
     assert (
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    if state.processor and sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
-        processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
-        processor_output = state.processor(text=sample.prompt, **processor_kwargs)
-        prompt_ids = processor_output["input_ids"][0]
-        sample.multimodal_train_inputs = {
-            k: v for k, v in processor_output.items() if k not in ["input_ids", "attention_mask"]
-        } or None
+    # Apply chat template: convert conversation (list) or raw string to a templated string.
+    # For multi-turn (response > 0), prompt was already converted on the first turn.
+    prompt_for_processing = sample.prompt
+    if isinstance(sample.prompt, list):
+        messages = sample.prompt
+        tools = sample.tools
+    elif isinstance(sample.prompt, str) and state.apply_chat_template:
+        messages = [{"role": "user", "content": sample.prompt}]
+        tools = None
     else:
-        prompt_ids = state.tokenizer.encode(sample.prompt, add_special_tokens=False)
+        messages = None
+        tools = None
+
+    if messages is not None:
+        prompt_for_processing = await loop.run_in_executor(
+            state.cpu_executor,
+            lambda: state.tokenizer.apply_chat_template(
+                messages, tools=tools, tokenize=False, add_generation_prompt=True, **state.chat_template_kwargs
+            ),
+        )
+        sample.prompt = prompt_for_processing
+
+    has_multimodal = sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values())
+
+    # Tokenize: always produce sglang_prompt_ids (non-expanded, for sglang).
+    # For VLM, also produce expanded_prompt_ids (with vision tokens, for training).
+    sglang_prompt_ids = await loop.run_in_executor(
+        state.cpu_executor,
+        lambda: state.tokenizer.encode(prompt_for_processing, add_special_tokens=False),
+    )
+    expanded_prompt_ids = sglang_prompt_ids
+
+    if state.processor and has_multimodal:
+        processor_kwargs = build_processor_kwargs(sample.multimodal_inputs)
+        processor_output = await loop.run_in_executor(
+            state.cpu_executor,
+            lambda: state.processor(text=prompt_for_processing, **processor_kwargs),
+        )
+        raw_ids = processor_output["input_ids"][0]
+        expanded_prompt_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
+        sample.multimodal_train_inputs = {
+            k: v
+            for k, v in processor_output.items()
+            if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
+        } or None
 
     if len(sample.response) > 0:
-        sampling_params["max_new_tokens"] -= len(sample.tokens) - len(prompt_ids)
+        sampling_params["max_new_tokens"] -= len(sample.tokens) - len(expanded_prompt_ids)
 
     assert (
         sampling_params["max_new_tokens"] >= 0
@@ -165,17 +206,19 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 
-    if sample.multimodal_inputs and sample.multimodal_inputs["images"]:
+    if has_multimodal and sample.multimodal_inputs.get("images"):
         image_data = sample.multimodal_inputs["images"]
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
+        payload["image_data"] = await asyncio.gather(
+            *[loop.run_in_executor(state.cpu_executor, encode_image_for_rollout_engine, img) for img in image_data]
+        )
 
     # Use existing tokens for multi-turn or tokenize the new prompt
     if len(sample.response) > 0:
         payload["input_ids"] = sample.tokens
     else:
-        payload["input_ids"] = prompt_ids
-        if not sample.tokens:  # Initialize sample.tokens for the first turn
-            sample.tokens = prompt_ids
+        payload["input_ids"] = sglang_prompt_ids
+        if not sample.tokens:  # Initialize sample.tokens with expanded IDs for training
+            sample.tokens = list(expanded_prompt_ids)
 
     # Use session_id for consistent hashing routing if router uses consistent_hashing policy
     headers = None
@@ -491,22 +534,15 @@ async def eval_rollout_single_dataset(
 
     global EVAL_PROMPT_DATASET
 
-    cache_key = dataset_cfg.cache_key + (args.hf_checkpoint, args.apply_chat_template)
+    cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
-        tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-        processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
         EVAL_PROMPT_DATASET[cache_key] = Dataset(
             path=dataset_cfg.path,
-            tokenizer=tokenizer,
-            processor=processor,
-            max_length=args.eval_max_prompt_len,
             prompt_key=dataset_cfg.input_key,
             label_key=dataset_cfg.label_key,
             multimodal_keys=args.multimodal_keys,
             metadata_key=dataset_cfg.metadata_key,
             tool_key=dataset_cfg.tool_key,
-            apply_chat_template=args.apply_chat_template,
-            apply_chat_template_kwargs=args.apply_chat_template_kwargs,
         )
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
@@ -527,8 +563,12 @@ async def eval_rollout_single_dataset(
     sample_index = 0
     for _i, prompt_sample in enumerate(dataset.samples):
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
-            # use the same prompt for multiple samples
+            # Avoid deepcopying multimodal_inputs (PIL images) — expensive and read-only
+            saved_multimodal = prompt_sample.multimodal_inputs
+            prompt_sample.multimodal_inputs = None
             sample = copy.deepcopy(prompt_sample)
+            prompt_sample.multimodal_inputs = saved_multimodal
+            sample.multimodal_inputs = saved_multimodal
             sample.index = sample_index
             sample_index += 1
             sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))

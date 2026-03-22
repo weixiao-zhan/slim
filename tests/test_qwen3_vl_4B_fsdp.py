@@ -4,21 +4,20 @@ import slime.utils.external_utils.command_utils as U
 ENABLE_EVAL = bool(int(os.environ.get("SLIME_TEST_ENABLE_EVAL", "1")))
 NUM_GPUS = 8
 
-MODEL_NAME = "Qwen3-VL-4B-Instruct"
-DATASET_NAME = "chenhegu/geo3k_imgurl"
+MODEL_NAME = "Qwen3.5-4B"
+MODEL_DIR = os.environ.get("VLM_MODEL_DIR", "/home/ubuntu/models/Qwen3.5-4B")
+DATASET_DIR = os.environ.get("VLM_DATASET_DIR", "/home/ubuntu/datasets/vlm_test")
 
 
 def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"hf download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    U.hf_download_dataset(DATASET_NAME)
+    pass
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME} "
+    ckpt_args = f"--hf-checkpoint {MODEL_DIR} "
 
     rollout_args = (
-        "--prompt-data /root/datasets/geo3k_imgurl/train.parquet "
+        f"--prompt-data {DATASET_DIR}/train.parquet "
         "--input-key problem "
         "--label-key answer "
         "--apply-chat-template "
@@ -32,12 +31,12 @@ def execute():
         "--global-batch-size 32 "
     )
 
-    # multimodal keys required for vlm datasets
+    # multimodal keys: maps type name -> column name in the dataset
     multimodal_args = '--multimodal-keys \'{"image": "images"}\' '
 
     eval_args = (
         f"{'--eval-interval 20 ' if ENABLE_EVAL else ''}"
-        "--eval-prompt-data geo3k /root/datasets/geo3k_imgurl/test.parquet "
+        f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
         "--eval-max-response-len 4096 "
     )
@@ -70,14 +69,14 @@ def execute():
         "--sglang-enable-metrics "
         # "--sglang-enable-deterministic-inference "
         # "--sglang-rl-on-policy-target fsdp "
-        "--sglang-attention-backend fa3 "
-        "--attn-implementation flash_attention_3 "
+        "--sglang-attention-backend flashinfer "
+        "--attn-implementation sdpa "
         "--sglang-cuda-graph-max-bs 32 "
         # "--deterministic-mode "
         # "--true-on-policy-mode "
     )
 
-    ci_args = "--ci-test "
+    ci_args = ""
 
     misc_args = "--actor-num-nodes 1 " f"--actor-num-gpus-per-node {NUM_GPUS} " "--colocate "
 
@@ -100,6 +99,7 @@ def execute():
         # "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         # "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "SGLANG_DISABLE_CUDNN_CHECK": "1",
     }
 
     U.execute_train(

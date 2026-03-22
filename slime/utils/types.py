@@ -13,20 +13,21 @@ class Sample:
     index: int | None = None
     # prompt
     prompt: str | list[dict[str, str]] = ""
-    tokens: list[int] = field(default_factory=list)
-    multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data, e.g. images, videos, etc.
-    multimodal_train_inputs: dict[str, Any] | None = None  # processed multimodal data, e.g. pixel_values, etc.
+    tokens: list[int] = field(default_factory=list)  # full sequence: prompt + response tokens
+    multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data, e.g. PIL images
+    multimodal_train_inputs: dict[str, Any] | None = None  # processed multimodal tensors, e.g. pixel_values
+    tools: list[dict] | None = None  # function-calling tool definitions for chat template
     # response
     response: str = ""
     response_length: int = 0
     label: str | None = None
     reward: float | dict[str, Any] | None = None
-    loss_mask: list[int] | None = None
+    loss_mask: list[int] | None = None  # len = response_length (response portion only)
     weight_versions: list[str] = field(default_factory=list)
-    rollout_log_probs: list[float] | None = None  # Log probabilities from rollout engine
-    rollout_routed_experts: list[list[int]] | None = None  # Routed experts from rollout engine
+    rollout_log_probs: list[float] | None = None  # len = response_length (response portion only)
+    rollout_routed_experts: list[list[int]] | None = None  # shape [len(tokens)-1, layers, topk]
     remove_sample: bool = False
-    teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
+    teacher_log_probs: list[float] | None = None  # len = response_length (response portion only), for OPD
 
     class Status(Enum):
         PENDING = "pending"

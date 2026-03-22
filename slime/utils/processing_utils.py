@@ -1,4 +1,5 @@
 import base64
+import copy
 import io
 import logging
 
@@ -48,7 +49,9 @@ def load_processor(name_or_path: str, **kwargs):
 
 
 def process_vision_info(prompt, processor):
-    # TODO: temporary solution, will write image utils for slime later
+    # Deprecated: datasets should provide PIL images directly via --multimodal-keys columns.
+    # This function exists only for backward compatibility with datasets that embed image
+    # references in conversation messages (e.g. {"type": "image", "image": "url"}).
     from qwen_vl_utils import process_vision_info as qwen_process_vision_info
 
     if hasattr(processor.image_processor, "patch_size"):
@@ -56,7 +59,22 @@ def process_vision_info(prompt, processor):
     else:
         logger.info(f"Using default patch size: {DEFAULT_PATCH_SIZE}")
         image_patch_size = DEFAULT_PATCH_SIZE
-    images, videos = qwen_process_vision_info(prompt, image_patch_size=image_patch_size)
+
+    # Normalize OpenAI image_url format to Qwen format before processing.
+    # qwen_vl_utils expects {"type": "image", "image": url} but OpenAI format
+    # uses {"type": "image_url", "image_url": {"url": ...}}.
+    normalized = copy.deepcopy(prompt)
+    for msg in normalized:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                image_url = item.pop("image_url", {})
+                item["type"] = "image"
+                item["image"] = image_url.get("url", "") if isinstance(image_url, dict) else image_url
+
+    images, videos = qwen_process_vision_info(normalized, image_patch_size=image_patch_size)
     multimodal_inputs = {"images": images, "videos": videos}
     return multimodal_inputs
 

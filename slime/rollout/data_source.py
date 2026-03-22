@@ -2,13 +2,11 @@ import abc
 import copy
 import logging
 import os
-from pathlib import Path
 
 import torch
 
 from slime.utils.data import Dataset
 from slime.utils.misc import load_function
-from slime.utils.processing_utils import load_processor, load_tokenizer
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -59,27 +57,13 @@ class RolloutDataSource(DataSource):
         self.metadata = {}
 
         if args.rollout_global_dataset:
-            tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-            processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
-
-            # TODO move (during the refactor)
-            if (d := args.dump_details) is not None:
-                tokenizer.save_pretrained(Path(d) / "tokenizer")
-                if processor:
-                    processor.save_pretrained(Path(d) / "processor")
-
             self.dataset = Dataset(
                 args.prompt_data,
-                tokenizer=tokenizer,
-                processor=processor,
-                max_length=args.rollout_max_prompt_len,
                 prompt_key=args.input_key,
                 multimodal_keys=args.multimodal_keys,
                 label_key=args.label_key,
                 metadata_key=args.metadata_key,
                 tool_key=args.tool_key,
-                apply_chat_template=args.apply_chat_template,
-                apply_chat_template_kwargs=args.apply_chat_template_kwargs,
                 seed=args.rollout_seed,
             )
             if self.args.rollout_shuffle:
@@ -107,12 +91,17 @@ class RolloutDataSource(DataSource):
         samples = []
         for prompt_sample in prompt_samples:
             group = []
+            # Avoid deepcopying multimodal_inputs (PIL images) — expensive and read-only
+            saved_multimodal = prompt_sample.multimodal_inputs
+            prompt_sample.multimodal_inputs = None
             for _ in range(self.args.n_samples_per_prompt):
                 sample = copy.deepcopy(prompt_sample)
+                sample.multimodal_inputs = saved_multimodal  # shared reference, read-only
                 sample.group_index = self.sample_group_index
                 sample.index = self.sample_index
                 self.sample_index += 1
                 group.append(sample)
+            prompt_sample.multimodal_inputs = saved_multimodal
             self.sample_group_index += 1
             samples.append(group)
         return samples
