@@ -1,15 +1,16 @@
 # Search-R1 lite
 
-This is a minimal reproduction of [Search-R1](https://github.com/PeterGriffinJin/Search-R1) and an example of using multi-turn conversation and tool-calling in slime.
+This is a minimal reproduction of [Search-R1](https://github.com/PeterGriffinJin/Search-R1) and an example of using multi-turn conversation and tool-calling in minislime.
 
 ## Environment Setup
 
-Use the `slimerl/slime:latest` image and initialize the environment required for Search-R1:
+Clone and install minislime, then set up Search-R1:
 
 ```bash
 cd /root/
-git clone https://github.com/THUDM/slime.git
-pip install -e . --no-deps
+git clone <your-minislime-repo> minislime
+cd minislime
+pip install -e .
 # for Search R1
 pip install chardet
 ```
@@ -150,13 +151,13 @@ CUSTOM_ARGS=(
 ## Running the Script
 
 ```bash
-cd slime/
+cd minislime/
 bash examples/search-r1/run_qwen2.5_3B.sh
 ```
 
 ## Code Structure
 
-To implement multi-turn conversation + tool-calling in slime, you only need to implement a custom data generation function and a reward model for the task. These correspond to the following 2 configuration items in the startup script:
+To implement multi-turn conversation + tool-calling in minislime, you only need to implement a custom data generation function and a reward model for the task. These correspond to the following 2 configuration items in the startup script:
 
 ```bash
 CUSTOM_ARGS=(
@@ -219,7 +220,7 @@ pip install uvicorn fastapi
 save_path=/root/Index
 
 # Download the index and corpus files
-python /root/slime/examples/search-r1/local_dense_retriever/download.py --save_path $save_path
+python /root/minislime/examples/search-r1/local_dense_retriever/download.py --save_path $save_path
 
 # Combine split index files
 cat $save_path/part_* > $save_path/e5_Flat.index
@@ -247,7 +248,7 @@ retriever_name=e5
 retriever_path=intfloat/e5-base-v2
 
 # Start the retrieval server
-python /root/slime/examples/search-r1/local_dense_retriever/retrieval_server.py \
+python /root/minislime/examples/search-r1/local_dense_retriever/retrieval_server.py \
     --index_path $index_file \
     --corpus_path $corpus_file \
     --topk 3 \
@@ -268,7 +269,7 @@ python /root/slime/examples/search-r1/local_dense_retriever/retrieval_server.py 
 Make sure you're **NOT** in the retriever conda environment. If you are, run `conda deactivate`.
 
 ```bash
-cd /root/slime
+cd /root/minislime
 
 # Set your wandb key (optional)
 export WANDB_KEY="your_wandb_key_here"
@@ -278,7 +279,7 @@ export WANDB_KEY="your_wandb_key_here"
 # rm -rf /root/.*
 
 # Run the training script
-bash /root/slime/examples/search-r1/run_qwen2.5_3B.sh
+bash /root/minislime/examples/search-r1/run_qwen2.5_3B.sh
 ```
 
 ### Troubleshooting

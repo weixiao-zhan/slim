@@ -1,31 +1,28 @@
-# slime Documentation
+# minislime Documentation
 
-We recommend new contributors start from writing documentation, which helps you quickly understand slime codebase.
-Most documentation files are located under the `docs/` folder.
+## [Rollout](rollout/README.md)
+SGLang setup, parameter pass-through, rollout args, dynamic sampling, partial rollout, evaluation.
+- [SGLang Config](rollout/sglang-config.md) -- Multi-model serving, PD disaggregation, YAML deployment
+- [Slime Router](rollout/slime-router.md) -- Training-oriented HTTP router
+- [Speculative Decoding](rollout/speculative-decoding.md) -- MTP draft model acceleration
+- [On-Policy Distillation](rollout/on-policy-distillation.md) -- Teacher-student distillation
+- [Fault Tolerance](rollout/fault-tolerance.md) -- Heartbeat-based recovery
+- [PD Disaggregation](rollout/pd-disaggregation.md) -- Prefill-decode separation
 
-## Docs Workflow
+## [Training](training/README.md)
+Installation, GPU allocation, checkpoints, data format, RL algorithms (GRPO/PPO), multi-node, FAQ.
+- [Low Precision](training/low-precision.md) -- FP8 inference, INT4 QAT
+- [Reproducibility](training/reproducibility.md) -- Deterministic bitwise training
+- [Debugging](training/debug.md) -- Precision alignment, separate debugging
+- [Profiling](training/profiling.md) -- Rollout performance analysis
+- [CI](training/ci.md) -- GitHub Actions workflow
 
-### Install Dependency
+## [Customization](customization/README.md)
+All extension points: rollout functions, reward models, filters, loss functions, logging, multi-turn/agentic adaptation.
 
-```bash
-apt-get update && apt-get install -y pandoc parallel retry
-pip install -r requirements.txt
-```
+## [Examples](examples/README.md)
+- [Qwen3-30B-A3B (MoE)](examples/qwen3-30B-A3B.md)
+- [GLM-4.7-Flash (MoE + MTP)](examples/glm4.7-30B-A3B.md)
+- [Qwen3-4B SFT](examples/qwen3-4b-base-openhermes.md)
 
-### Update Documentation
-
-You can update the documentation in the en and zh folders by adding Markdown or Jupyter Notebook files to the appropriate subdirectories. If you create new files, make sure to update index.rst (or any other relevant .rst files) accordingly.
-
-## Build and Render
-
-```bash
-# build english version
-bash ./build.sh en
-bash ./serve.sh en
-
-# build chinese version
-bash ./build.sh zh
-bash ./serve.sh zh
-```
-
-You can then visit `http://localhost:8000` to view the documentation.
+Also see runnable [examples/](../examples/) for VLM, search, and tool-use workflows.

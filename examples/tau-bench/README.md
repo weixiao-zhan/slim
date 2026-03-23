@@ -1,27 +1,27 @@
-# Tau bench 
-This example shows slime training in an agentic multi-turn tool use environment. 
+# Tau bench
+This example shows minislime training in an agentic multi-turn tool use environment.
 
 
-## Environment Setup 
-Use the `zhuzilin/slime:latest` image and initialize the environment required for Search-R1:
+## Environment Setup
+Clone and install minislime, then set up tau-bench:
 
 ```bash
 cd /root/
-git clone https://github.com/THUDM/slime.git
-cd slime
-pip install -e . --no-deps
-# for tau bench 
+git clone <your-minislime-repo> minislime
+cd minislime
+pip install -e .
+# for tau bench
 cd /root/
 git clone https://github.com/JD-ETH/tau-bench.git
 cd tau-bench
 git checkout feature/litellm-retry
-pip install -e . --no-deps 
+pip install -e . --no-deps
 ```
 
-Use the following script to generate mock data for slime training. 
+Use the following script to generate mock data for minislime training. 
 
 ```bash
-cd /root/slime/examples/tau-bench
+cd /root/minislime/examples/tau-bench
 python tau1_mock.py --local_dir /root/tau-bench/
 ```
 
@@ -54,6 +54,6 @@ And run:
 
 
 ```bash
-cd /root/slime
+cd /root/minislime
 bash examples/tau-bench/run_qwen3_4B.sh
 ```

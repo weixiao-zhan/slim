@@ -2,16 +2,17 @@
 
 [English](./README.md)
 
-这里是一个对 [Search-R1](https://github.com/PeterGriffinJin/Search-R1) 的简单复现，以及是一个在 slime 中使用多轮对话和工具调用的样例。
+这里是一个对 [Search-R1](https://github.com/PeterGriffinJin/Search-R1) 的简单复现，以及是一个在 minislime 中使用多轮对话和工具调用的样例。
 
 ## 配置环境
 
-使用 `slimerl/slime:latest` 镜像，并初始化 Search-R1 需要的环境：
+克隆并安装 minislime，然后配置 Search-R1 环境：
 
 ```bash
 cd /root/
-git clone https://github.com/THUDM/slime.git
-pip install -e . --no-deps
+git clone <your-minislime-repo> minislime
+cd minislime
+pip install -e .
 # for Search R1
 pip install chardet
 ```
@@ -150,13 +151,13 @@ CUSTOM_ARGS=(
 ## 运行脚本
 
 ```bash
-cd slime/
+cd minislime/
 bash examples/search-r1/run_qwen2.5_3B.sh
 ```
 
 ## 代码结构
 
-为了实现多轮 + 工具调用，在 slime 中只需要实现一个自定义的数据生成函数，以及一个任务所需的 reward model，对应启动脚本中的这 2 个配置项：
+为了实现多轮 + 工具调用，在 minislime 中只需要实现一个自定义的数据生成函数，以及一个任务所需的 reward model，对应启动脚本中的这 2 个配置项：
 
 ```bash
 CUSTOM_ARGS=(
@@ -219,7 +220,7 @@ pip install uvicorn fastapi
 save_path=/root/Index
 
 # 下载索引和语料库文件
-python /root/slime/examples/search-r1/local_dense_retriever/download.py --save_path $save_path
+python /root/minislime/examples/search-r1/local_dense_retriever/download.py --save_path $save_path
 
 # 合并分割的索引文件
 cat $save_path/part_* > $save_path/e5_Flat.index
@@ -247,7 +248,7 @@ retriever_name=e5
 retriever_path=intfloat/e5-base-v2
 
 # 启动检索服务器
-python /root/slime/examples/search-r1/local_dense_retriever/retrieval_server.py \
+python /root/minislime/examples/search-r1/local_dense_retriever/retrieval_server.py \
     --index_path $index_file \
     --corpus_path $corpus_file \
     --topk 3 \
@@ -268,7 +269,7 @@ python /root/slime/examples/search-r1/local_dense_retriever/retrieval_server.py 
 确保您**不在** retriever conda 环境中。如果在，请运行 `conda deactivate`。
 
 ```bash
-cd /root/slime
+cd /root/minislime
 
 # 设置您的 wandb key（可选）
 export WANDB_KEY="your_wandb_key_here"
@@ -278,7 +279,7 @@ export WANDB_KEY="your_wandb_key_here"
 # rm -rf /root/.*
 
 # 运行训练脚本
-bash /root/slime/examples/search-r1/run_qwen2.5_3B.sh
+bash /root/minislime/examples/search-r1/run_qwen2.5_3B.sh
 ```
 
 ### 故障排查

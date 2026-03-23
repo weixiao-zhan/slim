@@ -1,19 +1,19 @@
 # mini-slime
 
-**mini-slime** is a lightweight fork of [slime](https://github.com/THUDM/slime) (v0.2.3) that is better suitted for research and prototype.
+**mini-slime** is a lightweight fork of [slime](https://github.com/THUDM/slime) (v0.2.3) that is better suited for research and prototype.
 
 We love slime — it is versatile, well-customizable. 
 Meanwhile, we also love HF Transformers and PyTorch FSDP — they are simple and sufficient.
 However, slime is [deprecating its FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron-only. 
 
-Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while reducing the intrusion on dataset and enhensing concurrency. With FSDP backend, you can directly customize the HF model. 
+Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while reducing the intrusion on dataset and enhancing concurrency. With FSDP backend, you can directly customize the HF model. 
 
 ### 🏗️ Roadmap
 
 - [ ] Add PEFT
 - [ ] Threadpooled generation (when GIL is deprecated, the agents will able to run truely concurrently)
 - [x] Improve dataset loading: dataset should be prepared in a format readily consumable by the tokenizer. Defer apply chat template to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
-- [x] Remove megatron dependency. No more mbridge converter and docker. Its `uv` friendly now.
+- [x] Remove megatron dependency. No more mbridge converter and docker. It's `uv` friendly now.
 
 ### 🚧 Known Broken Features
 

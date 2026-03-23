@@ -1,0 +1,98 @@
+# Qwen3-30B-A3B with 8xH100
+
+
+## Environment Preparation
+
+Install minislime following the [Training Guide](../training/README.md) guide. Download model and data:
+
+```bash
+hf download Qwen/Qwen3-30B-A3B --local-dir /root/Qwen3-30B-A3B
+hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /root/dapo-math-17k
+```
+
+No checkpoint conversion is needed -- FSDP loads HuggingFace checkpoints directly.
+
+## Run Training
+
+Execute the training script:
+
+```bash
+cd /root/minislime
+python train.py --hf-checkpoint /root/Qwen3-30B-A3B --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl [options]
+```
+
+### Parameter Introduction
+
+Key MoE-related parameters:
+
+1.  To support running Qwen3-30B-A3B in an 8xH800 environment, you can enable FSDP CPU offloading and gradient checkpointing to save GPU memory:
+
+    ```bash
+    PERF_ARGS=(
+       --gradient-checkpointing
+       --fsdp-cpu-offload
+       --use-dynamic-batch-size
+       --max-tokens-per-gpu 4608
+    )
+    ```
+
+2.  Enable MoE optimization supported by SGLang. The current configuration is ep8:
+
+    ```bash
+    SGLANG_ARGS=(
+       --rollout-num-gpus-per-engine 8
+       --sglang-mem-fraction-static 0.7
+       --sglang-ep-size 8
+       --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
+    )
+    ```
+
+    Similarly, you can also add DP attention, for example, by configuring:
+
+    ```bash
+       --sglang-enable-dp-attention
+       --sglang-dp-size 8
+    ```
+
+### BF16 Training with FP8 Inference
+
+minislime also supports BF16 training with FP8 inference. For the Qwen3-30B-A3B model, you just need to download the following model:
+
+```bash
+hf download Qwen/Qwen3-30B-A3B-FP8 --local-dir /root/Qwen3-30B-A3B-FP8
+```
+
+And replace `--hf-checkpoint` with:
+
+```bash
+#--hf-checkpoint /root/Qwen3-30B-A3B
+--hf-checkpoint /root/Qwen3-30B-A3B-FP8
+```
+
+This will trigger FP8 inference. Currently, we directly cast the BF16 weights to FP8. In the future, we will gradually add more sophisticated quantization schemes that have less impact on precision.
+
+### Multi-Node Support
+
+For a multi-node environment, the following modifications are necessary:
+
+  - Place the training model and data on a path accessible by all nodes.
+  - Set the `MASTER_ADDR` to an address that is accessible by all nodes.
+  - Remove `--fsdp-cpu-offload` if not needed. Multi-node FSDP sharding reduces per-GPU memory usage.
+
+In addition, you can make the following changes:
+
+  - When the total number of GPUs is not a multiple or divisor of the total number of experts, you can use `--sglang-ep-num-redundant-experts` to add redundant experts. For example, in a 24-GPU scenario, you can configure it as follows:
+
+   ```bash
+   SGLANG_ARGS=(
+      --rollout-num-gpus-per-engine 24
+      --sglang-mem-fraction-static 0.7
+      --sglang-ep-size 24
+      --sglang-enable-dp-attention
+      --sglang-dp-size 3
+
+      --sglang-moe-dense-tp-size 1
+      --sglang-enable-dp-lm-head
+      --sglang-ep-num-redundant-experts 16   
+   )
+   ```
