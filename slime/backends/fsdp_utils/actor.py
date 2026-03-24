@@ -17,11 +17,18 @@ from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.logging_utils import init_tracking
 from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.metric_utils import compute_rollout_step
-from slime.utils.misc import Box
-from slime.utils.ppo_utils import compute_approx_kl, compute_gspo_kl, compute_opsm_mask, compute_policy_loss
+from slime.utils.ppo_utils import (
+    compute_approx_kl,
+    compute_gspo_kl,
+    compute_opsm_mask,
+    compute_policy_loss,
+    compute_value_loss,
+    vanilla_gae,
+)
 from slime.utils.processing_utils import load_processor, load_tokenizer
 from slime.utils.profile_utils import TrainProfiler
 from slime.utils.timer import Timer, inverse_timer, timer, with_defer
+from slime.utils.types import Episode
 
 from . import checkpoint
 from .data_packing import pack_sequences, unpack_sequences
@@ -78,23 +85,46 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof = TrainProfiler(args)
 
+        # Determine checkpoint paths based on role
+        self._is_critic = role == "critic"
+        if self._is_critic:
+            self._checkpoint_load_dir = args.critic_save  # resume from critic checkpoints
+            self._checkpoint_save_dir = args.critic_save
+            hf_checkpoint = args.critic_load or args.hf_checkpoint
+            lr = args.critic_lr
+        else:
+            self._checkpoint_load_dir = args.load
+            self._checkpoint_save_dir = args.save
+            hf_checkpoint = args.hf_checkpoint
+            lr = args.lr
+
         for i in range(dist.get_world_size()):
             if i == dist.get_rank():
-                self.hf_config = AutoConfig.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
-                self.tokenizer = load_tokenizer(self.args.hf_checkpoint, trust_remote_code=True)
+                self.hf_config = AutoConfig.from_pretrained(hf_checkpoint, trust_remote_code=True)
+                self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
                 # Vision models have `vision_config` in the config
                 if hasattr(self.hf_config, "vision_config"):
-                    self.processor = load_processor(self.args.hf_checkpoint, trust_remote_code=True)
+                    self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
         init_context = self._get_init_weight_context_manager()
 
-        with init_context():
-            model = self.get_model_cls().from_pretrained(
-                self.args.hf_checkpoint,
-                trust_remote_code=True,
+        if self._is_critic:
+            from .models.critic import create_critic_model
+
+            model = create_critic_model(
+                hf_checkpoint,
                 attn_implementation=self.args.attn_implementation,
+                init_context=init_context,
+                model_cls=self.get_model_cls(),
             )
+        else:
+            with init_context():
+                model = self.get_model_cls().from_pretrained(
+                    hf_checkpoint,
+                    trust_remote_code=True,
+                    attn_implementation=self.args.attn_implementation,
+                )
 
         model.train()
 
@@ -114,7 +144,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if args.optimizer == "adam":
             self.optimizer = torch.optim.AdamW(
                 self.model.parameters(),
-                lr=args.lr,
+                lr=lr,
                 betas=(args.adam_beta1, args.adam_beta2),
                 eps=args.adam_eps,
                 weight_decay=args.weight_decay,
@@ -123,7 +153,12 @@ class FSDPTrainRayActor(TrainRayActor):
             raise ValueError(f"Unsupported optimizer: {args.optimizer}. Supported options: 'adam'")
 
         # Initialize LR scheduler
+        # LR scheduler reads args.lr for max_lr; override for critic
+        orig_lr = args.lr
+        if self._is_critic:
+            args.lr = lr
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
+        args.lr = orig_lr
 
         self.global_step = 0
         self.micro_step = 0
@@ -131,15 +166,22 @@ class FSDPTrainRayActor(TrainRayActor):
         checkpoint_payload = checkpoint.load(self)
 
         # Create separate ref model if needed (kept in CPU until needed)
+        # Critic does not need a reference model.
         self.ref_model = None
-        if with_ref:
+        if with_ref and not self._is_critic:
             self.ref_model = self._create_ref_model(args.ref_load)
 
-        self.weight_updater = (
-            UpdateWeightFromTensor(self.args, self.model)
-            if self.args.colocate
-            else UpdateWeightFromDistributed(self.args, self.model)
-        )
+        # Critic does not sync weights to rollout engines.
+        self.weight_updater = None
+        if not self._is_critic:
+            self.weight_updater = (
+                UpdateWeightFromTensor(self.args, self.model)
+                if self.args.colocate
+                else UpdateWeightFromDistributed(self.args, self.model)
+            )
+
+        # Handle to the paired critic (set by connect_actor_critic for actor role)
+        self.critic_handle = None
 
         checkpoint.finalize_load(self, checkpoint_payload)
 
@@ -292,11 +334,61 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         """Delegate checkpoint saving to the shared checkpoint utilities."""
-        if self.args.debug_rollout_only or self.args.save is None:
+        save_dir = self._checkpoint_save_dir
+        if self.args.debug_rollout_only or save_dir is None:
             return
 
         assert not self.args.async_save, "FSDPTrainRayActor does not support async_save yet."
         checkpoint.save(self, rollout_id)
+
+    def connect_actor_critic(self, critic_handle) -> None:
+        """Store a handle to the paired critic Ray actor (for actor role)
+        or to the paired actor Ray actor (for critic role)."""
+        self.critic_handle = critic_handle
+
+    def compute_values(self, rollout_id: int, rollout_data_refs: list) -> list[torch.Tensor]:
+        """Compute per-token value predictions for all episodes (critic only).
+
+        Returns:
+            List of CPU tensors. values[i] has shape [episodes[i].response_length].
+        """
+        assert self._is_critic, "compute_values should only be called on the critic"
+
+        if self.args.offload_train:
+            self.wake_up()
+
+        episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+
+        # Set dummy advantages/returns required by pack_sequences
+        for ep in episodes:
+            ep._advantages = [0.0] * ep.response_length
+            ep._returns = [0.0] * ep.response_length
+
+        # Use _packed_data which synchronizes batch count across DP ranks
+        # (required for FSDP all-gather collectives during forward pass)
+        packed_batches, grad_accum = self._packed_data(episodes)
+
+        self.model.eval()
+        with timer("critic_compute_values"), torch.no_grad():
+            for batch in tqdm(packed_batches, desc="critic_values", disable=dist.get_rank() != 0):
+                model_args = self._get_model_inputs_args(batch)
+                values = self.model(**model_args).logits.squeeze(-1).squeeze(0).float()
+                batch["cur_values"] = values[:-1]
+
+        self.model.train()
+
+        if self.args.offload_train:
+            self.sleep()
+
+        # Unpack and reorder values back to original episode order
+        all_values = [None] * len(episodes)
+        for batch in packed_batches:
+            ep_indices = batch.get("_episode_indices", [])
+            unpacked = unpack_sequences(batch)
+            for j, ub in enumerate(unpacked):
+                all_values[ep_indices[j]] = ub["cur_values"].detach().cpu()
+
+        return all_values
 
     def _compute_log_prob(
         self,
@@ -364,37 +456,29 @@ class FSDPTrainRayActor(TrainRayActor):
                     dist.barrier(group=get_gloo_group())
 
     def _packed_data(
-        self, rollout_data: dict[str, list[torch.Tensor]]
+        self, episodes: list[Episode]
     ) -> tuple[list[dict[str, torch.Tensor]], list[int]]:
-        """Pack variable-length sequences for efficient processing.
-
-        Parameters:
-            rollout_data: Dictionary of lists containing sequence-level tensors
-                such as `tokens`, `loss_masks`, `rewards`, `response_lengths`,
-                `advantages`, `returns`, and optional `rollout_log_probs`.
+        """Pack variable-length episodes for efficient processing.
 
         Returns:
             A pair `(packed_batches, grad_accum)` where `packed_batches` is a list
             of packed batch dictionaries and `grad_accum` lists the micro-batch
             indices at which to perform optimizer steps.
         """
-        # Pack sequences efficiently
-        tokens = rollout_data["tokens"]
-
         packed_batches = []
         mbs_size_list = []
         local_batch_size = self.args.global_batch_size // self.dp_size
         assert (
             self.args.global_batch_size % self.dp_size == 0
         ), f"global_batch_size {self.args.global_batch_size} is not divisible by dp_world_size {self.dp_size}"
-        # Use global_batch_size for splitting when max_tokens_per_gpu is enabled
+
         if self.args.use_dynamic_batch_size:
             max_tokens = self.args.max_tokens_per_gpu
 
-            for i in range(0, len(tokens), local_batch_size):
+            for i in range(0, len(episodes), local_batch_size):
                 mbs_size_list.append(
                     get_minimum_num_micro_batch_size(
-                        [len(t) for t in rollout_data["tokens"][i : i + local_batch_size]],
+                        [len(ep.tokens) for ep in episodes[i : i + local_batch_size]],
                         max_tokens,
                     )
                 )
@@ -403,56 +487,44 @@ class FSDPTrainRayActor(TrainRayActor):
             num_microbatches = num_microbatches.tolist()
         else:
             num_microbatches = [self.args.global_batch_size // (self.args.micro_batch_size * self.dp_size)] * (
-                len(tokens) // local_batch_size
+                len(episodes) // local_batch_size
             )
 
         start = 0
         for mbs_size in num_microbatches:
             end = start + local_batch_size
-            packed_batches.extend(
-                pack_sequences(
-                    rollout_data["tokens"][start:end],
-                    rollout_data["loss_masks"][start:end],
-                    rollout_data["rewards"][start:end],
-                    rollout_data["raw_reward"][start:end],
-                    rollout_data["response_lengths"][start:end],
-                    rollout_data["advantages"][start:end],
-                    rollout_data["returns"][start:end],
-                    rollout_log_probs=(
-                        rollout_data["rollout_log_probs"][start:end] if "rollout_log_probs" in rollout_data else None
-                    ),
-                    multimodal_train_inputs=(
-                        rollout_data["multimodal_train_inputs"][start:end]
-                        if "multimodal_train_inputs" in rollout_data
-                        else None
-                    ),
-                    num_packs=mbs_size,
-                )
-            )
+            chunk_batches = pack_sequences(episodes[start:end], num_packs=mbs_size)
+            # Offset _episode_indices to be absolute (relative to full episode list)
+            for batch in chunk_batches:
+                if "_episode_indices" in batch:
+                    batch["_episode_indices"] = [idx + start for idx in batch["_episode_indices"]]
+            packed_batches.extend(chunk_batches)
             start = end
         grad_accum = list(accumulate(num_microbatches))
 
         return packed_batches, grad_accum
 
-    def train(self, rollout_id: int, rollout_data_ref: Box) -> None:
+    def train(self, rollout_id: int, rollout_data_refs: list, values_refs: list | None = None) -> None:
         """Run one training update over a rollout batch.
 
         Parameters:
             rollout_id: Monotonic id for logging.
-            rollout_data_ref: A Box handle wrapping a Ray object reference to a
-                dictionary with rollout tensors and metadata (e.g., `tokens`,
-                `loss_masks`, `rewards`, `response_lengths`, optional
-                `rollout_log_probs`, etc.). It will be fetched and partitioned
-                by `process_rollout_data` based on data-parallel rank/size.
+            rollout_data_refs: List of Ray ObjectRefs, one per DP rank,
+                each containing a list[Episode] partition.
+            values_refs: Optional list of Ray ObjectRefs containing per-sample
+                value predictions from the critic (one ref per DP rank).
+                Required when advantage_estimator=="ppo".
         """
         if self.args.offload_train:
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"):
-            rollout_data = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
+            episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
             if self.args.debug_rollout_only:
                 return
-            self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)
+
+            values = ray.get(values_refs[self.dp_rank]) if values_refs is not None else None
+            self._train_core(rollout_id=rollout_id, episodes=episodes, values=values)
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -461,12 +533,11 @@ class FSDPTrainRayActor(TrainRayActor):
             compute_total_fwd_flops=None,
         )
 
-    def _log_rollout_data(self, rollout_id: int, rollout_data, packed_batches):
+    def _log_rollout_data(self, rollout_id: int, episodes: list[Episode], packed_batches):
         log_dict = {}
-        if "raw_reward" in rollout_data and dist.get_rank() == 0:
-            raw_reward_list = rollout_data["raw_reward"]
-            if raw_reward_list:
-                log_dict["rollout/raw_reward"] = sum(raw_reward_list) / len(raw_reward_list)
+        if dist.get_rank() == 0 and episodes:
+            raw_rewards = [ep.reward for ep in episodes]
+            log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
 
         for metric_key in ["log_probs", "rollout_log_probs", "ref_log_probs", "advantages", "returns"]:
             if metric_key not in packed_batches[0]:
@@ -497,47 +568,54 @@ class FSDPTrainRayActor(TrainRayActor):
                 f"({log_dict['rollout/rollout_log_probs']})"
             )
 
-    def _train_core(self, rollout_id: int, rollout_data) -> None:
+    def _train_core(self, rollout_id: int, episodes: list[Episode], values: list | None = None) -> None:
         if self.args.advantage_estimator in ["grpo", "gspo"]:
-            rollout_data["advantages"] = rollout_data["returns"] = [
-                torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
-                for i in range(len(rollout_data["rewards"]))
-            ]
+            # For GRPO/GSPO, advantages = returns = reward repeated per token
+            for ep in episodes:
+                ep._advantages = [ep.reward] * ep.response_length
+                ep._returns = ep._advantages
+        elif self.args.advantage_estimator == "ppo":
+            assert values is not None, "PPO requires value predictions from critic"
+            self._compute_ppo_advantages(episodes, values)
         else:
             raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
 
-        packed_batches, grad_accum = self._packed_data(rollout_data)
+        packed_batches, grad_accum = self._packed_data(episodes)
 
         assert (
             len(grad_accum) > 0
         ), f"Invalid grad_accum {grad_accum} for micro_batch_size {self.args.micro_batch_size} and global_batch_size {self.args.global_batch_size}"
 
-        if self.ref_model is not None:
-            self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+        if self._is_critic:
+            self._critic_train_loop(rollout_id, packed_batches, grad_accum)
+        else:
+            if self.ref_model is not None:
+                self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
 
-        self._compute_log_prob("actor", packed_batches)
-        self._log_rollout_data(rollout_id, rollout_data, packed_batches)
+            self._compute_log_prob("actor", packed_batches)
+            self._log_rollout_data(rollout_id, episodes, packed_batches)
 
-        with timer("actor_train"):
-            reported_accum: dict[str, list[torch.Tensor]] = {}
-            self.optimizer.zero_grad(set_to_none=True)
-            for mbs_id, packed_batch in self.prof.iterate_train_actor(
-                enumerate(tqdm(packed_batches, desc="actor_train", disable=dist.get_rank() != 0))
-            ):
-                self._train_step(
-                    packed_batch=packed_batch,
-                    reported_accum=reported_accum,
-                    mbs_id=mbs_id,
-                    grad_accum=grad_accum,
-                )
+            with timer("actor_train"):
+                reported_accum: dict[str, list[torch.Tensor]] = {}
+                self.optimizer.zero_grad(set_to_none=True)
+                for mbs_id, packed_batch in self.prof.iterate_train_actor(
+                    enumerate(tqdm(packed_batches, desc="actor_train", disable=dist.get_rank() != 0))
+                ):
+                    self._train_step(
+                        packed_batch=packed_batch,
+                        reported_accum=reported_accum,
+                        mbs_id=mbs_id,
+                        grad_accum=grad_accum,
+                    )
 
         self.prof.step(rollout_id=rollout_id)
 
-        train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
+        train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=None)
 
         # Update ref model if needed (copy actor weights to ref)
         if (
-            self.args.ref_update_interval is not None
+            not self._is_critic
+            and self.args.ref_update_interval is not None
             and (rollout_id + 1) % self.args.ref_update_interval == 0
             and self.ref_model is not None
         ):
@@ -548,8 +626,131 @@ class FSDPTrainRayActor(TrainRayActor):
             self.ref_model.load_state_dict(actor_state)
             self.ref_model.cpu()
 
+    def _compute_ppo_advantages(self, episodes: list[Episode], values: list[torch.Tensor]) -> None:
+        """Compute GAE advantages and returns for PPO, and store on episodes."""
+        assert len(episodes) == len(values), (
+            f"Number of episodes ({len(episodes)}) != number of value predictions ({len(values)})"
+        )
+
+        B = len(episodes)
+        max_T = max(ep.response_length for ep in episodes)
+
+        # Build [B, T] reward and value tensors (padded)
+        rewards_padded = torch.zeros(B, max_T)
+        values_padded = torch.zeros(B, max_T)
+
+        for i, ep in enumerate(episodes):
+            T = ep.response_length
+            rewards_padded[i, T - 1] = ep.reward
+            values_padded[i, :T] = values[i].float()
+
+        advantages_padded, returns_padded = vanilla_gae(
+            rewards_padded, values_padded, self.args.gamma, self.args.lambd
+        )
+
+        if self.args.normalize_advantages:
+            advantages_flat = torch.cat([advantages_padded[i, :episodes[i].response_length] for i in range(B)])
+            # Global normalization across all DP ranks
+            local_sum = advantages_flat.sum()
+            local_sq_sum = (advantages_flat**2).sum()
+            local_count = torch.tensor(float(advantages_flat.numel()))
+            stats = torch.stack([local_sum, local_sq_sum, local_count]).to(torch.cuda.current_device())
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=self.dp_group)
+            mean = stats[0] / stats[2]
+            std = ((stats[1] / stats[2] - mean**2).clamp(min=0)).sqrt().clamp(min=1e-8)
+            advantages_padded = (advantages_padded - mean.cpu()) / std.cpu()
+
+        for i, ep in enumerate(episodes):
+            T = ep.response_length
+            ep._advantages = advantages_padded[i, :T].tolist()
+            ep._returns = returns_padded[i, :T].tolist()
+            ep._values = values[i].tolist()
+
+    def _critic_train_loop(self, rollout_id: int, packed_batches: list, grad_accum: list) -> None:
+        """Training loop for the critic model (value loss)."""
+        with timer("critic_train"):
+            reported_accum: dict[str, list[torch.Tensor]] = {}
+            self.optimizer.zero_grad(set_to_none=True)
+            for mbs_id, packed_batch in enumerate(
+                tqdm(packed_batches, desc="critic_train", disable=dist.get_rank() != 0)
+            ):
+                self._critic_train_step(
+                    packed_batch=packed_batch,
+                    reported_accum=reported_accum,
+                    mbs_id=mbs_id,
+                    grad_accum=grad_accum,
+                )
+
+    def _critic_train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
+        """Single training step for the critic (value loss with clipping)."""
+        model_args = self._get_model_inputs_args(packed_batch)
+        # Value head outputs [..., 1]; shift by 1 to align with response tokens (same as log_probs)
+        values_output = self.model(**model_args).logits.squeeze(-1).squeeze(0).float()
+        packed_batch["cur_values"] = values_output[:-1]
+
+        unpacked_batches = unpack_sequences(packed_batch)
+
+        cur_values_list = [batch["cur_values"] for batch in unpacked_batches]
+        old_values_list = [batch["old_values"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
+        returns_list = [batch["returns"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
+        loss_masks = [batch["loss_masks"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
+        response_lengths = [batch["response_lengths"] for batch in unpacked_batches]
+
+        cur_values = torch.cat(cur_values_list, dim=0)
+        old_values = torch.cat(old_values_list, dim=0)
+        returns = torch.cat(returns_list, dim=0)
+
+        value_loss = compute_value_loss(cur_values, old_values, returns, self.args.value_clip)
+        value_loss = sum_of_sample_mean(value_loss, response_lengths, loss_masks)
+
+        reported = {"value_loss": value_loss.detach()}
+
+        loss = value_loss * self.dp_size / self.args.global_batch_size
+        loss.backward()
+
+        self._accumulate_and_step(reported, reported_accum, mbs_id, grad_accum, log_prefix="critic")
+
+    def _accumulate_and_step(self, reported, reported_accum, mbs_id, grad_accum, log_prefix="train"):
+        """Accumulate metrics, and on grad_accum boundaries: clip grads, step optimizer, log."""
+        for k, v in reported.items():
+            reported_accum.setdefault(k, []).append(v)
+
+        if (mbs_id + 1) not in grad_accum:
+            return
+
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad))
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # TODO: change this, this is slow.
+        aggregated = {k: torch.stack(v).sum().item() for k, v in reported_accum.items()}
+        reduced_aggregated = [None] * self.dp_size
+        dist.all_gather_object(reduced_aggregated, aggregated, group=self.dp_group)
+        aggregated = {k: sum(r[k] for r in reduced_aggregated) / self.args.global_batch_size for k in reported_accum}
+        reported_accum.clear()
+
+        if dist.get_rank() == 0:
+            log_dict = {
+                f"{log_prefix}/{k}": (val.item() if torch.is_tensor(val) else val)
+                for k, val in aggregated.items()
+            }
+            log_dict[f"{log_prefix}/grad_norm"] = grad_norm
+            lr_values = self.lr_scheduler.get_last_lr()
+            for gid, _group in enumerate(self.optimizer.param_groups):
+                log_dict[f"{log_prefix}/lr-pg_{gid}"] = lr_values[gid]
+
+            if log_prefix == "train" and self.args.use_kl_loss and "kl_loss" in aggregated:
+                kl_info = f"kl_loss: {aggregated['kl_loss']:.4f}, kl_penalty: {aggregated['kl_loss'] * self.args.kl_loss_coef:.4f}"
+                logger.info(kl_info)
+
+            logger.info(f"{log_prefix} step {self.global_step}: {log_dict}")
+            log_dict[f"{log_prefix}/step"] = self.global_step
+            logging_utils.log(self.args, log_dict, step_key=f"{log_prefix}/step")
+
+        self.global_step += 1
+
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
-        # Prepare model inputs
         model_args = self._get_model_inputs_args(packed_batch)
         logits = self.model(**model_args).logits.squeeze(0).float()
 
@@ -673,53 +874,10 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.use_opsm:
             reported["opsm_clipfrac"] = opsm_clipfrac
 
-        # Scale loss for gradient accumulation
         loss = loss * self.dp_size / self.args.global_batch_size
         loss.backward()
 
-        # Accumulate reported metrics (store tensors for later mean)
-        for k, v in reported.items():
-            reported_accum.setdefault(k, []).append(v)
-
-        if (mbs_id + 1) in grad_accum:
-            # TODO: check if the grad norm is global grad norm.
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
-            # the grad norm used to be of DTensor
-            grad_norm = float(grad_norm)
-
-            self.optimizer.step()
-            # Update learning rate
-            self.lr_scheduler.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            # Aggregate logs
-            aggregated = {k: torch.stack(v).sum().item() for k, v in reported_accum.items()}
-            # TODO: change this, this is slow.
-            reduced_aggregated = [None] * self.dp_size
-            dist.all_gather_object(reduced_aggregated, aggregated, group=self.dp_group)
-            aggregated = {}
-            for k in reported_accum.keys():
-                aggregated[k] = sum([r[k] for r in reduced_aggregated]) / (self.args.global_batch_size)
-            reported_accum.clear()
-            if dist.get_rank() == 0:
-                log_dict = {
-                    f"train/{k}": (val.item() if torch.is_tensor(val) else val) for k, val in aggregated.items()
-                }
-                log_dict["train/grad_norm"] = grad_norm
-
-                # Log learning rate per parameter group; use scheduler's last computed LRs
-                lr_values = self.lr_scheduler.get_last_lr()
-                for gid, _group in enumerate(self.optimizer.param_groups):
-                    log_dict[f"train/lr-pg_{gid}"] = lr_values[gid]
-
-                kl_info = ""
-                if self.args.use_kl_loss and "kl_loss" in aggregated:
-                    kl_info = f", kl_loss: {aggregated['kl_loss']:.4f}, kl_penalty: {aggregated['kl_loss'] * self.args.kl_loss_coef:.4f}"
-                    logger.info(kl_info)
-                logger.info(f"step {self.global_step}: {log_dict}")
-
-                log_dict["train/step"] = self.global_step
-                logging_utils.log(self.args, log_dict, step_key="train/step")
-            self.global_step += 1
+        self._accumulate_and_step(reported, reported_accum, mbs_id, grad_accum, log_prefix="train")
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
@@ -727,7 +885,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
         Handles both colocated and distributed update modes. In offload mode,
         wakes up parameters as needed to perform the update.
+        Critic does not sync weights to rollout engines (no-op).
         """
+        if self._is_critic:
+            return
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 

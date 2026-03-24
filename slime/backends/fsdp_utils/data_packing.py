@@ -50,6 +50,7 @@ def pack_sequences(
         flat_advantages = []
         flat_returns = []
         flat_rollout_log_probs = []
+        flat_old_values = []
 
         for i in indices:
             ep = episodes[i]
@@ -60,6 +61,8 @@ def pack_sequences(
             flat_returns.extend(ep._returns)
             if ep.rollout_log_probs:
                 flat_rollout_log_probs.extend(ep.rollout_log_probs)
+            if hasattr(ep, "_values") and ep._values is not None:
+                flat_old_values.extend(ep._values)
             cu_seqlens.append(cu_seqlens[-1] + len(ep.tokens))
 
         packed_batch = {
@@ -76,6 +79,9 @@ def pack_sequences(
                 flat_rollout_log_probs, dtype=torch.float32, device=torch.cuda.current_device()
             ),
         }
+
+        if flat_old_values:
+            packed_batch["old_values"] = torch.tensor(flat_old_values, dtype=torch.float32)
 
         # Collect multimodal training tensors
         has_multimodal = any(episodes[i].multimodal_train_inputs is not None for i in indices)
@@ -95,6 +101,10 @@ def pack_sequences(
                         multimodal_num_items[key].append(mm_tensor.size(0))
             packed_batch["multimodal_train_inputs"] = multimodal_data
             packed_batch["multimodal_num_items"] = multimodal_num_items
+
+        # Store original episode indices so callers can map unpacked results
+        # back to the original episode order (partitioning reorders).
+        packed_batch["_episode_indices"] = list(indices)
 
         result.append(packed_batch)
 
@@ -145,7 +155,7 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                         if num_items_list[i] > 0:
                             instance[key][mm_key] = mm_tensor[start_mm_idx:end_mm_idx]
             elif isinstance(value, torch.Tensor):
-                if key in ["log_probs", "ref_log_probs", "cur_log_probs", "entropy"]:
+                if key in ["log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values"]:
                     instance[key] = value[
                         end_idx - 1 - response_lengths[i] - pad_length : end_idx - 1 - pad_length
                     ]
@@ -156,7 +166,7 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                         instance[key] = value[start_idx:end_idx]
                     else:
                         raise ValueError(f"Attribute {key} is not found in the packed batch")
-                elif key in ["loss_masks", "advantages", "returns"]:
+                elif key in ["loss_masks", "advantages", "returns", "old_values"]:
                     instance[key] = value[sum(response_lengths[:i]) : sum(response_lengths[: i + 1])]
             elif isinstance(value, list):
                 instance[key] = value[i]

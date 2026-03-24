@@ -93,9 +93,13 @@ class RayTrainGroup:
             for actor in self._actor_handlers
         ]
 
-    def async_train(self, rollout_id, rollout_data_ref):
+    def async_train(self, rollout_id, rollout_data_ref, values_refs=None):
         """Do one rollout training"""
-        return [actor.train.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+        return [actor.train.remote(rollout_id, rollout_data_ref, values_refs) for actor in self._actor_handlers]
+
+    def compute_values(self, rollout_id, rollout_data_ref):
+        """Compute per-token value predictions (critic only). Returns list of ObjectRefs."""
+        return [actor.compute_values.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
 
     def save_model(self, rollout_id, force_sync=False):
         """Save actor model"""

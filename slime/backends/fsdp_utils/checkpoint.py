@@ -81,7 +81,7 @@ def load(actor: Any) -> dict[str, Any] | None:
     Loads model weights and optionally optimizer state from separate directories.
     This allows loading weights without optimizer or deleting optimizer before loading.
     """
-    load_root = getattr(actor.args, "load", None)
+    load_root = getattr(actor, "_checkpoint_load_dir", None) or getattr(actor.args, "load", None)
     if load_root is None:
         return None
 
@@ -195,7 +195,8 @@ def save(actor: Any, iteration: int) -> None:
     """
     torch.cuda.synchronize()
 
-    base_dir = Path(actor.args.save).expanduser()
+    save_dir = getattr(actor, "_checkpoint_save_dir", None) or actor.args.save
+    base_dir = Path(save_dir).expanduser()
     step_id = iteration + 1
     checkpoint_dir = base_dir / f"iter_{step_id:07d}"
     model_dir = checkpoint_dir / "model"

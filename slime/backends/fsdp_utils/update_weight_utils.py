@@ -107,27 +107,43 @@ class UpdateWeightFromTensor(UpdateWeight):
         if engine_gpu_counts is None:
             engine_gpu_counts = [self.args.rollout_num_gpus_per_engine] * len(rollout_engines)
         if engine_gpu_offsets is None:
-            # Fallback: assume engines are densely packed (no placeholder gaps).
             engine_gpu_offsets = []
             offset = 0
             for c in engine_gpu_counts:
                 engine_gpu_offsets.append(offset)
                 offset += c
 
+        # Split engines into colocated (on actor GPUs, use Gloo IPC) vs
+        # distributed (on other GPUs e.g. critic, use NCCL broadcast).
+        # Follows the v0.2.2 Megatron use_distribute pattern.
+        world_size = dist.get_world_size()
+        distributed_engines = []
+        distributed_gpu_counts = []
+
         for i, engine in enumerate(self.rollout_engines):
             start_rank = engine_gpu_offsets[i]
             end_rank = start_rank + engine_gpu_counts[i]
             group_ranks = list(range(start_rank, end_rank))
-            new_group = dist.new_group(
-                ranks=group_ranks,
-                backend="gloo",
-            )
+
+            if any(r >= world_size for r in group_ranks):
+                distributed_engines.append(engine)
+                distributed_gpu_counts.append(engine_gpu_counts[i])
+                continue
+
+            new_group = dist.new_group(ranks=group_ranks, backend="gloo")
             if dist.get_rank() in group_ranks:
                 self._ipc_gather_src = start_rank
                 self._ipc_gather_group = new_group
                 self._ipc_engine = engine
-                # Calculate TP rank within this SGLang engine group
                 self.tp_rank = dist.get_rank() - start_rank
+
+        self._distributed_updater = None
+        if distributed_engines:
+            self._distributed_updater = UpdateWeightFromDistributed(self.args, self.model)
+            self._distributed_updater.connect_rollout_engines(
+                distributed_engines, rollout_engine_lock,
+                engine_gpu_counts=distributed_gpu_counts,
+            )
 
     def update_bucket_weights(self, named_tensors, weight_version=None) -> None:
         # Placeholder ranks (GPU slots reserved but no engine) have no gather group.
@@ -190,6 +206,10 @@ class UpdateWeightFromTensor(UpdateWeight):
         if dist.get_rank() == self._ipc_gather_src:
             ref = self._ipc_engine.flush_cache.remote()
             ray.get(ref)
+
+        # Update engines on non-actor GPUs via NCCL broadcast
+        if self._distributed_updater is not None:
+            self._distributed_updater.update_bucket_weights(named_tensors, weight_version=weight_version)
 
 
 class UpdateWeightFromDistributed(UpdateWeight):

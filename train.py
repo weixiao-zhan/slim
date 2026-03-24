@@ -76,9 +76,14 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref)
+            # Phase 1: Critic computes value predictions (synchronous)
+            values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
+            ray.get(values_refs)  # wait for all ranks to finish
+
+            # Phase 2: Train actor and critic concurrently using computed values
+            critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
             if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+                ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
             ray.get(critic_train_handle)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))

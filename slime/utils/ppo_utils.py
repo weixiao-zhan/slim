@@ -147,6 +147,33 @@ def compute_policy_loss(
     return pg_losses, clipfrac
 
 
+def compute_value_loss(
+    cur_values: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    value_clip: float,
+) -> torch.Tensor:
+    """Compute clipped value loss for PPO critic training.
+
+    Uses the standard PPO value clipping approach: the value prediction is
+    clipped to be within [old_value - clip, old_value + clip], and we take
+    the maximum of the clipped and unclipped squared errors.
+
+    Args:
+        cur_values: Current value predictions from the critic.
+        old_values: Value predictions from the previous iteration.
+        returns: Target returns computed via GAE (advantages + old_values).
+        value_clip: Clipping range for value predictions.
+
+    Returns:
+        Per-token value loss (not yet reduced).
+    """
+    values_clipped = old_values + (cur_values - old_values).clamp(-value_clip, value_clip)
+    vf_loss1 = (cur_values - returns) ** 2
+    vf_loss2 = (values_clipped - returns) ** 2
+    return 0.5 * torch.max(vf_loss1, vf_loss2)
+
+
 def get_grpo_returns(
     rewards: torch.Tensor,
     kl: list[torch.Tensor],
