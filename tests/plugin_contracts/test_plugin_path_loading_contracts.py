@@ -32,7 +32,7 @@ install_stubs(with_sglang_router=True, with_transformers=True)
 
 NUM_GPUS = 0
 
-from slime.rollout.base_types import RolloutFnEvalOutput, call_rollout_fn
+from slime.rollout.base_types import RolloutFnEvalOutput
 from slime.rollout.data_source import RolloutDataSourceWithBuffer
 from slime.rollout.filter_hub.base_types import DynamicFilterOutput, call_dynamic_filter
 from slime.rollout.rm_hub import async_rm, batched_async_rm
@@ -179,7 +179,7 @@ def check_eval_function_path(path: str) -> None:
     candidate_sig = inspect.signature(fn)
     assert tuple(candidate_sig.parameters) == tuple(default_sig.parameters)
     if path != "slime.rollout.sglang_rollout.generate_rollout":
-        output = call_rollout_fn(fn, None, 5, ContractEvalDataSource(), evaluation=True)
+        output = fn(None, 5, ContractEvalDataSource(), evaluation=True)
         assert isinstance(output, RolloutFnEvalOutput)
         assert output.data
 
@@ -199,7 +199,7 @@ def check_dynamic_filter_path(path: str) -> None:
 
 
 def check_buffer_filter_default() -> None:
-    fn = load_function("slime.rollout.data_source.pop_first")
+    fn = load_function("slime.rollout.data_source._pop_first")
     assert tuple(inspect.signature(fn).parameters)[:4] == ("args", "rollout_id", "buffer", "num_samples")
 
 
@@ -269,7 +269,7 @@ SYNC_CASES = [
     SyncCase(
         "buffer_filter",
         "BUFFER_FILTER_PATH",
-        "slime.rollout.data_source.pop_first",
+        "slime.rollout.data_source._pop_first",
         check_buffer_filter_default,
         check_buffer_filter_path,
     ),

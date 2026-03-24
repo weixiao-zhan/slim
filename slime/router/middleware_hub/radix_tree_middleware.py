@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 from slime.utils.http_utils import post
 from slime.utils.mask_utils import get_response_lengths
-from slime.utils.types import Sample
+from slime.utils.types import Sample  # Sample is the internal rollout working type
 
 from .radix_tree import StringRadixTrie
 

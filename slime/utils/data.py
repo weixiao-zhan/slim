@@ -8,8 +8,6 @@ import re
 import numpy as np
 import ray
 
-from slime.utils.types import Sample
-
 from .timer import Timer
 
 __all__ = ["Dataset"]
@@ -71,6 +69,8 @@ def _parse_generalized_path(s: str):
 
 
 class Dataset:
+    """Loads dataset rows as raw dicts, with optional key extraction/normalization."""
+
     def __init__(
         self,
         path,
@@ -84,10 +84,14 @@ class Dataset:
     ):
         origin_samples = []
         for data in read_file(path):
-            prompt = data.get(prompt_key)
-            metadata = data.get(metadata_key) or {}
+            example = {
+                "prompt": data.get(prompt_key),
+                "metadata": data.get(metadata_key) or {},
+            }
 
-            tools = None
+            if label_key is not None:
+                example["label"] = data.get(label_key)
+
             if tool_key is not None and tool_key in data:
                 tools = data[tool_key]
                 if isinstance(tools, str):
@@ -95,20 +99,14 @@ class Dataset:
                 elif isinstance(tools, np.ndarray):
                     tools = tools.tolist()
                 assert isinstance(tools, list), f"tools must be a list, got {type(tools)} instead"
+                example["tools"] = tools
 
-            multimodal_inputs = None
             if multimodal_keys:
-                multimodal_inputs = {k: data[col] for k, col in multimodal_keys.items() if col in data} or None
+                mm = {k: data[col] for k, col in multimodal_keys.items() if col in data} or None
+                if mm:
+                    example["multimodal_inputs"] = mm
 
-            origin_samples.append(
-                Sample(
-                    prompt=prompt,
-                    label=data[label_key] if label_key is not None else None,
-                    metadata=metadata,
-                    tools=tools,
-                    multimodal_inputs=multimodal_inputs,
-                )
-            )
+            origin_samples.append(example)
 
         self.origin_samples = origin_samples
         self.epoch_id = -1
@@ -146,15 +144,12 @@ def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):
     return len(batches)
 
 
-def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
-    assert len(rollout_data_ref) == dp_size
-    rollout_data = ray.get(rollout_data_ref[dp_rank].inner)
+def process_rollout_data(args, rollout_data_refs, dp_rank, dp_size):
+    """Fetch this DP rank's partition of rollout data."""
+    assert len(rollout_data_refs) == dp_size
+    rollout_data = ray.get(rollout_data_refs[dp_rank])
 
-    partition = rollout_data.pop("partition")
-    total_lengths = rollout_data["total_lengths"]
-
-    # save the seqlen of the whole rollout batch
+    total_lengths = [len(ep.tokens) for ep in rollout_data]
     Timer().seq_lens = total_lengths
-    rollout_data["total_lengths"] = [total_lengths[i] for i in partition]
 
     return rollout_data

@@ -7,7 +7,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from slime.utils.types import Sample  # Sample is the internal rollout working type
 
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score

@@ -29,7 +29,7 @@ from slime.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
-from slime.utils.types import Sample
+from slime.utils.types import Episode, Sample
 
 from .rm_hub import async_rm, batched_async_rm
 
@@ -58,12 +58,9 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
 
 
 class GenerateState(metaclass=SingletonMeta):
-    """
-    The global state for the generation process.
-    """
+    """The global state for the generation process."""
 
     def __init__(self, args: Namespace) -> None:
-        # persistent state for the generation process
         self.args = args
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
@@ -115,11 +112,10 @@ class GenerateState(metaclass=SingletonMeta):
         self.pendings = set()
         self.aborted = False
 
-    def submit_generate_tasks(self, samples: list[list[Sample]]) -> None:
-        for group in samples:
+    def submit_generate_tasks(self, example_groups: list[list[Sample]]) -> None:
+        for group in example_groups:
             self.pendings.add(
                 asyncio.create_task(
-                    # submit a group of samples as a single task.
                     generate_and_rm_group(
                         self.args,
                         group,
@@ -128,7 +124,25 @@ class GenerateState(metaclass=SingletonMeta):
                     )
                 )
             )
-        self.remaining_batch_size += len(samples)
+        self.remaining_batch_size += len(example_groups)
+
+
+def _examples_to_sample_groups(examples: list[dict], args) -> list[list[Sample]]:
+    """Convert raw dataset example dicts to groups of Sample working objects."""
+    groups = []
+    for example in examples:
+        group = []
+        for _ in range(args.n_samples_per_prompt):
+            sample = Sample(
+                prompt=example.get("prompt", ""),
+                label=example.get("label"),
+                tools=example.get("tools"),
+                multimodal_inputs=example.get("multimodal_inputs"),
+                metadata=dict(example.get("metadata", {})),
+            )
+            group.append(sample)
+        groups.append(group)
+    return groups
 
 
 async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample:
@@ -141,8 +155,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     ), f"Sample status is {sample.status}"
 
-    # Apply chat template: convert conversation (list) or raw string to a templated string.
-    # For multi-turn (response > 0), prompt was already converted on the first turn.
+    # Apply chat template
     prompt_for_processing = sample.prompt
     if isinstance(sample.prompt, list):
         messages = sample.prompt
@@ -165,8 +178,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     has_multimodal = sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values())
 
-    # Tokenize: always produce sglang_prompt_ids (non-expanded, for sglang).
-    # For VLM, also produce expanded_prompt_ids (with vision tokens, for training).
+    # Tokenize
     sglang_prompt_ids = await loop.run_in_executor(
         state.cpu_executor,
         lambda: state.tokenizer.encode(prompt_for_processing, add_special_tokens=False),
@@ -217,10 +229,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         payload["input_ids"] = sample.tokens
     else:
         payload["input_ids"] = sglang_prompt_ids
-        if not sample.tokens:  # Initialize sample.tokens with expanded IDs for training
+        if not sample.tokens:
             sample.tokens = list(expanded_prompt_ids)
 
-    # Use session_id for consistent hashing routing if router uses consistent_hashing policy
+    # Use session_id for consistent hashing routing
     headers = None
     if getattr(args, "router_policy", None) == "consistent_hashing" and sample.session_id:
         headers = {"X-SMG-Routing-Key": sample.session_id}
@@ -238,12 +250,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         else:
             new_response_tokens, new_response_log_probs = [], []
 
-        # Update sample with tokens directly - avoiding re-tokenization
         sample.tokens = sample.tokens + new_response_tokens
         sample.response_length += len(new_response_tokens)
         sample.response += output["text"]
 
-        # When partial rollout and masking off policy is enabled, update the loss mask
+        # When partial rollout and masking off policy is enabled
         if sample.loss_mask is not None:
             assert args.partial_rollout and args.mask_offpolicy_in_partial_rollout
             sample.loss_mask += [1] * len(new_response_tokens)
@@ -293,12 +304,10 @@ async def generate_and_rm(
             return sample
 
         with state.dp_rank_context() as _:
-            # Check sample.generate_function_path for per-sample custom_generate_function_path (e.g., from eval dataset config)
             custom_func_path = getattr(sample, "generate_function_path", None) or args.custom_generate_function_path
 
             if custom_func_path is not None:
                 custom_generate_func = load_function(custom_func_path)
-                # if signature has evaluation, pass evaluation
                 if "evaluation" in inspect.signature(custom_generate_func).parameters:
                     sample = await custom_generate_func(args, sample, sampling_params, evaluation=evaluation)
                 else:
@@ -316,7 +325,6 @@ async def generate_and_rm(
         if any([sample.status == Sample.Status.ABORTED for sample in samples]):
             return samples
 
-        # for multi agent system, the reward of some sample is calculated during generation.
         samples_need_reward = [sample for sample in samples if sample.reward is None]
         rewards = await batched_async_rm(args, samples_need_reward)
         for sample, reward in zip(samples_need_reward, rewards, strict=False):
@@ -325,7 +333,6 @@ async def generate_and_rm(
     else:
         if sample.status == Sample.Status.ABORTED:
             return sample
-        # for multi-turn environment, a reward could be assigned to the agent.
         if sample.reward is None:
             sample.reward = await async_rm(args, sample)
 
@@ -340,7 +347,6 @@ async def generate_and_rm_group(
     if state.aborted:
         return group
 
-    # Generate a unique session_id for each sample in the group
     for sample in group:
         if sample.session_id is None:
             sample.session_id = str(uuid.uuid4())
@@ -395,7 +401,6 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
         if not args.partial_rollout:
             continue
 
-        # for partial rollout, collect the partial samples into the data buffer
         for task in done:
             group = task.result()
             for sample in group:
@@ -411,43 +416,38 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
 
 
 async def generate_rollout_async(
-    args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
-) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
-    """An example to implement the generate_rollout function for an rule based rm rollout generation.
+    args: Namespace, rollout_id: int, get_examples: Callable[[int], list[dict]]
+) -> tuple[RolloutFnTrainOutput, list[dict]]:
+    """Generate rollout episodes from dataset examples.
 
     Args:
         args: the whole args
-        rollout_id: int, the id of the rollout, used for deterministic data generation
-        data_source: the data source to fetch
+        rollout_id: int, the id of the rollout
+        get_examples: callable that returns N raw dataset example dicts
 
     Returns:
-        tuple[RolloutFnTrainOutput, list[list[Sample]]]:
-            - data: a list of groups of samples generated by the rollout, length equals `rollout_batch_size`
-            - aborted_samples: any partial groups collected during abort when partial_rollout is enabled
+        tuple of (RolloutFnTrainOutput with flat list of Episodes, aborted example dicts)
     """
     assert args.rollout_global_dataset
 
     state = GenerateState(args)
 
-    # instantiate data filters
     dynamic_filter = (
         load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None
     )
 
     metric_gatherer = MetricGatherer()
-
-    # target_data_size is the total number of valid samples to get
     target_data_size = args.rollout_batch_size
 
-    data = []
-    all_data = []
+    data = []  # list of Sample groups (kept)
+    all_data = []  # list of all Sample groups (for filters)
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
     while len(data) < target_data_size:
         while state.remaining_batch_size < target_data_size:
-            # get samples from the buffer and submit the generation requests.
-            samples = data_source(args.over_sampling_batch_size)
-            state.submit_generate_tasks(samples)
+            examples = get_examples(args.over_sampling_batch_size)
+            sample_groups = _examples_to_sample_groups(examples, args)
+            state.submit_generate_tasks(sample_groups)
 
         # wait for the generation to finish
         done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
@@ -455,9 +455,9 @@ async def generate_rollout_async(
             group: list[Sample] = task.result()
 
             if do_print:
-                sample = group[0][0] if isinstance(group[0], list) else group[0]
+                s = group[0][0] if isinstance(group[0], list) else group[0]
                 logger.info(
-                    f"First rollout sample: {[str(sample.prompt) + sample.response]}, label: {str(sample.label)[:100]}, reward: {sample.reward}",
+                    f"First rollout sample: {[str(s.prompt) + s.response]}, label: {str(s.label)[:100]}, reward: {s.reward}",
                 )
                 do_print = False
 
@@ -469,67 +469,68 @@ async def generate_rollout_async(
                 state.remaining_batch_size -= 1
                 continue
 
-            # add the samples to the data
-            # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
                 data.append(group)
                 pbar.update(args.n_samples_per_prompt)
 
     pbar.close()
-    sample = data[-1][0][0] if isinstance(data[-1][0], list) else data[-1][0]
+    s = data[-1][0][0] if isinstance(data[-1][0], list) else data[-1][0]
     logger.info(
-        f"Finish rollout: {[str(sample.prompt) + sample.response]}, label: {str(sample.label)[:100]}, reward: {sample.reward}",
+        f"Finish rollout: {[str(s.prompt) + s.response]}, label: {str(s.label)[:100]}, reward: {s.reward}",
     )
 
-    # there are still some unfinished requests, abort them
-    aborted_samples = await abort(args, rollout_id)
+    # abort remaining requests
+    aborted_sample_groups = await abort(args, rollout_id)
 
     assert len(data) == args.rollout_batch_size, f"Got {len(data)} samples, expected {args.rollout_batch_size}"
-    data = sorted(data, key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index)
-    all_samples = sorted(
-        all_data, key=lambda group: group[0][0].index if isinstance(group[0], list) else group[0].index
-    )
 
-    # reset the global state to prevent effects on the next rollout or eval.
+    # Sort groups by index for determinism
+    data = sorted(data, key=lambda group: id(group[0]))
+
     state.reset()
+
     if args.rollout_sample_filter_path is not None:
         filter_func = load_function(args.rollout_sample_filter_path)
         filter_func(args, data)
 
-    # There can be circumstances where users want to process all samples including filtered ones.
     if args.rollout_all_samples_process_path is not None:
         process_func = load_function(args.rollout_all_samples_process_path)
-        process_func(args, all_samples, data_source)
+        process_func(args, all_data, get_examples)
 
-    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect()), aborted_samples
+    # Convert Sample groups → flat list of Episodes
+    episodes = []
+    for group in data:
+        for sample in group:
+            episodes.append(sample.to_episode(args))
+
+    # Convert aborted samples back to example dicts for re-queuing
+    aborted_examples = []
+    for group in aborted_sample_groups:
+        for sample in group:
+            aborted_examples.append({"prompt": sample.prompt, "label": sample.label, "metadata": sample.metadata})
+
+    return RolloutFnTrainOutput(episodes=episodes, metrics=metric_gatherer.collect()), aborted_examples
 
 
 EVAL_PROMPT_DATASET = {}
 
 
-async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict[str, list[Any]]], list[list[Sample]]]:
+async def eval_rollout(args: Namespace, rollout_id: int) -> RolloutFnEvalOutput:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     coros = []
     for dataset_cfg in getattr(args, "eval_datasets", []) or []:
         coros.append(eval_rollout_single_dataset(args, rollout_id, dataset_cfg))
     results_list = await asyncio.gather(*coros)
-    results = {}
+    combined = {}
     for r in results_list:
-        results.update(r)
-    return RolloutFnEvalOutput(data=results), []
+        combined.update(r)
+    return RolloutFnEvalOutput(data=combined)
 
 
 async def eval_rollout_single_dataset(
     args: Namespace, rollout_id: int, dataset_cfg: EvalDatasetConfig
-) -> dict[str, dict[str, list[Any]]]:
-    """An example to implement the eval_rollout function for an rule based rm rollout generation.
-
-    Args:
-        args: the whole args
-        rollout_id: int, the id of the rollout, used for deterministic data generation
-        dataset_cfg: configuration of the dataset
-    """
+) -> dict[str, list[Episode]]:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     global EVAL_PROMPT_DATASET
@@ -559,85 +560,67 @@ async def eval_rollout_single_dataset(
     )
 
     tasks = []
-    # do multiple samples for eval prompts
-    sample_index = 0
-    for _i, prompt_sample in enumerate(dataset.samples):
+    for _i, example in enumerate(dataset.samples):
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
-            # Avoid deepcopying multimodal_inputs (PIL images) — expensive and read-only
-            saved_multimodal = prompt_sample.multimodal_inputs
-            prompt_sample.multimodal_inputs = None
-            sample = copy.deepcopy(prompt_sample)
-            prompt_sample.multimodal_inputs = saved_multimodal
-            sample.multimodal_inputs = saved_multimodal
-            sample.index = sample_index
-            sample_index += 1
-            sample.metadata = dataset_cfg.inject_metadata(getattr(sample, "metadata", None))
-            sample.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
+            sample = Sample(
+                prompt=example.get("prompt", ""),
+                label=example.get("label"),
+                tools=example.get("tools"),
+                multimodal_inputs=example.get("multimodal_inputs"),
+                metadata=dataset_cfg.inject_metadata(example.get("metadata")),
+                generate_function_path=getattr(dataset_cfg, "custom_generate_function_path", None),
+            )
             sampling_params = base_sampling_params
             if getattr(args, "sglang_enable_deterministic_inference", False):
                 sampling_params = base_sampling_params.copy()
                 sampling_params["sampling_seed"] = args.rollout_seed + j
             tasks.append(
                 asyncio.create_task(
-                    generate_and_rm(
-                        args,
-                        sample,
-                        sampling_params=sampling_params,
-                        evaluation=True,
-                    )
+                    generate_and_rm(args, sample, sampling_params=sampling_params, evaluation=True)
                 )
             )
 
-    data = []
+    samples = []
     do_print = True
     pbar = tqdm(total=len(tasks), desc=f"Eval {dataset_cfg.name}", disable=not do_print)
     for coro in asyncio.as_completed(tasks):
-        sample = await coro
+        result = await coro
         if do_print:
-            logger.info(
-                "eval_rollout_single_dataset example data: "
-                f"{[str(sample.prompt) + sample.response]} "
-                f"reward={sample.reward}"
-            )
+            s = result[0] if isinstance(result, list) else result
+            logger.info(f"eval_rollout_single_dataset example data: {[str(s.prompt) + s.response]} reward={s.reward}")
             do_print = False
-        if isinstance(sample, list):
-            data.extend(sample)
+        if isinstance(result, list):
+            samples.extend(result)
         else:
-            data.append(sample)
+            samples.append(result)
         pbar.update(1)
     pbar.close()
 
-    data.sort(key=lambda sample: sample.index)
+    # Convert to episodes
+    episodes = [s.to_episode(args) for s in samples]
 
-    reward_key = args.eval_reward_key or args.reward_key
-    return {
-        dataset_cfg.name: {
-            "rewards": [sample.reward if not reward_key else sample.reward[reward_key] for sample in data],
-            "truncated": [sample.status == Sample.Status.TRUNCATED for sample in data],
-            "samples": data,
-        }
-    }
+    return {dataset_cfg.name: episodes}
 
 
 def generate_rollout(
     args: Namespace, rollout_id: int, data_source: Any, evaluation: bool = False
 ) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
-    """An example to implement the generate_rollout function for an rule based rm rollout generation.
+    """Default generate_rollout function for rule-based RM rollout generation.
 
     Args:
         args: the whole args
-        rollout_id: int, the id of the rollout, used for deterministic data generation
-        data_source: the data source to get and store samples
-        evaluation: bool, whether the rollout is for evaluation or not
+        rollout_id: int, the id of the rollout
+        data_source: the data source to get and store examples
+        evaluation: bool, whether the rollout is for evaluation
 
     Returns:
-        RolloutFnTrainOutput | RolloutFnEvalOutput: the output of the rollout
+        RolloutFnTrainOutput | RolloutFnEvalOutput
     """
     assert args.rollout_global_dataset
     if evaluation:
         output, _ = run(eval_rollout(args, rollout_id))
         return output
 
-    output, aborted_samples = run(generate_rollout_async(args, rollout_id, data_source.get_samples))
-    data_source.add_samples(aborted_samples)
+    output, aborted_examples = run(generate_rollout_async(args, rollout_id, data_source.get_examples))
+    data_source.add_examples(aborted_examples)
     return output

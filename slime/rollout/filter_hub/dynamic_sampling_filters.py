@@ -7,6 +7,7 @@ __all__ = ["check_reward_nonzero_std"]
 
 
 def check_reward_nonzero_std(args, samples: list[Sample], **kwargs):
+    """Dynamic filter: drop groups where all rewards are identical (zero std)."""
     rewards = [sample.get_reward_value(args) for sample in samples]
     keep = torch.tensor(rewards, dtype=torch.float64).std() > 1e-6
     return DynamicFilterOutput(

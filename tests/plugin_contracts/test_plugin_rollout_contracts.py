@@ -24,27 +24,23 @@ NUM_GPUS = 0
 DEFAULT_ROLLOUT_FUNCTION_PATH = "slime.rollout.sglang_rollout.generate_rollout"
 REFERENCE_ROLLOUT_FUNCTION_PATH = "plugin_contracts.test_plugin_rollout_contracts.valid_rollout_function"
 
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, call_rollout_fn
+from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slime.rollout.sglang_rollout import generate_rollout as default_generate_rollout
 from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from slime.utils.types import Episode
 
 
 def run_contract_test_file() -> None:
     run_contract_test_for_file(__file__, path_args=["rollout-function-path"])
 
 
-def make_sample(index: int, reward: float = 1.0) -> Sample:
+def make_episode(index: int, reward: float = 1.0) -> Episode:
     tokens = [1000 + index, 2000 + index]
-    return Sample(
-        index=index,
-        prompt=f"prompt-{index}",
-        response=f"response-{index}",
+    return Episode(
         tokens=tokens,
         response_length=len(tokens),
         reward=reward,
-        status=Sample.Status.COMPLETED,
-        metadata={},
+        response=f"response-{index}",
     )
 
 
@@ -53,74 +49,68 @@ class ContractDataSource:
         self.n_samples_per_prompt = n_samples_per_prompt
         self.next_index = 0
 
-    def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        groups = []
-        for _ in range(num_samples):
-            group = [make_sample(self.next_index + i, reward=0.0) for i in range(self.n_samples_per_prompt)]
-            self.next_index += self.n_samples_per_prompt
-            groups.append(group)
-        return groups
+    def get_examples(self, num_prompts: int) -> list[dict]:
+        examples = []
+        for _ in range(num_prompts):
+            examples.append({"prompt": f"prompt-{self.next_index}", "metadata": {}})
+            self.next_index += 1
+        return examples
+
+    def add_examples(self, examples: list[dict]):
+        pass
 
 
 def valid_rollout_function(args, rollout_id, data_source, evaluation=False):
     if evaluation:
-        sample = make_sample(0, reward=0.75)
+        ep = make_episode(0, reward=0.75)
         return RolloutFnEvalOutput(
-            data={"contract_eval": {"rewards": [sample.reward], "truncated": [False], "samples": [sample]}},
+            data={"contract_eval": [ep]},
             metrics={"source": "contract"},
         )
 
-    groups = data_source.get_samples(2)
-    for group_index, group in enumerate(groups):
-        for sample_index, sample in enumerate(group):
-            sample.tokens = [group_index, sample_index, rollout_id]
-            sample.response = f"group-{group_index}-sample-{sample_index}"
-            sample.response_length = len(sample.tokens)
-            sample.reward = float(group_index + sample_index)
-            sample.status = Sample.Status.COMPLETED
-    return RolloutFnTrainOutput(samples=groups, metrics={"source": "contract"})
+    episodes = []
+    examples = data_source.get_examples(2)
+    for group_index, example in enumerate(examples):
+        for sample_index in range(2):
+            ep = Episode(
+                tokens=[group_index, sample_index, rollout_id],
+                response=f"group-{group_index}-sample-{sample_index}",
+                response_length=3,
+                reward=float(group_index + sample_index),
+            )
+            episodes.append(ep)
+    return RolloutFnTrainOutput(episodes=episodes, metrics={"source": "contract"})
 
 
 def invalid_rollout_function(args, rollout_id, data_source, evaluation=False):
-    sample = make_sample(0)
-    sample.reward = None
-    return RolloutFnTrainOutput(samples=[[sample]])
+    ep = make_episode(0)
+    ep.tokens = []
+    return RolloutFnTrainOutput(episodes=[ep])
 
 
-def legacy_rollout_function(args, rollout_id, data_source, evaluation=False):
-    if evaluation:
-        sample = make_sample(1, reward=0.5)
-        return {"legacy_eval": {"rewards": [sample.reward], "truncated": [False], "samples": [sample]}}
-    return [[make_sample(1)]]
-
-
-def assert_sample_contract(sample: Sample) -> None:
-    assert isinstance(sample, Sample)
-    assert isinstance(sample.tokens, list)
-    assert all(isinstance(token, int) for token in sample.tokens)
-    assert isinstance(sample.response, str)
-    assert isinstance(sample.response_length, int)
-    assert sample.reward is not None
-    assert isinstance(sample.status, Sample.Status)
+def assert_episode_contract(ep: Episode) -> None:
+    assert isinstance(ep, Episode)
+    assert isinstance(ep.tokens, list)
+    assert all(isinstance(token, int) for token in ep.tokens)
+    assert isinstance(ep.response, str)
+    assert isinstance(ep.response_length, int)
+    assert ep.reward is not None
 
 
 def assert_train_rollout_contract(output: RolloutFnTrainOutput, n_samples_per_prompt: int) -> None:
     assert isinstance(output, RolloutFnTrainOutput)
-    assert output.samples
-    for group in output.samples:
-        assert len(group) == n_samples_per_prompt
-        for sample in group:
-            assert_sample_contract(sample)
+    assert output.episodes
+    for ep in output.episodes:
+        assert_episode_contract(ep)
 
 
 def assert_eval_rollout_contract(output: RolloutFnEvalOutput) -> None:
     assert isinstance(output, RolloutFnEvalOutput)
     assert output.data
-    for dataset_data in output.data.values():
-        assert set(dataset_data) >= {"rewards", "truncated", "samples"}
-        assert len(dataset_data["rewards"]) == len(dataset_data["truncated"]) == len(dataset_data["samples"])
-        for sample in dataset_data["samples"]:
-            assert_sample_contract(sample)
+    for dataset_name, episodes in output.data.items():
+        assert isinstance(episodes, list)
+        for ep in episodes:
+            assert_episode_contract(ep)
 
 
 def assert_rollout_function_signature_matches_default(fn) -> None:
@@ -139,8 +129,8 @@ def assert_rollout_function_matches_default_contract(fn) -> None:
     assert_rollout_function_signature_matches_default(fn)
 
     data_source = ContractDataSource()
-    train_output = call_rollout_fn(fn, None, 2, data_source, evaluation=False)
-    eval_output = call_rollout_fn(fn, None, 2, data_source, evaluation=True)
+    train_output = fn(None, 2, data_source, evaluation=False)
+    eval_output = fn(None, 2, data_source, evaluation=True)
 
     assert_train_rollout_contract(train_output, n_samples_per_prompt=2)
     assert_eval_rollout_contract(eval_output)
@@ -166,14 +156,6 @@ def test_default_rollout_signature_is_stable():
     default_sig = inspect.signature(default_generate_rollout)
     assert tuple(default_sig.parameters) == ("args", "rollout_id", "data_source", "evaluation")
     assert default_sig.parameters["evaluation"].default is False
-
-
-def test_default_rollout_compat_wrapper_stability():
-    data_source = ContractDataSource(n_samples_per_prompt=1)
-    train_output = call_rollout_fn(legacy_rollout_function, None, 1, data_source, evaluation=False)
-    eval_output = call_rollout_fn(legacy_rollout_function, None, 1, data_source, evaluation=True)
-    assert_train_rollout_contract(train_output, n_samples_per_prompt=1)
-    assert_eval_rollout_contract(eval_output)
 
 
 def test_local_rollout_plugin_aligns_with_default_input_output_format():

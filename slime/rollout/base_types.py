@@ -1,26 +1,16 @@
 from dataclasses import dataclass
 from typing import Any
 
-from slime.utils.types import Sample
+from slime.utils.types import Episode
 
 
 @dataclass
 class RolloutFnTrainOutput:
-    samples: list[list[Sample]]
+    episodes: list[Episode]
     metrics: dict[str, Any] = None
 
 
 @dataclass
 class RolloutFnEvalOutput:
-    data: dict[str, dict[str, Any]]
+    data: dict[str, list[Episode]]
     metrics: dict[str, Any] = None
-
-
-def call_rollout_fn(fn, *args, evaluation: bool, **kwargs):
-    output = fn(*args, **kwargs, evaluation=evaluation)
-
-    # compatibility for legacy version
-    if not isinstance(output, (RolloutFnTrainOutput, RolloutFnEvalOutput)):
-        output = RolloutFnEvalOutput(data=output) if evaluation else RolloutFnTrainOutput(samples=output)
-
-    return output

@@ -16,15 +16,14 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from slime.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
-from slime.rollout.base_types import call_rollout_fn
 from slime.utils import logging_utils
 from slime.utils.health_monitor import RolloutHealthMonitor
 from slime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
 from slime.utils.logging_utils import configure_logger, init_tracking
 from slime.utils.metric_utils import compute_pass_rate, compute_rollout_step, compute_statistics, dict_add_prefix
-from slime.utils.misc import Box, group_by, load_function
+from slime.utils.misc import group_by, load_function
 from slime.utils.seqlen_balancing import get_seqlen_balanced_partitions
-from slime.utils.types import Sample
+from slime.utils.types import Episode
 
 from ..utils.metric_utils import has_repetition
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -365,11 +364,6 @@ class RolloutManager:
         self.custom_reward_post_process_func = None
         if self.args.custom_reward_post_process_path is not None:
             self.custom_reward_post_process_func = load_function(self.args.custom_reward_post_process_path)
-        self.custom_convert_samples_to_train_data_func = None
-        if self.args.custom_convert_samples_to_train_data_path is not None:
-            self.custom_convert_samples_to_train_data_func = load_function(
-                self.args.custom_convert_samples_to_train_data_path
-            )
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -463,23 +457,22 @@ class RolloutManager:
         self.health_monitoring_resume()
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
-        data, metrics = self._get_rollout_data(rollout_id=rollout_id)
-        self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
-        _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+        episodes, metrics = self._get_rollout_episodes(rollout_id=rollout_id)
+        self._save_debug_rollout_data(episodes, rollout_id=rollout_id, evaluation=False)
+        _log_rollout_data(rollout_id, self.args, episodes, metrics, time.time() - start_time)
         if self.args.debug_rollout_only:
-            # if debug rollout only, we don't convert samples to train data and directly return
             return
-        data = self._convert_samples_to_train_data(data)
-        return self._split_train_data_by_dp(data, self.train_parallel_config["dp_size"])
+        self._normalize_rewards(episodes)
+        self._apply_loss_masks(episodes)
+        return self._split_episodes_by_dp(episodes, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
-            # if debug train only, we don't generate evaluation data
             return
         self.health_monitoring_resume()
 
-        result = call_rollout_fn(self.eval_generate_rollout, self.args, rollout_id, self.data_source, evaluation=True)
-        data = result.data
+        result = self.eval_generate_rollout(self.args, rollout_id, self.data_source, evaluation=True)
+        data = result.data  # dict[str, list[Episode]]
         self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=True)
         _log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
 
@@ -546,47 +539,28 @@ class RolloutManager:
     def check_weights(self, action: str):
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
-    def _get_rollout_data(self, rollout_id):
-        if self.args.load_debug_rollout_data:
-            data = torch.load(
-                self.args.load_debug_rollout_data.format(rollout_id=rollout_id),
-                weights_only=False,
-            )["samples"]
-            data = [Sample.from_dict(sample) for sample in data]
-            if (ratio := self.args.load_debug_rollout_data_subsample) is not None:
-                original_num_rows = len(data)
-                rough_subsample_num_rows = int(original_num_rows * ratio)
-                data = data[: rough_subsample_num_rows // 2] + data[-rough_subsample_num_rows // 2 :]
-                logger.info(
-                    f"Subsample loaded debug rollout data using {ratio=} and change num rows {original_num_rows} -> {len(data)}"
-                )
-            metrics = None
-        else:
-            data = call_rollout_fn(self.generate_rollout, self.args, rollout_id, self.data_source, evaluation=False)
-            metrics = data.metrics
-            data = data.samples
-            # flatten the data if it is a list of lists
-            while isinstance(data[0], list):
-                data = list(itertools.chain.from_iterable(data))
+    def _get_rollout_episodes(self, rollout_id) -> tuple[list[Episode], dict | None]:
+        result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+        metrics = result.metrics
+        episodes = result.episodes
 
-            if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
-                global_batch_size = self.args.global_batch_size
-                if self.args.use_dynamic_global_batch_size:
-                    logger.info(f"Collected {len(data)} samples from rollout to train with dynamic global batch size")
-                    # TODO: this is a temporary solution, we should directly save dynamic_global_batch_size to rollout data
-                    self._dynamic_global_batch_size = self._compute_dynamic_global_batch_size(len(data))
-                    global_batch_size = self._dynamic_global_batch_size
+        if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
+            global_batch_size = self.args.global_batch_size
+            if self.args.use_dynamic_global_batch_size:
+                logger.info(f"Collected {len(episodes)} episodes from rollout to train with dynamic global batch size")
+                self._dynamic_global_batch_size = self._compute_dynamic_global_batch_size(len(episodes))
+                global_batch_size = self._dynamic_global_batch_size
 
-                if len(data) % global_batch_size != 0:
-                    trim_len = (len(data) // global_batch_size) * global_batch_size
-                    if trim_len == 0:
-                        raise ValueError(f"Not enough samples {len(data)} for global_batch_size {global_batch_size}")
-                    origin_data_length = len(data)
-                    data = data[:trim_len]
-                    logger.info(f"trim number of samples from {origin_data_length} to {trim_len}")
-                logger.info(f"Final collected {len(data)} samples from rollout to train")
+            if len(episodes) % global_batch_size != 0:
+                trim_len = (len(episodes) // global_batch_size) * global_batch_size
+                if trim_len == 0:
+                    raise ValueError(f"Not enough episodes {len(episodes)} for global_batch_size {global_batch_size}")
+                origin_len = len(episodes)
+                episodes = episodes[:trim_len]
+                logger.info(f"trim number of episodes from {origin_len} to {trim_len}")
+            logger.info(f"Final collected {len(episodes)} episodes from rollout to train")
 
-        return data, metrics
+        return episodes, metrics
 
     def _compute_dynamic_global_batch_size(self, num_samples: int) -> int:
         """Calculate dynamic global_batch_size to ensure only one training step.
@@ -616,40 +590,31 @@ class RolloutManager:
         return dynamic_gbs
 
     def _save_debug_rollout_data(self, data, rollout_id, evaluation: bool):
-        # TODO to be refactored (originally Buffer._set_data)
         if (path_template := self.args.save_debug_rollout_data) is not None:
             path = Path(path_template.format(rollout_id=("eval_" if evaluation else "") + str(rollout_id)))
             logger.info(f"Save debug rollout data to {path}")
             path.parent.mkdir(parents=True, exist_ok=True)
 
-            # TODO may improve the format
             if evaluation:
-                dump_data = dict(
-                    samples=[sample.to_dict() for dataset_name, info in data.items() for sample in info["samples"]]
-                )
+                all_episodes = [ep for episodes in data.values() for ep in episodes]
+                dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in all_episodes])
             else:
-                dump_data = dict(
-                    samples=[sample.to_dict() for sample in data],
-                )
+                dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in data])
 
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
 
-    def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
+    def _normalize_rewards(self, episodes: list[Episode]):
+        """Normalize rewards in-place (e.g. GRPO group normalization)."""
         if self.custom_reward_post_process_func is not None:
-            return self.custom_reward_post_process_func(self.args, samples)
+            self.custom_reward_post_process_func(self.args, episodes)
+            return
 
-        raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
         if (
             self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
             and self.args.rewards_normalization
         ):
-            # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
-            if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
-                rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
-            else:
-                # when samples count are not equal in each group
-                rewards = rewards.view(-1, rewards.shape[-1])
+            rewards = torch.tensor([ep.reward for ep in episodes], dtype=torch.float)
+            rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             mean = rewards.mean(dim=-1, keepdim=True)
             rewards = rewards - mean
 
@@ -657,130 +622,36 @@ class RolloutManager:
                 std = rewards.std(dim=-1, keepdim=True)
                 rewards = rewards / (std + 1e-6)
 
-            return raw_rewards, rewards.flatten().tolist()
+            for ep, r in zip(episodes, rewards.flatten().tolist(), strict=True):
+                ep.reward = r
 
-        return raw_rewards, raw_rewards
-
-    def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
-        """
-        Convert inference generated samples to training data.
-        """
-        if self.custom_convert_samples_to_train_data_func is not None:
-            return self.custom_convert_samples_to_train_data_func(self.args, samples)
-
-        raw_rewards, rewards = self._post_process_rewards(samples)
-
-        assert len(raw_rewards) == len(samples)
-        assert len(rewards) == len(samples)
-
-        train_data = {
-            "tokens": [sample.tokens for sample in samples],
-            "response_lengths": [sample.response_length for sample in samples],
-            # some reward model, e.g. remote rm, may return multiple rewards,
-            # we could use key to select the reward.
-            "rewards": rewards,
-            "raw_reward": raw_rewards,
-            "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
-            "sample_indices": [sample.index for sample in samples],
-        }
-
-        # loss mask
-        # TODO: compress the loss mask
-        loss_masks = []
-        for sample in samples:
-            # always instantiate loss_mask if not provided
-            if sample.loss_mask is None:
-                sample.loss_mask = [1] * sample.response_length
-
-            assert (
-                len(sample.loss_mask) == sample.response_length
-            ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
-            if sample.remove_sample:
-                sample.loss_mask = [0] * sample.response_length
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
-
-        # overwriting the raw reward
-        if samples[0].metadata and "raw_reward" in samples[0].metadata:
-            train_data["raw_reward"] = [sample.metadata["raw_reward"] for sample in samples]
-
-        # For rollout buffer
-        if samples[0].metadata and "round_number" in samples[0].metadata:
-            train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
-
-        # Add rollout log probabilities for off-policy correction
-        if samples[0].rollout_log_probs is not None:
-            train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
-
-        if samples[0].rollout_routed_experts is not None:
-            train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
-
-        if samples[0].train_metadata is not None:
-            train_data["metadata"] = [sample.train_metadata for sample in samples]
-
-        if any(sample.multimodal_train_inputs is not None for sample in samples):
-            train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
-
-        if samples[0].teacher_log_probs is not None:
-            train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
-
-        return train_data
+    def _apply_loss_masks(self, episodes: list[Episode]):
+        """Materialize loss_mask: None → all-ones."""
+        for ep in episodes:
+            if ep.loss_mask is None:
+                ep.loss_mask = [1] * ep.response_length
+            assert len(ep.loss_mask) == ep.response_length, (
+                f"loss mask length {len(ep.loss_mask)} != response length {ep.response_length}"
+            )
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
 
-    def _split_train_data_by_dp(self, data, dp_size):
-        """Split the train data by data parallel size."""
-        rollout_data = {}
-
-        if "prompt" in data:
-            rollout_data["prompt"] = data["prompt"]
-
-        total_lengths = [len(t) for t in data["tokens"]]
-        data["total_lengths"] = total_lengths
+    def _split_episodes_by_dp(self, episodes: list[Episode], dp_size: int) -> list:
+        """Split episodes across DP ranks, returning list of ray ObjectRefs."""
+        total_lengths = [len(ep.tokens) for ep in episodes]
 
         if self.args.balance_data:
             partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
         else:
             partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
 
-        rollout_data_refs = []
-
+        refs = []
         for i in range(dp_size):
-            rollout_data = {}
             partition = partitions[i]
-            rollout_data["partition"] = partition
-            for key in [
-                "tokens",
-                "multimodal_train_inputs",
-                "response_lengths",
-                "rewards",
-                "truncated",
-                "loss_masks",
-                "round_number",
-                "sample_indices",
-                "rollout_log_probs",
-                "rollout_routed_experts",
-                "prompt",
-                "teacher_log_probs",
-            ]:
-                if key not in data:
-                    continue
-                val = [data[key][j] for j in partition]
-                rollout_data[key] = val
-            # keys that need to be splited at train side
-            for key in [
-                "raw_reward",
-                "total_lengths",
-            ]:
-                if key not in data:
-                    continue
-                rollout_data[key] = data[key]
-            # Pass dynamic global_batch_size to training side
-            if hasattr(self, "_dynamic_global_batch_size"):
-                rollout_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
-            rollout_data_refs.append(Box(ray.put(rollout_data)))
-        return rollout_data_refs
+            partition_episodes = [episodes[j] for j in partition]
+            refs.append(ray.put(partition_episodes))
+        return refs
 
 
 def _allocate_rollout_engine_addr_and_ports_external(args, rollout_engines):
@@ -1127,27 +998,22 @@ def _resolve_sglang_config(args) -> SglangConfig:
     )
 
 
-def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] | None = None):
+def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], extra_metrics: dict[str, Any] | None = None):
     if args.custom_eval_rollout_log_function_path is not None:
         custom_log_func = load_function(args.custom_eval_rollout_log_function_path)
         if custom_log_func(rollout_id, args, data, extra_metrics):
             return
 
     log_dict = extra_metrics or {}
-    for key in data.keys():
-        rewards = data[key]["rewards"]
+    for key, episodes in data.items():
+        rewards = [ep.reward for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
-        if (samples := data[key].get("samples")) is not None:
-            log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), f"eval/{key}/")
-        if "truncated" in data[key]:
-            truncated = data[key]["truncated"]
-            log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
+        log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
+        truncated = [int(ep.truncated) for ep in episodes]
+        log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
         if args.log_passrate:
             log_dict |= dict_add_prefix(
-                compute_pass_rate(
-                    flat_rewards=rewards,
-                    group_size=args.n_samples_per_eval_prompt,
-                ),
+                compute_pass_rate(flat_rewards=rewards, group_size=args.n_samples_per_eval_prompt),
                 f"eval/{key}-",
             )
 
@@ -1160,38 +1026,34 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
     return log_dict
 
 
-def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_metrics, rollout_time):
     if args.custom_rollout_log_function_path is not None:
         custom_log_func = load_function(args.custom_rollout_log_function_path)
-        if custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
+        if custom_log_func(rollout_id, args, episodes, rollout_extra_metrics, rollout_time):
             return
 
-    if args.load_debug_rollout_data:
-        return
-
     log_dict = {**(rollout_extra_metrics or {})}
-    log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), "rollout/")
-    log_dict |= dict_add_prefix(compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
+    log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), "rollout/")
+    log_dict |= dict_add_prefix(_compute_perf_metrics(args, episodes, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
     logging_utils.log(args, log_dict, step_key="rollout/step")
 
 
-def compute_metrics_from_samples(args, samples):
-    response_lengths = [sample.effective_response_length for sample in samples]
+def _compute_episode_metrics(args, episodes: list[Episode]):
+    response_lengths = [ep.effective_response_length for ep in episodes]
 
     log_dict = {}
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
-    log_dict |= _compute_zero_std_metrics(args, samples)
-    log_dict |= _compute_reward_cat_metrics(args, samples)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(s.response)) for s in samples]).item()
-    log_dict["truncated_ratio"] = np.mean([int(s.status == Sample.Status.TRUNCATED) for s in samples]).item()
+    log_dict |= _compute_zero_std_metrics(args, episodes)
+    log_dict["repetition_frac"] = np.mean([int(has_repetition(ep.response)) for ep in episodes]).item()
+    log_dict["truncated_ratio"] = np.mean([int(ep.truncated) for ep in episodes]).item()
     return log_dict
 
 
-def compute_perf_metrics_from_samples(args, samples, rollout_time):
-    non_generation_time = [sample.non_generation_time for sample in samples]
+def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
+    non_generation_time = [ep.non_generation_time for ep in episodes]
 
     log_dict = {}
     log_dict["rollout_time"] = rollout_time
@@ -1207,65 +1069,34 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
         if max(non_generation_time) == 0:
             return
 
-        non_generation_time = [
+        ngt_for_longest = [
             t for t, length in zip(non_generation_time, response_lengths, strict=True) if length == max_response_length
         ]
-        mean_non_generation_time = sum(non_generation_time) / len(non_generation_time)
+        mean_ngt = sum(ngt_for_longest) / len(ngt_for_longest)
 
-        log_dict[f"longest_{key}sample_non_generation_time"] = mean_non_generation_time
+        log_dict[f"longest_{key}sample_non_generation_time"] = mean_ngt
         log_dict[f"longest_{key}sample_tokens_per_sec_without_non_generation"] = max_response_length / (
-            rollout_time - mean_non_generation_time
+            rollout_time - mean_ngt
         )
 
-    token_perf([sample.response_length for sample in samples], non_generation_time, key="")
-    token_perf([sample.effective_response_length for sample in samples], non_generation_time, key="effective_")
+    token_perf([ep.response_length for ep in episodes], non_generation_time, key="")
+    token_perf([ep.effective_response_length for ep in episodes], non_generation_time, key="effective_")
 
     return log_dict
 
 
-def _compute_zero_std_metrics(args, all_samples: list[Sample]):
-    # only compute in GRPO-like algorithms where one prompt has multiple responses
+def _compute_zero_std_metrics(args, episodes: list[Episode]):
     if args.advantage_estimator == "ppo":
         return {}
 
-    def _is_zero_std(samples: list[Sample]):
-        rewards = [sample.get_reward_value(args) for sample in samples]
+    n = args.n_samples_per_prompt
+    groups = [episodes[i : i + n] for i in range(0, len(episodes), n)]
+
+    def _is_zero_std(group):
+        rewards = [ep.reward for ep in group]
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
 
-    all_sample_groups = group_by(all_samples, lambda s: s.group_index)
-    interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
-
-    interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
+    interesting = [g for g in groups if _is_zero_std(g)]
+    interesting_rewards = [str(round(g[0].reward, 1)) for g in interesting]
 
     return {f"zero_std/count_{reward}": len(items) for reward, items in group_by(interesting_rewards).items()}
-
-
-def _compute_spec_metrics(args, all_samples: list[Sample]):
-    if args.sglang_speculative_algorithm is None:
-        return {}
-    num_samples = len(all_samples)
-    metrics = {}
-    metrics["spec_accept_rate"] = sum(sample.spec_info.spec_accept_rate for sample in all_samples) / num_samples
-    metrics["spec_accept_length"] = sum(sample.spec_info.spec_accept_length for sample in all_samples) / num_samples
-    return metrics
-
-
-def _compute_prefix_cache_metrics(args, all_samples: list[Sample]):
-    num_samples = len(all_samples)
-    metrics = {}
-    total_cached_tokens = sum(sample.prefix_cache_info.cached_tokens for sample in all_samples)
-    total_prompt_tokens = sum(sample.prefix_cache_info.total_prompt_tokens for sample in all_samples)
-
-    metrics["prefix_cache_hit_rate"] = total_cached_tokens / total_prompt_tokens if total_prompt_tokens > 0 else 0.0
-    metrics["avg_cached_tokens_per_sample"] = total_cached_tokens / num_samples
-    return metrics
-
-
-def _compute_reward_cat_metrics(args, all_samples: list[Sample]):
-    reward_cat_key = args.log_reward_category
-    if reward_cat_key is None:
-        return {}
-
-    samples_of_reward_cat = group_by(all_samples, lambda s: s.reward[reward_cat_key])
-
-    return {f"error_cat/{reward_cat}": len(s) / len(all_samples) for reward_cat, s in samples_of_reward_cat.items()}

@@ -1,12 +1,11 @@
 import aiohttp
 import torch
 
-from slime.utils.types import Sample
+from slime.utils.types import Episode
 
 
 async def reward_func(args, sample, **kwargs):
     payload = {
-        # "text": sample.prompt + sample.response,
         "input_ids": sample.tokens,
         "sampling_params": {
             "temperature": 0,
@@ -23,23 +22,18 @@ async def reward_func(args, sample, **kwargs):
             return await resp.json()
 
 
-def post_process_rewards(args, samples: list[Sample], **kwargs):
+def post_process_rewards(args, episodes: list[Episode], **kwargs):
     """Process rewards from teacher model and extract teacher log probabilities.
 
     This function:
-    1. Extracts teacher log-probs from the reward response (which contains sglang's logprob output)
+    1. Extracts teacher log-probs from the reward response
     2. Trims them to match the response length
-    3. Stores them in sample.teacher_log_probs for OPD KL penalty computation
-    4. Returns scalar rewards (0.0 for pure distillation) compatible with GRPO/PPO
-
-    Note: The reward_func calls the teacher server which returns token-level log-probs.
-    For pure on-policy distillation without task rewards, we return 0.0 for each sample.
-    The actual learning signal comes from the OPD KL penalty applied in compute_advantages_and_returns.
+    3. Stores them in episode.teacher_log_probs for OPD KL penalty computation
+    4. Sets scalar rewards (0.0 for pure distillation)
     """
-    raw_rewards = [sample.get_reward_value(args) for sample in samples]
-    response_lengths = [sample.response_length for sample in samples]
+    raw_rewards = [ep.reward for ep in episodes]
+    response_lengths = [ep.response_length for ep in episodes]
 
-    # Extract teacher log-probs from the sglang response
     teacher_log_probs = [
         torch.tensor([item[0] for item in reward["meta_info"]["input_token_logprobs"][1:]], dtype=torch.float32)
         for reward in raw_rewards
@@ -49,13 +43,9 @@ def post_process_rewards(args, samples: list[Sample], **kwargs):
         for t_log_prob, response_length in zip(teacher_log_probs, response_lengths, strict=False)
     ]
 
-    for sample, t_log_probs in zip(samples, teacher_log_probs, strict=False):
-        sample.teacher_log_probs = t_log_probs
+    for ep, t_log_probs in zip(episodes, teacher_log_probs, strict=False):
+        ep.teacher_log_probs = t_log_probs
 
-    # Return scalar rewards for GRPO/PPO advantage estimator
-    # For pure on-policy distillation, we use 0.0 as the task reward.
-    # The learning signal comes entirely from the OPD KL penalty.
-    # If you have task rewards, you can add them here.
-    scalar_rewards = [0.0] * len(samples)
-
-    return scalar_rewards, scalar_rewards
+    # Set scalar rewards for GRPO/PPO advantage estimator
+    for ep in episodes:
+        ep.reward = 0.0

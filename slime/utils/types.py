@@ -1,168 +1,98 @@
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any
 
 import torch
 
 
 @dataclass
-class Sample:
-    """The sample generated"""
+class Episode:
+    """A single generated episode, the universal data unit flowing from rollout to training.
 
-    group_index: int | None = None
-    index: int | None = None
-    # prompt
+    The generate function receives raw dataset examples (dicts) and produces
+    a flat list of Episodes. Episodes are ordered by group: for n_samples_per_prompt=K,
+    episodes[i*K : (i+1)*K] all come from the same prompt. GRPO-style normalization
+    just reshapes rewards by (-1, K).
+
+    Fields marked 'training-essential' are consumed by the training step.
+    Fields marked 'metrics/logging' are only used for logging and evaluation.
+    """
+
+    # === Training-essential ===
+    tokens: list[int] = field(default_factory=list)  # full prompt + response token ids
+    response_length: int = 0
+    reward: float = 0.0  # raw scalar reward (normalization is done at batch level)
+    loss_mask: list[int] | None = None  # len == response_length; None means all-ones
+
+    # === Optional training fields ===
+    rollout_log_probs: list[float] | None = None  # per-token log probs from rollout
+    multimodal_train_inputs: dict[str, Any] | None = None  # processed tensors (pixel_values, etc.)
+    teacher_log_probs: list[float] | None = None  # for on-policy distillation
+    rollout_routed_experts: Any | None = None  # MoE routing replay data
+    train_metadata: dict | None = None  # per-episode metadata consumed by training
+
+    # === Metrics / logging (not used by training math) ===
+    response: str = ""  # decoded response text, for logging (repetition, etc.)
+    truncated: bool = False  # whether generation hit max length
+    non_generation_time: float = 0.0  # time in non-generation steps (reward, tools, etc.)
+
+    @property
+    def effective_response_length(self) -> int:
+        return sum(self.loss_mask) if self.loss_mask is not None else self.response_length
+
+    def get_reward_value(self, args) -> float:
+        """Get scalar reward, selecting by key if reward is a dict."""
+        return self.reward
+
+
+# ---------------------------------------------------------------------------
+# Sample: rollout-internal working state.
+# This class is used only inside generate functions (e.g. sglang_rollout.py)
+# to accumulate state during async generation. The generate function converts
+# Samples to Episodes before returning.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Sample:
+    """Internal working state during rollout generation.
+
+    Not part of the public interface — generate functions should convert
+    Sample → Episode before returning results.
+    """
+
+    # prompt / input
     prompt: str | list[dict[str, str]] = ""
-    tokens: list[int] = field(default_factory=list)  # full sequence: prompt + response tokens
-    multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data, e.g. PIL images
-    multimodal_train_inputs: dict[str, Any] | None = None  # processed multimodal tensors, e.g. pixel_values
-    tools: list[dict] | None = None  # function-calling tool definitions for chat template
-    # response
+    label: str | None = None
+    tools: list[dict] | None = None
+    multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data (PIL images)
+    metadata: dict = field(default_factory=dict)
+    generate_function_path: str | None = None
+    session_id: str | None = None
+
+    # accumulated during generation
+    tokens: list[int] = field(default_factory=list)
     response: str = ""
     response_length: int = 0
-    label: str | None = None
     reward: float | dict[str, Any] | None = None
-    loss_mask: list[int] | None = None  # len = response_length (response portion only)
+    loss_mask: list[int] | None = None
+    rollout_log_probs: list[float] | None = None
+    rollout_routed_experts: Any | None = None
+    multimodal_train_inputs: dict[str, Any] | None = None
+    teacher_log_probs: list[float] | None = None
     weight_versions: list[str] = field(default_factory=list)
-    rollout_log_probs: list[float] | None = None  # len = response_length (response portion only)
-    rollout_routed_experts: list[list[int]] | None = None  # shape [len(tokens)-1, layers, topk]
-    remove_sample: bool = False
-    teacher_log_probs: list[float] | None = None  # len = response_length (response portion only), for OPD
+    non_generation_time: float = 0.0
+    train_metadata: dict | None = None
 
-    class Status(Enum):
+    # status tracking
+    class Status:
         PENDING = "pending"
         COMPLETED = "completed"
         TRUNCATED = "truncated"
         ABORTED = "aborted"
-        # Indicates a recoverable or non-critical failure during generation (e.g., tool call failure,
-        # external API error, parsing error). Unlike ABORTED, FAILED samples may still contain partial
-        # valid output and can be retried or handled gracefully.
         FAILED = "failed"
 
-    status: Status = Status.PENDING
-
-    metadata: dict = field(default_factory=dict)
-    generate_function_path: str | None = None
-    # metadata used during training, e.g., what loss to use for this sample.
-    train_metadata: dict | None = None
-
-    # Session ID for consistent hashing routing (used when router policy is consistent_hashing)
-    session_id: str | None = None
-
-    non_generation_time: float = 0.0  # time spent in non-generation steps
-
-    @dataclass
-    class SpecInfo:
-        spec_accept_token_num: int = 0
-        spec_draft_token_num: int = 0
-        spec_verify_ct: int = 0
-        completion_token_num: int = 0
-
-        @property
-        def spec_accept_rate(self) -> float:
-            return self.spec_accept_token_num / self.spec_draft_token_num if self.spec_draft_token_num > 0 else 0.0
-
-        @property
-        def spec_accept_length(self) -> float:
-            return self.completion_token_num / self.spec_verify_ct if self.spec_verify_ct > 0 else 0.0
-
-        def add(self, meta_info: dict):
-            self.spec_accept_token_num += meta_info.get("spec_accept_token_num", 0)
-            self.spec_draft_token_num += meta_info.get("spec_draft_token_num", 0)
-            self.spec_verify_ct += meta_info.get("spec_verify_ct", 0)
-            self.completion_token_num += meta_info.get("completion_tokens", 0)
-
-        def to_dict(self):
-            return {
-                "spec_accept_token_num": self.spec_accept_token_num,
-                "spec_draft_token_num": self.spec_draft_token_num,
-                "spec_verify_ct": self.spec_verify_ct,
-                "completion_token_num": self.completion_token_num,
-            }
-
-        @staticmethod
-        def from_dict(data: dict):
-            info = Sample.SpecInfo()
-            info.spec_accept_token_num = data.get("spec_accept_token_num", 0)
-            info.spec_draft_token_num = data.get("spec_draft_token_num", 0)
-            info.spec_verify_ct = data.get("spec_verify_ct", 0)
-            info.completion_token_num = data.get("completion_token_num", 0)
-            return info
-
-    spec_info: SpecInfo = field(default_factory=SpecInfo)
-
-    @dataclass
-    class PrefixCacheInfo:
-        cached_tokens: int = 0
-        total_prompt_tokens: int = 0
-
-        @property
-        def prefix_cache_hit_rate(self) -> float:
-            return self.cached_tokens / self.total_prompt_tokens if self.total_prompt_tokens > 0 else 0.0
-
-        def add(self, meta_info: dict):
-            self.cached_tokens += meta_info.get("cached_tokens", 0)
-            # new_tokens = input_tokens - cached_tokens
-            self.total_prompt_tokens += meta_info.get("prompt_tokens", 0)
-
-        def to_dict(self):
-            return {
-                "cached_tokens": self.cached_tokens,
-                "total_prompt_tokens": self.total_prompt_tokens,
-            }
-
-        @staticmethod
-        def from_dict(data: dict):
-            info = Sample.PrefixCacheInfo()
-            info.cached_tokens = data.get("cached_tokens", 0)
-            info.total_prompt_tokens = data.get("total_prompt_tokens", 0)
-            return info
-
-    prefix_cache_info: PrefixCacheInfo = field(default_factory=PrefixCacheInfo)
-
-    def to_dict(self):
-        value = self.__dict__.copy()
-        value["status"] = self.status.value
-        value["spec_info"] = self.spec_info.to_dict()
-        value["prefix_cache_info"] = self.prefix_cache_info.to_dict()
-        return value
-
-    @staticmethod
-    def from_dict(data: dict):
-        data = dict(data)
-        data["status"] = Sample.Status(data["status"])
-        data["spec_info"] = Sample.SpecInfo.from_dict(data.get("spec_info", {}))
-        data["prefix_cache_info"] = Sample.PrefixCacheInfo.from_dict(data.get("prefix_cache_info", {}))
-
-        field_names = set(Sample.__dataclass_fields__.keys())
-        init_data = {k: v for k, v in data.items() if k in field_names}
-        sample = Sample(**init_data)
-
-        for key, value in data.items():
-            if key not in field_names:
-                setattr(sample, key, value)
-
-        return sample
-
-    def get_reward_value(self, args) -> float:
-        return self.reward if not args.reward_key else self.reward[args.reward_key]
-
-    @property
-    def effective_response_length(self):
-        return sum(self.loss_mask) if self.loss_mask is not None else self.response_length
+    status: str = Status.PENDING
 
     def update_from_meta_info(self, args, meta_info: dict):
-        """
-        Update the sample with new information from meta_info returned by the rollout engine.
-        And extract
-        """
-        if args.sglang_speculative_algorithm:
-            # cannot directly use spec info from sglang because of partial rollout.
-            self.spec_info.add(meta_info=meta_info)
-
-        # Collect prefix cache statistics
-        self.prefix_cache_info.add(meta_info=meta_info)
-
         if "weight_version" in meta_info:
             self.weight_versions.append(meta_info["weight_version"])
 
@@ -174,6 +104,27 @@ class Sample:
             case "stop":
                 self.status = Sample.Status.COMPLETED
 
+    def to_episode(self, args) -> Episode:
+        """Convert this Sample to an Episode for training/eval consumption."""
+        reward_value = self.reward if not getattr(args, "reward_key", None) else self.reward[args.reward_key]
+        return Episode(
+            tokens=self.tokens,
+            response_length=self.response_length,
+            reward=float(reward_value) if reward_value is not None else 0.0,
+            loss_mask=self.loss_mask,
+            rollout_log_probs=self.rollout_log_probs,
+            multimodal_train_inputs=self.multimodal_train_inputs,
+            teacher_log_probs=self.teacher_log_probs,
+            rollout_routed_experts=self.rollout_routed_experts,
+            train_metadata=self.train_metadata,
+            response=self.response,
+            truncated=(self.status == Sample.Status.TRUNCATED),
+            non_generation_time=self.non_generation_time,
+        )
+
+    def get_reward_value(self, args) -> float:
+        return self.reward if not getattr(args, "reward_key", None) else self.reward[args.reward_key]
+
 
 @dataclass(frozen=True)
 class ParamInfo:
@@ -183,12 +134,6 @@ class ParamInfo:
     attrs: dict
     size: int
     src_rank: int
-
-
-# A dict-based batch produced along the rollout -> training path
-# Several fields are converted to torch.Tensor lists on GPU
-# before being consumed by data iterators (see fsdp_utils.actor).
-RolloutBatch = dict[str, list[torch.Tensor] | list[int] | list[float] | list[str]]
 
 
 @dataclass

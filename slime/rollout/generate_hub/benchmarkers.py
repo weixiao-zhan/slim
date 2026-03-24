@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from slime.rollout.sglang_rollout import generate as _generate_base
-from slime.utils.types import Sample
+from slime.utils.types import Sample  # Sample is the internal rollout working type
 
 logger = logging.getLogger(__name__)
 

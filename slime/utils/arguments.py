@@ -361,7 +361,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Path to the buffer filter function. "
                     "It should be able to select the samples in the buffer. "
-                    "The function should take list[list[Sample]] and return list[list[Sample]]."
+                    "The function should filter and return examples from the buffer."
                 ),
             )
             # update weight
@@ -1175,16 +1175,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Path to the custom function that will post process reward, by default it will be the normalization for grpo. "
                 ),
             )
-            parser.add_argument(
-                "--custom-convert-samples-to-train-data-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to a custom function that converts samples to training data. "
-                    "If set, this function will replace the default _convert_samples_to_train_data. "
-                    "The function should have the signature `def convert_samples_to_train_data(args, samples) -> dict`."
-                ),
-            )
             return parser
 
         def add_rollout_buffer_arguments(parser):
@@ -1232,9 +1222,9 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Path to the rollout sample filter function. "
                     "This function determines whether a sample will participate in loss calculation. "
-                    "The function should take args and samples (list[Sample]) as input, and return None. "
-                    "Please directly modify the remove_sample attribute of Sample. "
-                    "Note: This attribute does not determine whether the sample participates in advantage normalization."
+                    "The function should take args and sample groups as input. "
+                    "To mask a sample from training, set its loss_mask to all zeros. "
+                    "Note: This does not affect advantage normalization."
                 ),
             )
             parser.add_argument(

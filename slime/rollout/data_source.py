@@ -1,5 +1,4 @@
 import abc
-import copy
 import logging
 import os
 
@@ -7,54 +6,38 @@ import torch
 
 from slime.utils.data import Dataset
 from slime.utils.misc import load_function
-from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
 
 class DataSource(abc.ABC):
     @abc.abstractmethod
-    def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        """
-        Return num_samples samples
-        """
+    def get_examples(self, num_prompts: int) -> list[dict]:
+        """Return num_prompts raw dataset examples (dicts)."""
 
     @abc.abstractmethod
-    def add_samples(self, samples: list[list[Sample]]):
-        """
-        Add samples to the data source
-        """
+    def add_examples(self, examples: list[dict]):
+        """Re-queue examples (e.g. aborted prompts) back into the source."""
 
     @abc.abstractmethod
     def save(self, rollout_id):
-        """
-        Save the state of the data source
-        """
+        """Save the state of the data source."""
 
     @abc.abstractmethod
     def load(self, rollout_id=None):
-        """
-        Load the state of the data source
-        """
+        """Load the state of the data source."""
 
     @abc.abstractmethod
     def __len__(self) -> int:
-        """
-        Length of the data source. May change when samples are added/fetched.
-        """
+        """Length of the data source."""
 
 
-# TODO may further refactor data-loading part later
 class RolloutDataSource(DataSource):
     def __init__(self, args):
         self.args = args
 
         self.epoch_id = 0
-        self.sample_group_index = 0
-        self.sample_index = 0
         self.sample_offset = 0
-        # TODO remove this
-        self.metadata = {}
 
         if args.rollout_global_dataset:
             self.dataset = Dataset(
@@ -71,43 +54,26 @@ class RolloutDataSource(DataSource):
         else:
             self.dataset = None
 
-    def get_samples(self, num_samples):
-        # TODO further improve code
+    def get_examples(self, num_prompts: int) -> list[dict]:
         if self.dataset is not None:
-            if self.sample_offset + num_samples <= len(self.dataset):
-                prompt_samples = self.dataset.samples[self.sample_offset : self.sample_offset + num_samples]
-                self.sample_offset += num_samples
+            if self.sample_offset + num_prompts <= len(self.dataset):
+                examples = self.dataset.samples[self.sample_offset : self.sample_offset + num_prompts]
+                self.sample_offset += num_prompts
             else:
-                prompt_samples = self.dataset.samples[self.sample_offset :]
-                num_samples -= len(prompt_samples)
+                examples = self.dataset.samples[self.sample_offset :]
+                remaining = num_prompts - len(examples)
                 self.epoch_id += 1
                 if self.args.rollout_shuffle:
                     self.dataset.shuffle(self.epoch_id)
-                prompt_samples += self.dataset.samples[:num_samples]
-                self.sample_offset = num_samples
+                examples = examples + self.dataset.samples[:remaining]
+                self.sample_offset = remaining
         else:
-            prompt_samples = [Sample() for _ in range(num_samples)]
+            examples = [{} for _ in range(num_prompts)]
 
-        samples = []
-        for prompt_sample in prompt_samples:
-            group = []
-            # Avoid deepcopying multimodal_inputs (PIL images) — expensive and read-only
-            saved_multimodal = prompt_sample.multimodal_inputs
-            prompt_sample.multimodal_inputs = None
-            for _ in range(self.args.n_samples_per_prompt):
-                sample = copy.deepcopy(prompt_sample)
-                sample.multimodal_inputs = saved_multimodal  # shared reference, read-only
-                sample.group_index = self.sample_group_index
-                sample.index = self.sample_index
-                self.sample_index += 1
-                group.append(sample)
-            prompt_sample.multimodal_inputs = saved_multimodal
-            self.sample_group_index += 1
-            samples.append(group)
-        return samples
+        return examples
 
-    def add_samples(self, samples: list[list[Sample]]):
-        raise RuntimeError(f"Cannot add samples to {self.__class__.__name__}. This is a read-only data source.")
+    def add_examples(self, examples: list[dict]):
+        raise RuntimeError(f"Cannot add examples to {self.__class__.__name__}. This is a read-only data source.")
 
     def save(self, rollout_id):
         if not self.args.rollout_global_dataset:
@@ -116,9 +82,6 @@ class RolloutDataSource(DataSource):
         state_dict = {
             "sample_offset": self.sample_offset,
             "epoch_id": self.epoch_id,
-            "sample_group_index": self.sample_group_index,
-            "sample_index": self.sample_index,
-            "metadata": self.metadata,
         }
         path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -136,14 +99,10 @@ class RolloutDataSource(DataSource):
             logger.info(f"Checkpoint {path} does not exist.")
             return
 
-        logger.info(f"load metadata from {path}")
-        logger.info(f"load metadata: {self.metadata}")
+        logger.info(f"load data source state from {path}")
         state_dict = torch.load(path)
         self.sample_offset = state_dict.get("sample_offset", 0)
         self.epoch_id = state_dict.get("epoch_id", 0)
-        self.sample_group_index = state_dict.get("sample_group_index", 0)
-        self.sample_index = state_dict.get("sample_index", 0)
-        self.metadata = state_dict.get("metadata", {})
 
         if self.args.rollout_global_dataset and self.args.rollout_shuffle:
             self.dataset.shuffle(self.epoch_id)
@@ -157,60 +116,33 @@ class RolloutDataSourceWithBuffer(RolloutDataSource):
         super().__init__(args)
         self.buffer = []
         if self.args.buffer_filter_path is None:
-            self.buffer_filter = pop_first
+            self.buffer_filter = _pop_first
         else:
             self.buffer_filter = load_function(self.args.buffer_filter_path)
 
-    def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        """
-        Return num_samples samples
-        """
+    def get_examples(self, num_prompts: int) -> list[dict]:
+        examples = self._get_from_buffer(num_prompts)
+        remaining = num_prompts - len(examples)
+        if remaining > 0:
+            examples += super().get_examples(num_prompts=remaining)
+        return examples
 
-        samples = self._get_samples_from_buffer(num_samples)
-        num_samples -= len(samples)
-
-        if num_samples == 0:
-            return samples
-
-        samples += super().get_samples(num_samples=num_samples)
-        return samples
-
-    def _get_samples_from_buffer(self, num_samples: int) -> list[list[Sample]]:
-        if len(self.buffer) == 0 or num_samples == 0:
+    def _get_from_buffer(self, num_prompts: int) -> list[dict]:
+        if len(self.buffer) == 0 or num_prompts == 0:
             return []
+        return self.buffer_filter(self.args, None, self.buffer, num_prompts)
 
-        samples = self.buffer_filter(self.args, None, self.buffer, num_samples)
-        return samples
-
-    def add_samples(self, samples: list[list[Sample]]):
-        """
-        Add a sample group to buffer.
-        """
-        if not samples:
+    def add_examples(self, examples: list[dict]):
+        if not examples:
             return
-        assert isinstance(samples, list), f"samples must be a list, got {type(samples)}"
-        assert isinstance(samples[0], list), f"the elements of samples must be list, got {type(samples[0])}"
-        for i in range(0, len(samples)):
-            assert (
-                len(samples[i]) == self.args.n_samples_per_prompt
-            ), f"the length of the elements of samples must be equal to n_samples_per_prompt, got {len(samples[i])} != {self.args.n_samples_per_prompt}"
-            group = samples[i]  # type: ignore
-            self.buffer.append(group)
-
-    # TODO remove
-    def update_metadata(self, metadata: dict):
-        self.metadata.update(metadata)
-
-    # TODO remove
-    def get_metadata(self):
-        return self.metadata
+        self.buffer.extend(examples)
 
     def get_buffer_length(self):
         return len(self.buffer)
 
 
-def pop_first(args, rollout_id, buffer: list[list[Sample]], num_samples: int) -> list[list[Sample]]:
-    num_to_pop = min(len(buffer), num_samples)
-    samples = buffer[:num_to_pop]
+def _pop_first(args, rollout_id, buffer: list[dict], num_prompts: int) -> list[dict]:
+    num_to_pop = min(len(buffer), num_prompts)
+    examples = buffer[:num_to_pop]
     del buffer[:num_to_pop]
-    return samples
+    return examples

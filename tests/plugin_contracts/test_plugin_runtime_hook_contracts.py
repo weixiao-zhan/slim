@@ -25,7 +25,7 @@ install_stubs()
 NUM_GPUS = 0
 
 from slime.utils.misc import load_function
-from slime.utils.types import Sample
+from slime.utils.types import Episode, Sample
 
 
 def run_contract_test_file() -> None:
@@ -35,13 +35,12 @@ def run_contract_test_file() -> None:
             "custom-rollout-log-function-path",
             "custom-eval-rollout-log-function-path",
             "custom-reward-post-process-path",
-            "custom-convert-samples-to-train-data-path",
             "rollout-data-postprocess-path",
         ],
     )
 
 
-def reference_custom_rollout_log(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
+def reference_custom_rollout_log(rollout_id, args, episodes, rollout_extra_metrics, rollout_time) -> bool:
     args.logged_rollout_id = rollout_id
     return True
 
@@ -51,22 +50,10 @@ def reference_custom_eval_rollout_log(rollout_id, args, data, extra_metrics) -> 
     return True
 
 
-def reference_reward_post_process(args, samples):
-    raw_rewards = [sample.reward for sample in samples]
-    rewards = [reward + 1.0 for reward in raw_rewards]
-    return raw_rewards, rewards
-
-
-def reference_convert_samples_to_train_data(args, samples):
-    return {
-        "tokens": [sample.tokens for sample in samples],
-        "response_lengths": [sample.response_length for sample in samples],
-        "rewards": [sample.reward for sample in samples],
-        "raw_reward": [sample.reward for sample in samples],
-        "truncated": [0 for _ in samples],
-        "sample_indices": [sample.index for sample in samples],
-        "loss_masks": [sample.loss_mask for sample in samples],
-    }
+def reference_reward_post_process(args, episodes):
+    """Custom reward post-process: operates on list[Episode] in-place."""
+    for ep in episodes:
+        ep.reward = ep.reward + 1.0
 
 
 def reference_rollout_data_postprocess(args) -> None:
@@ -97,7 +84,7 @@ class HookCase:
 
 def invoke_custom_rollout_log(fn):
     args = type("Args", (), {})()
-    assert isinstance(fn(3, args, [Sample(index=0)], {"reward": 1.0}, 0.5), bool)
+    assert isinstance(fn(3, args, [Episode(tokens=[1], response_length=1, reward=1.0)], {"reward": 1.0}, 0.5), bool)
     assert args.logged_rollout_id == 3
 
 
@@ -111,15 +98,10 @@ def invoke_custom_eval_rollout_log(fn):
 
 
 def invoke_reward_post_process(fn):
-    raw_rewards, rewards = fn(type("Args", (), {})(), [make_sample(0, 0.5), make_sample(1, 1.5)])
-    assert len(raw_rewards) == len(rewards) == 2
-
-
-def invoke_convert_samples_to_train_data(fn):
-    train_data = fn(type("Args", (), {})(), [make_sample(0, 0.5), make_sample(1, 1.5)])
-    assert {"tokens", "response_lengths", "rewards", "raw_reward", "truncated", "sample_indices", "loss_masks"} <= set(
-        train_data
-    )
+    episodes = [Episode(tokens=[0], response_length=1, reward=0.5), Episode(tokens=[1], response_length=1, reward=1.5)]
+    fn(type("Args", (), {})(), episodes)
+    # rewards should have been modified in-place
+    assert episodes[0].reward != 0.5 or episodes[1].reward != 1.5
 
 
 def invoke_rollout_data_postprocess(fn):
@@ -134,8 +116,8 @@ HOOK_CASES = [
         "CUSTOM_ROLLOUT_LOG_FUNCTION_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_custom_rollout_log",
         "slime/ray/rollout.py",
-        "custom_log_func(rollout_id, args, samples, rollout_extra_metrics, rollout_time)",
-        ("rollout_id", "args", "samples", "rollout_extra_metrics", "rollout_time"),
+        "custom_log_func(rollout_id, args, episodes, rollout_extra_metrics, rollout_time)",
+        ("rollout_id", "args", "episodes", "rollout_extra_metrics", "rollout_time"),
         invoke_custom_rollout_log,
     ),
     HookCase(
@@ -152,18 +134,9 @@ HOOK_CASES = [
         "CUSTOM_REWARD_POST_PROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_reward_post_process",
         "slime/ray/rollout.py",
-        "self.custom_reward_post_process_func(self.args, samples)",
-        ("args", "samples"),
+        "self.custom_reward_post_process_func(self.args, episodes)",
+        ("args", "episodes"),
         invoke_reward_post_process,
-    ),
-    HookCase(
-        "custom_convert_samples_to_train_data",
-        "CUSTOM_CONVERT_SAMPLES_TO_TRAIN_DATA_PATH",
-        "plugin_contracts.test_plugin_runtime_hook_contracts.reference_convert_samples_to_train_data",
-        "slime/ray/rollout.py",
-        "self.custom_convert_samples_to_train_data_func(self.args, samples)",
-        ("args", "samples"),
-        invoke_convert_samples_to_train_data,
     ),
     HookCase(
         "rollout_data_postprocess",
