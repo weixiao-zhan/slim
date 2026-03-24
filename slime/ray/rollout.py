@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -22,6 +21,7 @@ from slime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_inf
 from slime.utils.logging_utils import configure_logger, init_tracking
 from slime.utils.metric_utils import compute_pass_rate, compute_rollout_step, compute_statistics, dict_add_prefix
 from slime.utils.misc import group_by, load_function
+from slime.utils.processing_utils import load_tokenizer
 from slime.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slime.utils.types import Episode
 
@@ -32,6 +32,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+_METRIC_TOKENIZER = None
 
 
 @dataclasses.dataclass
@@ -628,11 +629,7 @@ class RolloutManager:
     def _apply_loss_masks(self, episodes: list[Episode]):
         """Materialize loss_mask: None → all-ones."""
         for ep in episodes:
-            if ep.loss_mask is None:
-                ep.loss_mask = [1] * ep.response_length
-            assert len(ep.loss_mask) == ep.response_length, (
-                f"loss mask length {len(ep.loss_mask)} != response length {ep.response_length}"
-            )
+            ep.ensure_edge_alignment()
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
@@ -1009,7 +1006,7 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
         rewards = [ep.reward for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
-        truncated = [int(ep.truncated) for ep in episodes]
+        truncated = [int(ep.status == Episode.Status.TRUNCATED) for ep in episodes]
         log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
         if args.log_passrate:
             log_dict |= dict_add_prefix(
@@ -1041,14 +1038,28 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
     logging_utils.log(args, log_dict, step_key="rollout/step")
 
 
+def _decode_generated_text(args, episode: Episode) -> str:
+    global _METRIC_TOKENIZER
+    if _METRIC_TOKENIZER is None:
+        _METRIC_TOKENIZER = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+    gen_ids = episode.get_generated_token_ids()
+    if not gen_ids:
+        return ""
+    return _METRIC_TOKENIZER.decode(gen_ids, skip_special_tokens=args.rollout_skip_special_tokens)
+
+
 def _compute_episode_metrics(args, episodes: list[Episode]):
-    response_lengths = [ep.effective_response_length for ep in episodes]
+    response_lengths = [ep.response_length for ep in episodes]
 
     log_dict = {}
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= _compute_zero_std_metrics(args, episodes)
-    log_dict["repetition_frac"] = np.mean([int(has_repetition(ep.response)) for ep in episodes]).item()
-    log_dict["truncated_ratio"] = np.mean([int(ep.truncated) for ep in episodes]).item()
+    log_dict["repetition_frac"] = sum(int(has_repetition(_decode_generated_text(args, ep))) for ep in episodes) / max(
+        len(episodes), 1
+    )
+    log_dict["truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
+        len(episodes), 1
+    )
     return log_dict
 
 
@@ -1080,7 +1091,7 @@ def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
         )
 
     token_perf([ep.response_length for ep in episodes], non_generation_time, key="")
-    token_perf([ep.effective_response_length for ep in episodes], non_generation_time, key="effective_")
+    token_perf([ep.response_length for ep in episodes], non_generation_time, key="effective_")
 
     return log_dict
 

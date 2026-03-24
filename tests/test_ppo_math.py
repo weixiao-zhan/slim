@@ -1,10 +1,11 @@
+"""PPO on math (GSM8K). 4 actor + 4 critic GPUs colocated with 8 rollout, batch size 512."""
+
 import os
 
 import slime.utils.external_utils.command_utils as U
 
 NUM_GPUS = 8
-MODEL_NAME = "Qwen3-1.7B"
-MODEL_DIR = "/home/ubuntu/models/Qwen3-1.7B"
+MODEL_DIR = "/home/ubuntu/models/Qwen3-1.7B-Base"
 DATASET_DIR = "/home/ubuntu/datasets"
 
 
@@ -12,43 +13,36 @@ def execute():
     ckpt_args = f"--hf-checkpoint {MODEL_DIR} "
 
     rollout_args = (
-        f"--prompt-data {DATASET_DIR}/dapo-math-17k/dapo-math-17k.jsonl "
+        f"--prompt-data {DATASET_DIR}/gsm8k_full/train.jsonl "
         "--input-key prompt "
         "--label-key label "
-        "--apply-chat-template "
-        "--rollout-shuffle "
         "--rm-type math "
-        "--num-rollout 3 "
-        "--rollout-batch-size 8 "
-        "--n-samples-per-prompt 4 "
-        "--rollout-max-response-len 2048 "
+        "--num-rollout 10 "
+        "--rollout-batch-size 32 "
+        "--n-samples-per-prompt 16 "
+        "--rollout-max-response-len 4096 "
         "--rollout-temperature 1 "
-        "--global-batch-size 32 "
-    )
-
-    eval_args = (
-        "--eval-interval 2 "
-        f"--eval-prompt-data aime {DATASET_DIR}/aime-2024/aime-2024.jsonl "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 2048 "
-        "--eval-top-p 0.7 "
+        "--global-batch-size 512 "
+        "--rollout-shuffle "
     )
 
     fsdp_args = "--update-weight-buffer-size 536870912 "
 
-    grpo_args = (
-        "--advantage-estimator grpo "
-        "--kl-loss-coef 0.00 "
-        "--kl-loss-type low_var_kl "
-        "--kl-coef 0.00 "
-        "--entropy-coef 0.00 "
+    ppo_args = (
+        "--advantage-estimator ppo "
+        "--gamma 1.0 "
+        "--lambd 0.95 "
+        "--value-clip 0.2 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
+        "--entropy-coef 0.0 "
+        "--kl-coef 0.0 "
     )
 
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-6 "
+        "--critic-lr 5e-6 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -58,12 +52,13 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-decode-log-interval 1000 "
-        "--sglang-cuda-graph-max-bs 32 "
     )
 
     misc_args = (
-        f"--actor-num-nodes 1 "
-        f"--actor-num-gpus-per-node {NUM_GPUS} "
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 4 "
+        "--critic-num-nodes 1 "
+        "--critic-num-gpus-per-node 4 "
         "--colocate "
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 4096 "
@@ -74,9 +69,8 @@ def execute():
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{grpo_args} "
+        f"{ppo_args} "
         f"{fsdp_args} "
-        f"{eval_args} "
         f"{sglang_args} "
         f"{misc_args} "
     )
@@ -91,7 +85,6 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
 
-    # Use external Ray (already started with SkyPilot ports)
     os.environ["SLIME_SCRIPT_EXTERNAL_RAY"] = "1"
 
     execute()

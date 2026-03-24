@@ -7,7 +7,8 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 from slime.utils.misc import load_function
-from slime.utils.types import Sample  # Sample is the internal rollout working type
+from slime.utils.processing_utils import load_tokenizer
+from slime.utils.types import Episode
 
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score
@@ -17,6 +18,8 @@ from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
 _shared_session: aiohttp.ClientSession | None = None
+_tokenizer = None
+_tokenizer_path: str | None = None
 
 
 def _get_shared_session() -> aiohttp.ClientSession:
@@ -31,11 +34,26 @@ def _get_shared_session() -> aiohttp.ClientSession:
     return _shared_session
 
 
-async def remote_rm(args, sample: Sample, max_retries: int = 10):
+def _get_tokenizer(args):
+    global _tokenizer, _tokenizer_path
+    if _tokenizer is None or _tokenizer_path != args.hf_checkpoint:
+        _tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+        _tokenizer_path = args.hf_checkpoint
+    return _tokenizer
+
+
+def _decode_generated_text(args, episode: Episode) -> str:
+    gen_ids = episode.get_generated_token_ids()
+    if not gen_ids:
+        return ""
+    return _get_tokenizer(args).decode(gen_ids, skip_special_tokens=args.rollout_skip_special_tokens)
+
+
+async def remote_rm(args, episode: Episode, max_retries: int = 10):
     payload = {
-        "prompt": sample.prompt,
-        "response": sample.response,
-        "label": sample.label,
+        "prompt": episode.prompt,
+        "response": _decode_generated_text(args, episode),
+        "label": episode.label,
     }
     session = _get_shared_session()
     for attempt in range(max_retries):
@@ -52,15 +70,15 @@ async def remote_rm(args, sample: Sample, max_retries: int = 10):
             await asyncio.sleep(backoff)
 
 
-async def async_rm(args, sample: Sample, **kwargs):
+async def async_rm(args, episode: Episode, **kwargs):
     if args.custom_rm_path is not None:
         rm_function = load_function(args.custom_rm_path)
-        return await rm_function(args, sample, **kwargs)
+        return await rm_function(args, episode, **kwargs)
 
-    metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    metadata = episode.metadata if isinstance(episode.metadata, dict) else {}
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
-    response = sample.response
-    label = sample.label
+    response = _decode_generated_text(args, episode)
+    label = episode.label
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""
         rm_type = rm_type[len("boxed_") :]
@@ -68,7 +86,7 @@ async def async_rm(args, sample: Sample, **kwargs):
     # This function is intended for remote or time-consuming reward model evaluation.
     # Implement the actual logic as needed.
     if rm_type == "remote_rm":
-        return await remote_rm(args, sample)
+        return await remote_rm(args, episode)
     elif rm_type == "deepscaler":
         return get_deepscaler_rule_based_reward(response, label)
     elif rm_type == "dapo":
@@ -93,13 +111,13 @@ async def async_rm(args, sample: Sample, **kwargs):
 
 async def batched_async_rm(
     args,
-    samples: list[Sample],
+    episodes: list[Episode],
     **kwargs,
 ) -> list[int | float]:
     if args.custom_rm_path is not None:
         # Ensure the custom reward function is implemented in batch mode
         rm_function = load_function(args.custom_rm_path)
-        return await rm_function(args, samples, **kwargs)
-    tasks = [async_rm(args, sample, **kwargs) for sample in samples]
+        return await rm_function(args, episodes, **kwargs)
+    tasks = [async_rm(args, episode, **kwargs) for episode in episodes]
     rewards = await asyncio.gather(*tasks)
     return rewards

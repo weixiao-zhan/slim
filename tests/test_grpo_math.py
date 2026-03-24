@@ -1,3 +1,5 @@
+"""GRPO on math (GSM8K). 8 actor GPUs colocated with rollout, batch size 512."""
+
 import os
 
 import slime.utils.external_utils.command_utils as U
@@ -11,36 +13,41 @@ def execute():
     ckpt_args = f"--hf-checkpoint {MODEL_DIR} "
 
     rollout_args = (
-        f"--prompt-data {DATASET_DIR}/gsm8k/gsm8k_train.jsonl "
+        f"--prompt-data {DATASET_DIR}/gsm8k_full/train.jsonl "
         "--input-key prompt "
         "--label-key label "
         "--rm-type math "
-        "--num-rollout 50 "
-        "--rollout-batch-size 64 "
+        "--num-rollout 10 "
+        "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-response-len 4096 "
         "--rollout-temperature 1 "
-        "--global-batch-size 1024 "
+        "--global-batch-size 512 "
+        "--rollout-shuffle "
+    )
+
+    eval_args = (
+        "--eval-interval 5 "
+        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k_full/test.jsonl "
+        "--n-samples-per-eval-prompt 1 "
+        "--eval-max-response-len 4096 "
     )
 
     fsdp_args = "--update-weight-buffer-size 536870912 "
 
-    ppo_args = (
-        "--advantage-estimator ppo "
-        "--gamma 1.0 "
-        "--lambd 0.95 "
-        "--value-clip 0.2 "
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--kl-loss-coef 0.00 "
+        "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
+        "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        "--entropy-coef 0.0 "
-        "--kl-coef 0.0 "
-        "--num-critic-only-steps 0 "
     )
 
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-6 "
-        "--critic-lr 5e-6 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -50,18 +57,14 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-decode-log-interval 1000 "
-        "--sglang-cuda-graph-max-bs 64 "
     )
 
     misc_args = (
-        # Colocate: actor GPUs 0-3, critic GPUs 4-7, rollout GPUs 0-7
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 4 "
-        "--critic-num-nodes 1 "
-        "--critic-num-gpus-per-node 4 "
+        f"--actor-num-nodes 1 "
+        f"--actor-num-gpus-per-node {NUM_GPUS} "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 2048 "
+        "--max-tokens-per-gpu 4096 "
         "--gradient-checkpointing "
     )
 
@@ -69,8 +72,9 @@ def execute():
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{ppo_args} "
+        f"{grpo_args} "
         f"{fsdp_args} "
+        f"{eval_args} "
         f"{sglang_args} "
         f"{misc_args} "
     )

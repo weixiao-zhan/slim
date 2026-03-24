@@ -1,80 +1,49 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import torch
+try:
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - allows lightweight unit imports
+    class _TorchStub:
+        class dtype:
+            pass
+
+        class Size(tuple):
+            pass
+
+    torch = _TorchStub()
 
 
 @dataclass
 class Episode:
-    """A single generated episode, the universal data unit flowing from rollout to training.
+    """A single rollout/training record.
 
-    The generate function receives raw dataset examples (dicts) and produces
-    a flat list of Episodes. Episodes are ordered by group: for n_samples_per_prompt=K,
-    episodes[i*K : (i+1)*K] all come from the same prompt. GRPO-style normalization
-    just reshapes rewards by (-1, K).
+    Lifecycle:
+      1. Created from dataset example — fields are Python lists.
+      2. Mutated in-place during async generation + reward.
+      3. ``freeze()`` converts tokens/loss_mask/rollout_log_probs to tensors.
+      4. Consumed by normalization, packing, and training — all tensor ops.
 
-    Fields marked 'training-essential' are consumed by the training step.
-    Fields marked 'metrics/logging' are only used for logging and evaluation.
+    Edge-aligned invariants (len == len(tokens) - 1):
+    - ``loss_mask[i]``: whether predicting ``tokens[i+1]`` contributes to loss.
+      Prompt edges are 0, generated edges are 1.
+    - ``rollout_log_probs[i]``: log-prob of ``tokens[i+1]`` under the rollout policy.
     """
 
-    # === Training-essential ===
-    tokens: list[int] = field(default_factory=list)  # full prompt + response token ids
-    response_length: int = 0
-    reward: float = 0.0  # raw scalar reward (normalization is done at batch level)
-    loss_mask: list[int] | None = None  # len == response_length; None means all-ones
-
-    # === Optional training fields ===
-    rollout_log_probs: list[float] | None = None  # per-token log probs from rollout
-    multimodal_train_inputs: dict[str, Any] | None = None  # processed tensors (pixel_values, etc.)
-    teacher_log_probs: list[float] | None = None  # for on-policy distillation
-    rollout_routed_experts: Any | None = None  # MoE routing replay data
-    train_metadata: dict | None = None  # per-episode metadata consumed by training
-
-    # === Metrics / logging (not used by training math) ===
-    response: str = ""  # decoded response text, for logging (repetition, etc.)
-    truncated: bool = False  # whether generation hit max length
-    non_generation_time: float = 0.0  # time in non-generation steps (reward, tools, etc.)
-
-    @property
-    def effective_response_length(self) -> int:
-        return sum(self.loss_mask) if self.loss_mask is not None else self.response_length
-
-    def get_reward_value(self, args) -> float:
-        """Get scalar reward, selecting by key if reward is a dict."""
-        return self.reward
-
-
-# ---------------------------------------------------------------------------
-# Sample: rollout-internal working state.
-# This class is used only inside generate functions (e.g. sglang_rollout.py)
-# to accumulate state during async generation. The generate function converts
-# Samples to Episodes before returning.
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Sample:
-    """Internal working state during rollout generation.
-
-    Not part of the public interface — generate functions should convert
-    Sample → Episode before returning results.
-    """
-
-    # prompt / input
+    # Prompt / input fields
     prompt: str | list[dict[str, str]] = ""
     label: str | None = None
     tools: list[dict] | None = None
-    multimodal_inputs: dict[str, Any] | None = None  # raw multimodal data (PIL images)
+    multimodal_inputs: dict[str, Any] | None = None
     metadata: dict = field(default_factory=dict)
     generate_function_path: str | None = None
     session_id: str | None = None
 
-    # accumulated during generation
-    tokens: list[int] = field(default_factory=list)
-    response: str = ""
-    response_length: int = 0
-    reward: float | dict[str, Any] | None = None
-    loss_mask: list[int] | None = None
-    rollout_log_probs: list[float] | None = None
+    # Sequence state — lists pre-freeze, tensors post-freeze
+    tokens: Any = field(default_factory=list)          # [int] → LongTensor
+    loss_mask: Any | None = None                       # [int] → IntTensor
+    reward: float | None = None
+    rollout_log_probs: Any | None = None               # [float] → FloatTensor
     rollout_routed_experts: Any | None = None
     multimodal_train_inputs: dict[str, Any] | None = None
     teacher_log_probs: list[float] | None = None
@@ -82,7 +51,7 @@ class Sample:
     non_generation_time: float = 0.0
     train_metadata: dict | None = None
 
-    # status tracking
+    # Status tracking
     class Status:
         PENDING = "pending"
         COMPLETED = "completed"
@@ -92,38 +61,77 @@ class Sample:
 
     status: str = Status.PENDING
 
+    @classmethod
+    def from_example(cls, example: dict) -> "Episode":
+        return cls(
+            prompt=example.get("prompt", ""),
+            label=example.get("label"),
+            tools=example.get("tools"),
+            multimodal_inputs=example.get("multimodal_inputs"),
+            metadata=dict(example.get("metadata", {})),
+        )
+
+    # --- Pre-freeze helpers (list phase) ---
+
+    @property
+    def num_edges(self) -> int:
+        return max(len(self.tokens) - 1, 0)
+
+    def ensure_edge_alignment(self) -> None:
+        """Validate / materialize loss_mask. Call before freeze()."""
+        edge_len = self.num_edges
+        if self.loss_mask is None:
+            self.loss_mask = [1] * edge_len
+        if len(self.loss_mask) != edge_len:
+            raise ValueError(f"loss_mask length {len(self.loss_mask)} != num_edges {edge_len}")
+        if self.rollout_log_probs is not None and len(self.rollout_log_probs) != edge_len:
+            raise ValueError(f"rollout_log_probs length {len(self.rollout_log_probs)} != num_edges {edge_len}")
+
+    def freeze(self) -> None:
+        """Convert sequence fields to tensors. Call once after generation + RM."""
+        self.tokens = torch.tensor(self.tokens, dtype=torch.long)
+        if self.loss_mask is not None:
+            self.loss_mask = torch.tensor(self.loss_mask, dtype=torch.int)
+        if self.rollout_log_probs is not None:
+            self.rollout_log_probs = torch.tensor(self.rollout_log_probs, dtype=torch.float32)
+
+    # --- Properties (work on both lists and tensors) ---
+
+    @property
+    def response_length(self) -> int:
+        """Count of generated edges (loss_mask == 1)."""
+        if self.loss_mask is None:
+            return self.num_edges
+        return int(sum(self.loss_mask))
+
+    def get_generated_token_ids(self) -> list[int]:
+        """Extract token ids where loss_mask == 1.
+
+        Returns a plain list regardless of pre/post-freeze state.
+        """
+        if self.loss_mask is None or not len(self.tokens):
+            return []
+        tokens, mask = self.tokens, self.loss_mask
+        if hasattr(mask, "bool"):  # tensor path
+            return tokens[1:][mask.bool()].tolist()
+        return [tokens[i + 1] for i, m in enumerate(mask) if m]
+
+    # --- Shared helpers ---
+
     def update_from_meta_info(self, args, meta_info: dict):
         if "weight_version" in meta_info:
             self.weight_versions.append(meta_info["weight_version"])
 
         match meta_info["finish_reason"]["type"]:
             case "length":
-                self.status = Sample.Status.TRUNCATED
+                self.status = Episode.Status.TRUNCATED
             case "abort":
-                self.status = Sample.Status.ABORTED
+                self.status = Episode.Status.ABORTED
             case "stop":
-                self.status = Sample.Status.COMPLETED
-
-    def to_episode(self, args) -> Episode:
-        """Convert this Sample to an Episode for training/eval consumption."""
-        reward_value = self.reward if not getattr(args, "reward_key", None) else self.reward[args.reward_key]
-        return Episode(
-            tokens=self.tokens,
-            response_length=self.response_length,
-            reward=float(reward_value) if reward_value is not None else 0.0,
-            loss_mask=self.loss_mask,
-            rollout_log_probs=self.rollout_log_probs,
-            multimodal_train_inputs=self.multimodal_train_inputs,
-            teacher_log_probs=self.teacher_log_probs,
-            rollout_routed_experts=self.rollout_routed_experts,
-            train_metadata=self.train_metadata,
-            response=self.response,
-            truncated=(self.status == Sample.Status.TRUNCATED),
-            non_generation_time=self.non_generation_time,
-        )
+                self.status = Episode.Status.COMPLETED
 
     def get_reward_value(self, args) -> float:
-        return self.reward if not getattr(args, "reward_key", None) else self.reward[args.reward_key]
+        return self.reward
 
 
 @dataclass(frozen=True)

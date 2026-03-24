@@ -361,8 +361,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
         # Set dummy advantages/returns required by pack_sequences
         for ep in episodes:
-            ep._advantages = [0.0] * ep.response_length
-            ep._returns = [0.0] * ep.response_length
+            ep._advantages = [0.0] * ep.num_edges
+            ep._returns = [0.0] * ep.num_edges
 
         # Use _packed_data which synchronizes batch count across DP ranks
         # (required for FSDP all-gather collectives during forward pass)
@@ -570,9 +570,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _train_core(self, rollout_id: int, episodes: list[Episode], values: list | None = None) -> None:
         if self.args.advantage_estimator in ["grpo", "gspo"]:
-            # For GRPO/GSPO, advantages = returns = reward repeated per token
+            # For GRPO/GSPO, advantages = returns = reward repeated per edge
             for ep in episodes:
-                ep._advantages = [ep.reward] * ep.response_length
+                ep._advantages = [ep.reward] * ep.num_edges
                 ep._returns = ep._advantages
         elif self.args.advantage_estimator == "ppo":
             assert values is not None, "PPO requires value predictions from critic"
@@ -627,29 +627,34 @@ class FSDPTrainRayActor(TrainRayActor):
             self.ref_model.cpu()
 
     def _compute_ppo_advantages(self, episodes: list[Episode], values: list[torch.Tensor]) -> None:
-        """Compute GAE advantages and returns for PPO, and store on episodes."""
+        """Compute GAE advantages and returns for PPO, and store on episodes.
+
+        Values are per-edge tensors (length = num_edges) from the critic.
+        We compute GAE over all edges, then store per-edge advantages/returns.
+        """
         assert len(episodes) == len(values), (
             f"Number of episodes ({len(episodes)}) != number of value predictions ({len(values)})"
         )
 
         B = len(episodes)
-        max_T = max(ep.response_length for ep in episodes)
+        max_E = max(ep.num_edges for ep in episodes)
 
-        # Build [B, T] reward and value tensors (padded)
-        rewards_padded = torch.zeros(B, max_T)
-        values_padded = torch.zeros(B, max_T)
+        # Build [B, E] reward and value tensors (padded)
+        rewards_padded = torch.zeros(B, max_E)
+        values_padded = torch.zeros(B, max_E)
 
         for i, ep in enumerate(episodes):
-            T = ep.response_length
-            rewards_padded[i, T - 1] = ep.reward
-            values_padded[i, :T] = values[i].float()
+            E = ep.num_edges
+            # Place reward at the last edge
+            rewards_padded[i, E - 1] = ep.reward
+            values_padded[i, :E] = values[i].float()
 
         advantages_padded, returns_padded = vanilla_gae(
             rewards_padded, values_padded, self.args.gamma, self.args.lambd
         )
 
         if self.args.normalize_advantages:
-            advantages_flat = torch.cat([advantages_padded[i, :episodes[i].response_length] for i in range(B)])
+            advantages_flat = torch.cat([advantages_padded[i, :episodes[i].num_edges] for i in range(B)])
             # Global normalization across all DP ranks
             local_sum = advantages_flat.sum()
             local_sq_sum = (advantages_flat**2).sum()
@@ -661,9 +666,9 @@ class FSDPTrainRayActor(TrainRayActor):
             advantages_padded = (advantages_padded - mean.cpu()) / std.cpu()
 
         for i, ep in enumerate(episodes):
-            T = ep.response_length
-            ep._advantages = advantages_padded[i, :T].tolist()
-            ep._returns = returns_padded[i, :T].tolist()
+            E = ep.num_edges
+            ep._advantages = advantages_padded[i, :E].tolist()
+            ep._returns = returns_padded[i, :E].tolist()
             ep._values = values[i].tolist()
 
     def _critic_train_loop(self, rollout_id: int, packed_batches: list, grad_accum: list) -> None:
@@ -694,14 +699,14 @@ class FSDPTrainRayActor(TrainRayActor):
         old_values_list = [batch["old_values"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
         returns_list = [batch["returns"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
         loss_masks = [batch["loss_masks"].to(device=cur_values_list[0].device) for batch in unpacked_batches]
-        response_lengths = [batch["response_lengths"] for batch in unpacked_batches]
+        edge_lengths = [batch["edge_lengths"] for batch in unpacked_batches]
 
         cur_values = torch.cat(cur_values_list, dim=0)
         old_values = torch.cat(old_values_list, dim=0)
         returns = torch.cat(returns_list, dim=0)
 
         value_loss = compute_value_loss(cur_values, old_values, returns, self.args.value_clip)
-        value_loss = sum_of_sample_mean(value_loss, response_lengths, loss_masks)
+        value_loss = sum_of_sample_mean(value_loss, edge_lengths, loss_masks)
 
         reported = {"value_loss": value_loss.detach()}
 
@@ -781,7 +786,7 @@ class FSDPTrainRayActor(TrainRayActor):
         log_probs = torch.cat([batch["cur_log_probs"] for batch in unpacked_batches], dim=0)
         advantages = torch.cat([batch["advantages"] for batch in unpacked_batches], dim=0)
         loss_masks = [batch["loss_masks"].to(device=log_probs.device) for batch in unpacked_batches]
-        response_lengths = [batch["response_lengths"] for batch in unpacked_batches]
+        edge_lengths = [batch["edge_lengths"] for batch in unpacked_batches]
 
         advantages = advantages.to(device=log_probs.device)
         old_log_probs = old_log_probs.to(device=log_probs.device)
@@ -821,24 +826,24 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
         if self.args.calculate_per_token_loss:
-            pg_loss = sum_of_token(pg_loss, response_lengths, loss_masks)
-            pg_clipfrac = sum_of_token(pg_clipfrac, response_lengths, loss_masks)
-            ppo_kl = sum_of_token(ppo_kl.abs(), response_lengths, loss_masks)
+            pg_loss = sum_of_token(pg_loss, edge_lengths, loss_masks)
+            pg_clipfrac = sum_of_token(pg_clipfrac, edge_lengths, loss_masks)
+            ppo_kl = sum_of_token(ppo_kl.abs(), edge_lengths, loss_masks)
         else:
-            pg_loss = sum_of_sample_mean(pg_loss, response_lengths, loss_masks)
-            pg_clipfrac = sum_of_sample_mean(pg_clipfrac, response_lengths, loss_masks)
-            ppo_kl = sum_of_sample_mean(ppo_kl.abs(), response_lengths, loss_masks)
+            pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, loss_masks)
+            pg_clipfrac = sum_of_sample_mean(pg_clipfrac, edge_lengths, loss_masks)
+            ppo_kl = sum_of_sample_mean(ppo_kl.abs(), edge_lengths, loss_masks)
 
         # Only compare rollout vs. train log probs when they originate from different stages.
         train_rollout_logprob_abs_diff = None
         if not self.args.use_rollout_logprobs and rollout_log_probs is not None:
             train_rollout_logprob_abs_diff = (old_log_probs - rollout_log_probs).abs()
             train_rollout_logprob_abs_diff = sum_of_sample_mean(
-                train_rollout_logprob_abs_diff, response_lengths, loss_masks
+                train_rollout_logprob_abs_diff, edge_lengths, loss_masks
             ).detach()
 
         entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
-        entropy_loss = sum_of_sample_mean(entropy, response_lengths, loss_masks)
+        entropy_loss = sum_of_sample_mean(entropy, edge_lengths, loss_masks)
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss
 
@@ -853,7 +858,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 kl_loss_type=self.args.kl_loss_type,
                 importance_ratio=importance_ratio,
             )
-            kl_loss = sum_of_sample_mean(kl, response_lengths, loss_masks)
+            kl_loss = sum_of_sample_mean(kl, edge_lengths, loss_masks)
 
             loss = loss + self.args.kl_loss_coef * kl_loss
 

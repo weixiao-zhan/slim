@@ -16,11 +16,10 @@ dependencies = [
     "pyyaml",
     "qwen_vl_utils",
     "ray[default]",
-    "ring_flash_attn",
     "sglang[all]>=0.5.9",
     "sglang-router>=0.2.3",
     "tensorboard",
-    "transformers>=5.3.0",
+    "transformers==4.57.6",
     "wandb",
 ]
 classifiers = [

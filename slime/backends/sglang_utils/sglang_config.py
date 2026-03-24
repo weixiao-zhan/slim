@@ -174,7 +174,7 @@ class SglangConfig:
                     model_path=m.get("model_path"),
                     num_gpus_per_engine=m.get("num_gpus_per_engine"),
                     server_groups=groups,
-                    update_weights=m.get("update_weights"),
+                    update_weights=m.get("update_weights", True),
                 )
             )
         return SglangConfig(models=models)

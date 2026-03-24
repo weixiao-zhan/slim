@@ -8,27 +8,26 @@ from slime.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slime.utils.types import Episode
 
 
+# Keys sliced by edge offsets (edge-aligned data)
+_EDGE_KEYS = frozenset([
+    "log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values",
+    "rollout_log_probs", "loss_masks", "advantages", "returns", "old_values",
+])
+# Keys sliced by token offsets (cu_seqlens)
+_TOKEN_KEYS = frozenset(["tokens", "position_ids"])
+
+
 def pack_sequences(
     episodes: list[Episode],
     max_tokens_per_gpu: int | None = None,
     num_packs: int | None = None,
 ) -> list[dict]:
-    """Pack episodes into dense batches with cumulative sequence lengths.
-
-    Args:
-        episodes: List of Episode objects to pack
-        max_tokens_per_gpu: Maximum tokens per GPU pack
-        num_packs: Explicit number of packs to create
-
-    Returns:
-        List of packed batches
-    """
+    """Pack frozen (tensor-backed) episodes into dense batches."""
     if not episodes:
         return []
 
     seq_lengths = [len(ep.tokens) for ep in episodes]
 
-    # Determine number of packs and use balanced partitioning
     if num_packs:
         k_partitions = num_packs
     elif max_tokens_per_gpu:
@@ -43,47 +42,54 @@ def pack_sequences(
 
     result = []
     for indices in partitions:
+        token_parts = []
+        mask_parts = []
+        posid_parts = []
+        advantage_parts = []
+        return_parts = []
+        logprob_parts = []
+        old_value_parts = []
         cu_seqlens = [0]
-        flat_tokens = []
-        flat_masks = []
-        flat_positionids = []
-        flat_advantages = []
-        flat_returns = []
-        flat_rollout_log_probs = []
-        flat_old_values = []
+        edge_lengths = []
 
         for i in indices:
             ep = episodes[i]
-            flat_tokens.extend(ep.tokens)
-            flat_positionids.extend(range(len(ep.tokens)))
-            flat_masks.extend(ep.loss_mask)
-            flat_advantages.extend(ep._advantages)
-            flat_returns.extend(ep._returns)
-            if ep.rollout_log_probs:
-                flat_rollout_log_probs.extend(ep.rollout_log_probs)
+            n = len(ep.tokens)
+
+            token_parts.append(ep.tokens)
+            posid_parts.append(torch.arange(n, dtype=torch.int))
+            mask_parts.append(ep.loss_mask)
+            advantage_parts.append(torch.tensor(ep._advantages, dtype=torch.float32))
+            return_parts.append(torch.tensor(ep._returns, dtype=torch.float32))
+            edge_lengths.append(ep.num_edges)
+
+            if ep.rollout_log_probs is not None and len(ep.rollout_log_probs):
+                logprob_parts.append(ep.rollout_log_probs)
             if hasattr(ep, "_values") and ep._values is not None:
-                flat_old_values.extend(ep._values)
-            cu_seqlens.append(cu_seqlens[-1] + len(ep.tokens))
+                old_value_parts.append(torch.tensor(ep._values, dtype=torch.float32))
+            cu_seqlens.append(cu_seqlens[-1] + n)
 
         packed_batch = {
-            "tokens": torch.tensor(flat_tokens, dtype=torch.long),
-            "loss_masks": torch.tensor(flat_masks, dtype=torch.int),
-            "position_ids": torch.tensor(flat_positionids, dtype=torch.int),
+            "tokens": torch.cat(token_parts),
+            "loss_masks": torch.cat(mask_parts),
+            "position_ids": torch.cat(posid_parts),
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
             "rewards": torch.tensor([episodes[i].reward for i in indices], dtype=torch.float32),
             "raw_reward": [episodes[i].reward for i in indices],
             "response_lengths": [episodes[i].response_length for i in indices],
-            "advantages": torch.tensor(flat_advantages, dtype=torch.float32),
-            "returns": torch.tensor(flat_returns, dtype=torch.float32),
-            "rollout_log_probs": torch.tensor(
-                flat_rollout_log_probs, dtype=torch.float32, device=torch.cuda.current_device()
+            "edge_lengths": edge_lengths,
+            "advantages": torch.cat(advantage_parts),
+            "returns": torch.cat(return_parts),
+            "rollout_log_probs": (
+                torch.cat(logprob_parts).to(torch.cuda.current_device())
+                if logprob_parts
+                else torch.tensor([], dtype=torch.float32, device=torch.cuda.current_device())
             ),
         }
 
-        if flat_old_values:
-            packed_batch["old_values"] = torch.tensor(flat_old_values, dtype=torch.float32)
+        if old_value_parts:
+            packed_batch["old_values"] = torch.cat(old_value_parts)
 
-        # Collect multimodal training tensors
         has_multimodal = any(episodes[i].multimodal_train_inputs is not None for i in indices)
         if has_multimodal:
             multimodal_data = {}
@@ -102,76 +108,55 @@ def pack_sequences(
             packed_batch["multimodal_train_inputs"] = multimodal_data
             packed_batch["multimodal_num_items"] = multimodal_num_items
 
-        # Store original episode indices so callers can map unpacked results
-        # back to the original episode order (partitioning reorders).
         packed_batch["_episode_indices"] = list(indices)
-
         result.append(packed_batch)
 
     return result
 
 
 def unpack_sequences(packed_batch: dict) -> list[dict]:
-    """Unpack sequences from a packed batch.
-
-    Args:
-        packed_batch: Packed batch
-
-    Returns:
-        List of unpacked batches
-    """
+    """Unpack sequences from a packed batch."""
     cu_seqlens = packed_batch["cu_seqlens"]
     num_sequences = len(cu_seqlens) - 1
-    response_lengths = packed_batch["response_lengths"]
+    edge_lengths = packed_batch["edge_lengths"]
     multimodal_num_items = packed_batch.get("multimodal_num_items", {})
 
+    # Precompute cumulative offsets for O(1) slicing
+    edge_offsets = [0]
+    for el in edge_lengths:
+        edge_offsets.append(edge_offsets[-1] + el)
+
+    mm_offsets = {}
+    for mm_key, num_items_list in multimodal_num_items.items():
+        offsets = [0]
+        for n in num_items_list:
+            offsets.append(offsets[-1] + n)
+        mm_offsets[mm_key] = offsets
+
     instances = []
-
-    # Calculate pad_length by counting trailing zeros
-    tokens = packed_batch["tokens"]
-    nonzero_indices = (tokens != 0).nonzero(as_tuple=True)[0]
-    if len(nonzero_indices) > 0:
-        pad_length = len(tokens) - nonzero_indices[-1].item() - 1
-    else:
-        pad_length = 0
-
     for i in range(num_sequences):
         start_idx = cu_seqlens[i].item()
         end_idx = cu_seqlens[i + 1].item()
+        edge_start = edge_offsets[i]
+        edge_end = edge_offsets[i + 1]
         instance = {}
 
         for key, value in packed_batch.items():
-            if key in instance:
+            if key in instance or key == "multimodal_num_items":
                 continue
-            if key == "multimodal_num_items":
-                continue
-            elif key == "multimodal_train_inputs" and isinstance(value, dict):
+            if key == "multimodal_train_inputs":
                 instance[key] = {}
                 for mm_key, mm_tensor in value.items():
-                    if mm_key in multimodal_num_items:
-                        num_items_list = multimodal_num_items[mm_key]
-                        start_mm_idx = sum(num_items_list[:i])
-                        end_mm_idx = start_mm_idx + num_items_list[i]
-                        if num_items_list[i] > 0:
-                            instance[key][mm_key] = mm_tensor[start_mm_idx:end_mm_idx]
-            elif isinstance(value, torch.Tensor):
-                if key in ["log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values"]:
-                    instance[key] = value[
-                        end_idx - 1 - response_lengths[i] - pad_length : end_idx - 1 - pad_length
-                    ]
-                elif key == "rollout_log_probs":
-                    instance[key] = value[sum(response_lengths[:i]) : sum(response_lengths[: i + 1])]
-                elif key in ["tokens", "position_ids"]:
-                    if len(value) > start_idx:
-                        instance[key] = value[start_idx:end_idx]
-                    else:
-                        raise ValueError(f"Attribute {key} is not found in the packed batch")
-                elif key in ["loss_masks", "advantages", "returns", "old_values"]:
-                    instance[key] = value[sum(response_lengths[:i]) : sum(response_lengths[: i + 1])]
-            elif isinstance(value, list):
+                    if mm_key in mm_offsets:
+                        s, e = mm_offsets[mm_key][i], mm_offsets[mm_key][i + 1]
+                        if s < e:
+                            instance[key][mm_key] = mm_tensor[s:e]
+            elif key in _EDGE_KEYS:
+                instance[key] = value[edge_start:edge_end]
+            elif key in _TOKEN_KEYS:
+                instance[key] = value[start_idx:end_idx]
+            elif not isinstance(value, torch.Tensor):
                 instance[key] = value[i]
-            else:
-                raise ValueError(f"Attribute {key} is not found in the packed batch")
 
         instances.append(instance)
 

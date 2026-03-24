@@ -287,7 +287,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "This defines the granularity of the sampling batch in the rollout function. "
                     "When the number of available samples falls below the target, a sampling "
                     "operation of size over_sampling_batch_size will be triggered."
-                    "Regardless of whether partial rollout is used or filters are applied, "
+                    "Regardless of whether dynamic filters are applied, "
                     "the sampling granularity is always determined by this value. "
                     "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size."
                 ),
@@ -304,32 +304,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
-            # partial rollout
-            parser.add_argument(
-                "--partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to use partial rollout. "
-                    "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
-                    "This is useful for long responses."
-                ),
-            )
-            parser.add_argument(
-                "--mask-offpolicy-in-partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to mask previous generation in partial rollout. "
-                    "If set, only on-policy generated tokens will be used in training"
-                ),
-            )
             parser.add_argument(
                 "--custom-generate-function-path",
                 type=str,
                 default=None,
                 help=(
-                    "Only substitue the `def generate(args, sample, sampling_params)` function within the example rollout function. "
+                    "Only substitue the `def generate(args, episode, sampling_params)` function within the example rollout function. "
                     "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
                 ),
             )
@@ -351,17 +331,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "The custom function for logging eval rollout data. "
                     "def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool. "
                     "The return value indicates whether to skip the default logging. "
-                ),
-            )
-
-            parser.add_argument(
-                "--buffer-filter-path",
-                type=str,
-                default=None,
-                help=(
-                    "Path to the buffer filter function. "
-                    "It should be able to select the samples in the buffer. "
-                    "The function should filter and return examples from the buffer."
                 ),
             )
             # update weight
@@ -474,7 +443,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--data-source-path",
                 type=str,
-                default="slime.rollout.data_source.RolloutDataSourceWithBuffer",
+                default="slime.rollout.data_source.RolloutDataSource",
                 help="The data source class for rollout data.",
             )
             parser.add_argument(

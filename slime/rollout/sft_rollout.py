@@ -49,19 +49,19 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
         tools = example.get("metadata", {}).get("tools", None)
 
         token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
-        response_length = MASK_GENERATOR.get_response_lengths([loss_mask])[0]
+        edge_loss_mask = loss_mask[1:] if len(token_ids) > 1 else []
 
         ep = Episode(
             tokens=token_ids,
-            response_length=response_length,
             reward=0.0,
-            loss_mask=loss_mask[-response_length:],
+            loss_mask=edge_loss_mask,
         )
+        ep.ensure_edge_alignment()
         episodes.append(ep)
 
         if i == 0 and not SAMPLE_PRINTED:
             logger.info(
-                f"sft_rollout::generate_rollout example data: {ep=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=} {response_length=}"
+                f"sft_rollout::generate_rollout example data: {ep=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=}"
             )
             SAMPLE_PRINTED = True
 
