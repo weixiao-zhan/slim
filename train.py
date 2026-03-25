@@ -76,11 +76,15 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            # Phase 1: Critic computes value predictions (synchronous)
+            # Phase 1: Compute values and log-probs in parallel
             values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
-            ray.get(values_refs)  # wait for all ranks to finish
+            if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
+                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref)
+            else:
+                logprobs_refs = []
+            ray.get(values_refs + logprobs_refs)  # wait for both to finish
 
-            # Phase 2: Train actor and critic concurrently using computed values
+            # Phase 2: Train actor and critic concurrently
             critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
             if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
                 ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))

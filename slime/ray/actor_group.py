@@ -101,6 +101,10 @@ class RayTrainGroup:
         """Compute per-token value predictions (critic only). Returns list of ObjectRefs."""
         return [actor.compute_values.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
 
+    def compute_log_probs(self, rollout_id, rollout_data_ref):
+        """Pre-compute log-probs and cache packed batches (actor only). Returns list of ObjectRefs."""
+        return [actor.compute_log_probs.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+
     def save_model(self, rollout_id, force_sync=False):
         """Save actor model"""
         return ray.get([actor.save_model.remote(rollout_id, force_sync=force_sync) for actor in self._actor_handlers])

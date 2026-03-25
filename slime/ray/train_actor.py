@@ -118,6 +118,9 @@ class TrainRayActor(RayActor):
     def compute_values(self, rollout_id, rollout_data_ref):
         raise NotImplementedError("compute_values is only implemented for critic role")
 
+    def compute_log_probs(self, rollout_id, rollout_data_ref):
+        raise NotImplementedError("compute_log_probs is only implemented for actor role")
+
     @abc.abstractmethod
     def save_model(self, rollout_id, force_sync=False):
         raise NotImplementedError

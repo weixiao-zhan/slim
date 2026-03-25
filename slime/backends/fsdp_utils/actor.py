@@ -183,6 +183,11 @@ class FSDPTrainRayActor(TrainRayActor):
         # Handle to the paired critic (set by connect_actor_critic for actor role)
         self.critic_handle = None
 
+        # Pre-computed data from compute_log_probs / compute_values, consumed by train()
+        self._pending_episodes = None
+        self._pending_packed_batches = None
+        self._pending_grad_accum = None
+
         checkpoint.finalize_load(self, checkpoint_payload)
 
         # Initialize data packing parameters
@@ -359,10 +364,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
 
-        # Set dummy advantages/returns required by pack_sequences
-        for ep in episodes:
-            ep._advantages = [0.0] * ep.num_edges
-            ep._returns = [0.0] * ep.num_edges
+        _init_dummy_advantages(episodes)
 
         # Use _packed_data which synchronizes batch count across DP ranks
         # (required for FSDP all-gather collectives during forward pass)
@@ -388,7 +390,46 @@ class FSDPTrainRayActor(TrainRayActor):
             for j, ub in enumerate(unpacked):
                 all_values[ep_indices[j]] = ub["cur_values"].detach().cpu()
 
+        # Cache packed data for reuse in train()
+        self._pending_episodes = episodes
+        self._pending_packed_batches = packed_batches
+        self._pending_grad_accum = grad_accum
+
         return all_values
+
+    def compute_log_probs(self, rollout_id: int, rollout_data_refs: list) -> None:
+        """Pre-compute log-probs and cache packed batches for the upcoming train() call.
+
+        Packs episodes and computes ref/actor log-probs as needed. When
+        use_rollout_logprobs is True, actor log-probs are skipped (rollout
+        log-probs serve as the old baseline). The packed batches are stored
+        on self for reuse in train(), avoiding redundant packing and forward passes.
+        """
+        assert not self._is_critic, "compute_log_probs should only be called on the actor"
+
+        episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+
+        _init_dummy_advantages(episodes)
+
+        packed_batches, grad_accum = self._packed_data(episodes)
+
+        needs_forward = self.ref_model is not None or not self.args.use_rollout_logprobs
+        if needs_forward:
+            if self.args.offload_train:
+                self.wake_up()
+
+            if self.ref_model is not None:
+                self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+            if not self.args.use_rollout_logprobs:
+                self._compute_log_prob("actor", packed_batches)
+
+            if self.args.offload_train:
+                self.sleep()
+
+        # Cache for train()
+        self._pending_episodes = episodes
+        self._pending_packed_batches = packed_batches
+        self._pending_grad_accum = grad_accum
 
     def _compute_log_prob(
         self,
@@ -519,12 +560,27 @@ class FSDPTrainRayActor(TrainRayActor):
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"):
-            episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+            # Use cached data from compute_log_probs / compute_values if available
+            if self._pending_episodes is not None:
+                episodes = self._pending_episodes
+                packed_batches = self._pending_packed_batches
+                grad_accum = self._pending_grad_accum
+                self._pending_episodes = None
+                self._pending_packed_batches = None
+                self._pending_grad_accum = None
+            else:
+                episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+                packed_batches = None
+                grad_accum = None
+
             if self.args.debug_rollout_only:
                 return
 
             values = ray.get(values_refs[self.dp_rank]) if values_refs is not None else None
-            self._train_core(rollout_id=rollout_id, episodes=episodes, values=values)
+            self._train_core(
+                rollout_id=rollout_id, episodes=episodes, values=values,
+                packed_batches=packed_batches, grad_accum=grad_accum,
+            )
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -568,7 +624,14 @@ class FSDPTrainRayActor(TrainRayActor):
                 f"({log_dict['rollout/rollout_log_probs']})"
             )
 
-    def _train_core(self, rollout_id: int, episodes: list[Episode], values: list | None = None) -> None:
+    def _train_core(
+        self,
+        rollout_id: int,
+        episodes: list[Episode],
+        values: list | None = None,
+        packed_batches: list | None = None,
+        grad_accum: list | None = None,
+    ) -> None:
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             # For GRPO/GSPO, advantages = returns = reward repeated per edge
             for ep in episodes:
@@ -580,7 +643,11 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
 
-        packed_batches, grad_accum = self._packed_data(episodes)
+        if packed_batches is not None:
+            # Reuse pre-packed batches, update advantages/returns with real values
+            _update_packed_advantages(packed_batches, episodes)
+        else:
+            packed_batches, grad_accum = self._packed_data(episodes)
 
         assert (
             len(grad_accum) > 0
@@ -589,10 +656,13 @@ class FSDPTrainRayActor(TrainRayActor):
         if self._is_critic:
             self._critic_train_loop(rollout_id, packed_batches, grad_accum)
         else:
-            if self.ref_model is not None:
-                self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+            # Compute log-probs if not pre-computed
+            if "log_probs" not in packed_batches[0] and "ref_log_probs" not in packed_batches[0]:
+                if self.ref_model is not None:
+                    self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+                if not self.args.use_rollout_logprobs:
+                    self._compute_log_prob("actor", packed_batches)
 
-            self._compute_log_prob("actor", packed_batches)
             self._log_rollout_data(rollout_id, episodes, packed_batches)
 
             with timer("actor_train"):
@@ -976,6 +1046,37 @@ class FSDPTrainRayActor(TrainRayActor):
         if packed_sequence.get("multimodal_train_inputs"):
             model_args.update(packed_sequence["multimodal_train_inputs"])
         return model_args
+
+
+def _init_dummy_advantages(episodes: list[Episode]) -> None:
+    """Set zero advantages/returns on episodes so pack_sequences can proceed."""
+    for ep in episodes:
+        ep._advantages = [0.0] * ep.num_edges
+        ep._returns = [0.0] * ep.num_edges
+
+
+def _update_packed_advantages(packed_batches: list[dict], episodes: list[Episode]) -> None:
+    """Update advantages/returns/old_values in pre-packed batches from episodes.
+
+    After advantages are computed on episodes (e.g. via GAE), this function
+    overwrites the dummy values that were used during initial packing.
+    """
+    for batch in packed_batches:
+        ep_indices = batch["_episode_indices"]
+        adv_parts = []
+        ret_parts = []
+        val_parts = []
+        for idx in ep_indices:
+            ep = episodes[idx]
+            adv_parts.append(torch.tensor(ep._advantages, dtype=torch.float32))
+            ret_parts.append(torch.tensor(ep._returns, dtype=torch.float32))
+            values = getattr(ep, "_values", None)
+            if values is not None:
+                val_parts.append(torch.tensor(values, dtype=torch.float32))
+        batch["advantages"] = torch.cat(adv_parts)
+        batch["returns"] = torch.cat(ret_parts)
+        if val_parts:
+            batch["old_values"] = torch.cat(val_parts)
 
 
 def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
