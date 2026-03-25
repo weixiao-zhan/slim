@@ -7,7 +7,7 @@ value head (Linear(hidden_size, 1)), producing per-token value estimates.
 import logging
 
 import torch.nn as nn
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,6 @@ def create_critic_model(
     if attn_implementation:
         kwargs["attn_implementation"] = attn_implementation
 
-    config = AutoConfig.from_pretrained(checkpoint_path, trust_remote_code=trust_remote_code)
-    hidden_size = config.hidden_size
-
     if init_context is not None:
         with init_context():
             model = model_cls.from_pretrained(checkpoint_path, **kwargs)
@@ -52,6 +49,7 @@ def create_critic_model(
     # Replace the lm_head with a value head.
     # Zero-init for stable PPO startup (V(s) ≈ 0 before critic warmup).
     old_lm_head = model.lm_head
+    hidden_size = old_lm_head.in_features
     backbone_dtype = old_lm_head.weight.dtype
     value_head = nn.Linear(hidden_size, 1, bias=False, dtype=backbone_dtype)
     nn.init.zeros_(value_head.weight)

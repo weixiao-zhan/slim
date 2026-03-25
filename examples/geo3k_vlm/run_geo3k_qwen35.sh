@@ -66,13 +66,13 @@ ROLLOUT_ARGS=(
    --prompt-data /root/datasets/${DATASET_LOCAL_NAME}/train.parquet
    --input-key problem
    --label-key answer
-   --apply-chat-template
+   
    --rollout-shuffle
    --rm-type deepscaler
    --num-rollout 3000
    --rollout-batch-size 64
    --n-samples-per-prompt 8
-   --rollout-max-response-len 4096
+   --rollout-max-context-len 4096
    --rollout-temperature 0.8
    --global-batch-size 512
 )
@@ -84,7 +84,7 @@ EVAL_ARGS=(
    --eval-interval 20
    --eval-prompt-data ${DATASET_LOCAL_NAME} /root/datasets/${DATASET_LOCAL_NAME}/test.parquet
    --n-samples-per-eval-prompt 1
-   --eval-max-response-len 4096
+   --eval-max-context-len 4096
 )
 
 GRPO_ARGS=(

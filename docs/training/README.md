@@ -57,11 +57,13 @@ minislime supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.j
 ```bash
 --input-key prompt           # field containing the prompt
 --label-key label            # field containing the answer
---apply-chat-template        # apply model's chat template
 --tool-key tools             # tool definitions (first-class field)
 --metadata-key metadata      # structured metadata
 --multimodal-keys '{"image": "images"}'  # VLM image columns
 ```
+
+When the prompt is a list of chat messages, `apply_chat_template` is called automatically.
+When the prompt is a plain string, it is tokenized directly.
 
 Example data entry:
 ```json

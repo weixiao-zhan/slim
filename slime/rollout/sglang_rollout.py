@@ -90,13 +90,12 @@ class GenerateState(metaclass=SingletonMeta):
         concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         self.semaphore = asyncio.Semaphore(concurrency)
         self.cpu_executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="sglang_processor")
-        self.apply_chat_template = getattr(args, "apply_chat_template", False)
         self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
             top_k=args.rollout_top_k,
-            max_tokens=args.rollout_max_response_len,  # total response budget
+            max_tokens=args.rollout_max_context_len,  # total context budget
             stop=args.rollout_stop,
             stop_token_ids=args.rollout_stop_token_ids,
             skip_special_tokens=args.rollout_skip_special_tokens,
@@ -143,11 +142,12 @@ class GenerateState(metaclass=SingletonMeta):
         self.remaining_batch_size += len(groups)
 
 
-def _episode_generated_text(args: Namespace, episode: Episode) -> str:
-    gen_ids = episode.get_generated_token_ids()
-    if not gen_ids:
+def _episode_full_text(args: Namespace, episode: Episode) -> str:
+    tokens = episode.tokens
+    if not len(tokens):
         return ""
-    return GenerateState(args).tokenizer.decode(gen_ids, skip_special_tokens=args.rollout_skip_special_tokens)
+    ids = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
+    return GenerateState(args).tokenizer.decode(ids, skip_special_tokens=args.rollout_skip_special_tokens)
 
 
 def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup]:
@@ -163,7 +163,7 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_response_tokens: int) -> bool:
+async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> bool:
     """Tokenize prompt into episode.tokens if not already set.
 
     Sets episode._max_tokens (total context budget) on first call.
@@ -181,14 +181,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_respons
     if isinstance(episode.prompt, list):
         messages = episode.prompt
         tools = episode.tools
-    elif isinstance(episode.prompt, str) and state.apply_chat_template:
-        messages = [{"role": "user", "content": episode.prompt}]
-        tools = None
-    else:
-        messages = None
-        tools = None
-
-    if messages is not None:
         prompt_for_processing = await loop.run_in_executor(
             state.cpu_executor,
             lambda: state.tokenizer.apply_chat_template(
@@ -221,7 +213,7 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_respons
     edge_len = max(len(episode.tokens) - 1, 0)
     episode.loss_mask = [0] * edge_len
     episode.rollout_log_probs = [0.0] * edge_len
-    episode._max_tokens = len(episode.tokens) + max_response_tokens
+    episode._max_tokens = max_context_tokens
 
     return bool(has_multimodal)
 
@@ -414,9 +406,9 @@ async def generate_rollout_async(
             group: RolloutGroup = task.result()
 
             if do_print:
-                text = _episode_generated_text(args, group.episodes[0])
+                ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[str(group.episodes[0].prompt) + text]}, label: {str(group.episodes[0].label)[:100]}, reward: {group.episodes[0].reward}",
+                    f"First rollout sample: {[_episode_full_text(args, ep)]}, label: {ep.label}, reward: {ep.reward}",
                 )
                 do_print = False
 
@@ -438,9 +430,9 @@ async def generate_rollout_async(
                 pbar.update(args.n_samples_per_prompt)
 
     pbar.close()
-    final_text = _episode_generated_text(args, kept_groups[-1].episodes[0])
+    ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[str(kept_groups[-1].episodes[0].prompt) + final_text]}, label: {str(kept_groups[-1].episodes[0].label)[:100]}, reward: {kept_groups[-1].episodes[0].reward}",
+        f"Finish rollout: {[_episode_full_text(args, ep)]}, label: {ep.label}, reward: {ep.reward}",
     )
 
     await abort(args)
@@ -506,7 +498,7 @@ async def eval_rollout_single_dataset(
         temperature=dataset_cfg.temperature,
         top_p=dataset_cfg.top_p,
         top_k=dataset_cfg.top_k,
-        max_tokens=dataset_cfg.max_response_len,
+        max_tokens=dataset_cfg.max_context_len,
         stop=args.rollout_stop,
         stop_token_ids=args.rollout_stop_token_ids,
         skip_special_tokens=args.rollout_skip_special_tokens,
@@ -547,8 +539,7 @@ async def eval_rollout_single_dataset(
     for coro in asyncio.as_completed(tasks):
         episode = await coro
         if do_print:
-            text = _episode_generated_text(args, episode)
-            logger.info(f"eval_rollout_single_dataset example data: {[str(episode.prompt) + text]} reward={episode.reward}")
+            logger.info(f"eval_rollout_single_dataset example data: {[_episode_full_text(args, episode)]} reward={episode.reward}")
             do_print = False
         episode.ensure_edge_alignment()
         episode.freeze()

@@ -43,14 +43,14 @@ ROLLOUT_ARGS=(
    --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
-   --apply-chat-template
+   
    --rollout-shuffle
    --balance-data
    --rm-type deepscaler
    --num-rollout 100
    --rollout-batch-size 8
    --n-samples-per-prompt 8
-   --rollout-max-response-len 4096
+   --rollout-max-context-len 4096
    --rollout-temperature 1
    --global-batch-size 64
 )

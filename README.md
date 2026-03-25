@@ -12,6 +12,7 @@ Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping
 
 - [ ] Add PEFT
 - [ ] Threadpooled generation (when GIL is deprecated, the agents will able to run truely concurrently)
+- [x] Unifiy data layout to use tokens.
 - [x] Improve dataset loading: dataset should be prepared in a format readily consumable by the tokenizer. Defer apply chat template to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
 - [x] Remove megatron dependency. No more mbridge converter and docker. It's `uv` friendly now.
 

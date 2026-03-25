@@ -29,12 +29,12 @@ ROLLOUT_ARGS=(
    --prompt-data /root/Search-R1/data/nq_hotpotqa_train/train.parquet
    --input-key prompt
    --label-key reward_model
-   --apply-chat-template
+   
    --rollout-shuffle
    --num-rollout 3000
    --rollout-batch-size 32
    --n-samples-per-prompt 8
-   --rollout-max-response-len 512
+   --rollout-max-context-len 512
    --rollout-temperature 1
 
    # eval args

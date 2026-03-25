@@ -28,10 +28,10 @@ DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "default_keys": ("top_k",),
         "arg_attrs": ("eval_top_k", "rollout_top_k"),
     },
-    "max_response_len": {
-        "dataset_keys": ("max_response_len",),
-        "default_keys": ("max_response_len",),
-        "arg_attrs": ("eval_max_response_len", "rollout_max_response_len"),
+    "max_context_len": {
+        "dataset_keys": ("max_context_len",),
+        "default_keys": ("max_context_len",),
+        "arg_attrs": ("eval_max_context_len", "rollout_max_context_len"),
     },
 }
 
@@ -110,7 +110,7 @@ class EvalDatasetConfig:
     temperature: float | None = None
     top_p: float | None = None
     top_k: int | None = None
-    max_response_len: int | None = None
+    max_context_len: int | None = None
     stop: list[str] | None = None
     stop_token_ids: list[int] | None = None
     min_new_tokens: int | None = None

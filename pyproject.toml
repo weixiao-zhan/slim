@@ -6,6 +6,7 @@ dependencies = [
     "accelerate",
     "blobfile",
     "datasets",
+    "flash-attn",
     "httpx[http2]",
     "mcp[cli]",
     "numba",
@@ -16,10 +17,10 @@ dependencies = [
     "pyyaml",
     "qwen_vl_utils",
     "ray[default]",
-    "sglang[all]>=0.5.9",
+    "sglang[all]==0.5.5",
     "sglang-router>=0.2.3",
     "tensorboard",
-    "transformers==4.57.6",
+    "transformers==4.57.1",
     "wandb",
 ]
 classifiers = [
@@ -68,6 +69,7 @@ packages = ["slime", "slime_plugins"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -136,4 +138,4 @@ markers = [
 ]
 
 [tool.uv]
-override-dependencies = ["transformers>=5.3.0"]
+override-dependencies = []

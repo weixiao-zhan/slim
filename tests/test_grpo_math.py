@@ -13,14 +13,14 @@ def execute():
     ckpt_args = f"--hf-checkpoint {MODEL_DIR} "
 
     rollout_args = (
-        f"--prompt-data {DATASET_DIR}/gsm8k_full/train.jsonl "
+        f"--prompt-data {DATASET_DIR}/gsm8k/train.parquet "
         "--input-key prompt "
         "--label-key label "
         "--rm-type math "
         "--num-rollout 10 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
-        "--rollout-max-response-len 4096 "
+        "--rollout-max-context-len 4096 "
         "--rollout-temperature 1 "
         "--global-batch-size 512 "
         "--rollout-shuffle "
@@ -28,9 +28,9 @@ def execute():
 
     eval_args = (
         "--eval-interval 5 "
-        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k_full/test.jsonl "
+        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
         "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 4096 "
+        "--eval-max-context-len 4096 "
     )
 
     fsdp_args = "--update-weight-buffer-size 536870912 "
@@ -57,6 +57,7 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-decode-log-interval 1000 "
+        "--attn-implementation flash_attention_2 "
     )
 
     misc_args = (

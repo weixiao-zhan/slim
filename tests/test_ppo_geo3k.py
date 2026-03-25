@@ -5,8 +5,8 @@ import os
 import slime.utils.external_utils.command_utils as U
 
 NUM_GPUS = 8
-MODEL_DIR = os.environ.get("VLM_MODEL_DIR", "/home/ubuntu/models/Qwen3.5-4B")
-DATASET_DIR = os.environ.get("VLM_DATASET_DIR", "/home/ubuntu/datasets/vlm_test")
+MODEL_DIR = os.environ.get("VLM_MODEL_DIR", "/home/ubuntu/models/Qwen3-VL-2B-Thinking")
+DATASET_DIR = os.environ.get("VLM_DATASET_DIR", "/home/ubuntu/datasets/geo3k")
 
 
 def execute():
@@ -14,14 +14,13 @@ def execute():
 
     rollout_args = (
         f"--prompt-data {DATASET_DIR}/train.parquet "
-        "--input-key problem "
-        "--label-key answer "
-        "--apply-chat-template "
+        "--input-key prompt "
+        "--label-key label "
         "--rm-type math "
         "--num-rollout 10 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
-        "--rollout-max-response-len 4096 "
+        "--rollout-max-context-len 8192 "
         "--rollout-temperature 1 "
         "--global-batch-size 512 "
         "--rollout-shuffle "
@@ -33,7 +32,7 @@ def execute():
         "--eval-interval 5 "
         f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
-        "--eval-max-response-len 4096 "
+        "--eval-max-context-len 8192 "
     )
 
     fsdp_args = (
@@ -67,7 +66,7 @@ def execute():
         "--sglang-mem-fraction-static 0.6 "
         "--sglang-decode-log-interval 1000 "
         "--sglang-attention-backend flashinfer "
-        "--attn-implementation sdpa "
+        "--attn-implementation flash_attention_2 "
     )
 
     misc_args = (
@@ -77,7 +76,7 @@ def execute():
         "--critic-num-gpus-per-node 4 "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
+        "--max-tokens-per-gpu 8192 "
     )
 
     train_args = (
@@ -95,6 +94,7 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
+        extra_env_vars={"SGLANG_DISABLE_CUDNN_CHECK": "1"},
     )
 
 
@@ -103,5 +103,6 @@ if __name__ == "__main__":
         os.environ.pop(proxy_var, None)
 
     os.environ["SLIME_SCRIPT_EXTERNAL_RAY"] = "1"
+    os.environ["SGLANG_DISABLE_CUDNN_CHECK"] = "1"
 
     execute()

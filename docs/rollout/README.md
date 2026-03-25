@@ -46,10 +46,9 @@ SGLANG_ARGS=(
 
 ```bash
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data /root/dapo-math-17k/dapo-math-17k.parquet
    --input-key prompt
    --label-key label
-   --apply-chat-template
    --rollout-shuffle
    --rm-type deepscaler
 
@@ -59,7 +58,7 @@ ROLLOUT_ARGS=(
    --num-steps-per-rollout 1
    --global-batch-size 128
 
-   --rollout-max-response-len 8192
+   --rollout-max-context-len 8192
    --rollout-temperature 1
    --balance-data
 )
@@ -94,9 +93,9 @@ Cache half-generated samples for continuation in the next rollout:
 ```bash
 EVAL_ARGS=(
    --eval-interval 5
-   --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
+   --eval-prompt-data aime /root/aime-2024/aime-2024.parquet
    --n-samples-per-eval-prompt 16
-   --eval-max-response-len 16384
+   --eval-max-context-len 16384
    --eval-top-p 1
 )
 ```

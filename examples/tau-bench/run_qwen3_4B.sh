@@ -40,7 +40,7 @@ ROLLOUT_ARGS=(
    --num-rollout 500
    --rollout-batch-size 32
    --n-samples-per-prompt 8
-   --rollout-max-response-len 1024
+   --rollout-max-context-len 1024
    --rollout-temperature 1
    --global-batch-size 256
    --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
@@ -51,7 +51,7 @@ EVAL_ARGS=(
    --eval-interval 5
    --eval-prompt-data retail-dev /root/tau-bench/retail_dev_tasks.jsonl
    --n-samples-per-eval-prompt 1
-   --eval-max-response-len 1024
+   --eval-max-context-len 1024
    --eval-top-k 1
 )
 
