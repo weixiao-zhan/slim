@@ -1,4 +1,4 @@
-"""PPO on Geo3K VLM. 4 actor + 4 critic GPUs colocated with 8 rollout, batch size 512."""
+"""GRPO on Geo3K VLM. 8 actor GPUs with 8 rollout engines, batch size 512."""
 
 import os
 
@@ -17,7 +17,7 @@ def execute():
         "--input-key prompt "
         "--label-key label "
         "--rm-type math "
-        "--num-epoch 2 "
+        "--num-epoch 1 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-context-len 8192 "
@@ -40,21 +40,19 @@ def execute():
         "--gradient-checkpointing "
     )
 
-    ppo_args = (
-        "--advantage-estimator ppo "
-        "--gamma 1.0 "
-        "--lambd 0.95 "
-        "--value-clip 0.2 "
+    grpo_args = (
+        "--advantage-estimator grpo "
+        "--kl-loss-coef 0.00 "
+        "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
+        "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        "--entropy-coef 0.0 "
-        "--kl-coef 0.0 "
     )
 
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-6 "
-        "--critic-lr 5e-6 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -72,16 +70,14 @@ def execute():
     wandb_args = (
         "--use-wandb "
         "--wandb-project minislime "
-        "--wandb-group ppo-geo3k-qwen3vl2b "
+        "--wandb-group grpo-geo3k-qwen3vl2b "
         f"--wandb-key '{os.environ.get('WANDB_API_KEY', '')}' "
         "--disable-wandb-random-suffix "
     )
 
     misc_args = (
         "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 4 "
-        "--critic-num-nodes 1 "
-        "--critic-num-gpus-per-node 4 "
+        "--actor-num-gpus-per-node 8 "
         "--colocate "
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 8192 "
@@ -92,7 +88,7 @@ def execute():
         f"{rollout_args} "
         f"{multimodal_args} "
         f"{optimizer_args} "
-        f"{ppo_args} "
+        f"{grpo_args} "
         f"{fsdp_args} "
         f"{eval_args} "
         f"{sglang_args} "
