@@ -6,6 +6,7 @@ import datetime
 import json
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,7 +117,7 @@ def execute_train(
             f"export no_proxy=127.0.0.1 && export PYTHONBUFFERED=16 && "
             f'ray job submit --address="http://127.0.0.1:{ray_dashboard_port}" '
             f"--runtime-env-json='{runtime_env_json}' "
-            f"-- python3 {train_script} "
+            f"-- {sys.executable} {train_script} "
             f"{train_args}"
         )
 

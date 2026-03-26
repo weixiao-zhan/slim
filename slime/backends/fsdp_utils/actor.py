@@ -109,22 +109,35 @@ class FSDPTrainRayActor(TrainRayActor):
 
         init_context = self._get_init_weight_context_manager()
 
+        # Downcast to bf16 if model config doesn't specify a dtype and flash_attention_2 is requested,
+        # since FA2 requires float16/bfloat16 (e.g. Gemma-3's Siglip vision encoder defaults to float32).
+        load_dtype = getattr(self.hf_config, "torch_dtype", None)
+        if load_dtype is None and self.args.attn_implementation == "flash_attention_2":
+            load_dtype = torch.bfloat16
+
+        # Shared kwargs for from_pretrained — reused by _create_ref_model
+        self._load_kwargs = dict(
+            trust_remote_code=True,
+            attn_implementation=self.args.attn_implementation,
+        )
+        if load_dtype is not None:
+            self._load_kwargs["dtype"] = load_dtype
+
         if self._is_critic:
             from .models.critic import create_critic_model
 
             model = create_critic_model(
                 hf_checkpoint,
-                attn_implementation=self.args.attn_implementation,
                 init_context=init_context,
                 model_cls=self.get_model_cls(),
+                **self._load_kwargs,
             )
         else:
             with init_context():
-                model = self.get_model_cls().from_pretrained(
-                    hf_checkpoint,
-                    trust_remote_code=True,
-                    attn_implementation=self.args.attn_implementation,
-                )
+                model = self.get_model_cls().from_pretrained(hf_checkpoint, **self._load_kwargs)
+
+        # Apply PEFT adapter if --use-peft is set (after critic head swap, before FSDP)
+        model = self._maybe_apply_peft(model)
 
         model.train()
 
@@ -139,6 +152,9 @@ class FSDPTrainRayActor(TrainRayActor):
         self.model = model
 
         if args.gradient_checkpointing:
+            # PEFT + gradient checkpointing requires inputs to have requires_grad=True
+            if hasattr(self.model, "enable_input_require_grads"):
+                self.model.enable_input_require_grads()
             self.model.gradient_checkpointing_enable()
 
         if args.optimizer == "adam":
@@ -272,6 +288,35 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             logger.info(f"[Rank {dist.get_rank()}] tie_word_embeddings=True, loading full model to CPU on all ranks")
             return cpu_init_weights
+
+    def _maybe_apply_peft(self, model):
+        """Apply PEFT (LoRA/DoRA) adapter if --use-peft is set.
+
+        Returns PeftModel if --use-peft is set, otherwise the original model unchanged.
+        On resume, checkpoint.load() restores adapter weights via DCP after FSDP wrapping.
+        """
+        if not getattr(self.args, "use_peft", False):
+            return model
+
+        from peft import LoraConfig, get_peft_model
+
+        defaults = dict(
+            r=16,
+            lora_alpha=32,
+            use_dora=False,
+            target_modules="all-linear",
+            exclude_modules=["vision_tower", "multi_modal_projector"],
+            lora_dropout=0.0,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        defaults.update(self.args.peft_config or {})
+        config = LoraConfig(**defaults)
+        logger.info(f"[Rank {dist.get_rank()}] Applying PEFT: {config}")
+        model = get_peft_model(model, config)
+
+        model.print_trainable_parameters()
+        return model
 
     def _fsdp2_load_full_state_dict(self, model, full_state, device_mesh, cpu_offload):
         """Load full state dict into FSDP2 model with efficient broadcast from rank 0.
@@ -496,9 +541,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     self.model.cuda()
                     dist.barrier(group=get_gloo_group())
 
-    def _packed_data(
-        self, episodes: list[Episode]
-    ) -> tuple[list[dict[str, torch.Tensor]], list[int]]:
+    def _packed_data(self, episodes: list[Episode]) -> tuple[list[dict[str, torch.Tensor]], list[int]]:
         """Pack variable-length episodes for efficient processing.
 
         Returns:
@@ -578,8 +621,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
             values = ray.get(values_refs[self.dp_rank]) if values_refs is not None else None
             self._train_core(
-                rollout_id=rollout_id, episodes=episodes, values=values,
-                packed_batches=packed_batches, grad_accum=grad_accum,
+                rollout_id=rollout_id,
+                episodes=episodes,
+                values=values,
+                packed_batches=packed_batches,
+                grad_accum=grad_accum,
             )
 
         train_metric_utils.log_perf_data_raw(
@@ -592,7 +638,7 @@ class FSDPTrainRayActor(TrainRayActor):
     def _log_rollout_data(self, rollout_id: int, episodes: list[Episode], packed_batches):
         log_dict = {}
         if dist.get_rank() == 0 and episodes:
-            raw_rewards = [ep.reward for ep in episodes]
+            raw_rewards = [getattr(ep, "raw_reward", ep.reward) for ep in episodes]
             log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
 
         for metric_key in ["log_probs", "rollout_log_probs", "ref_log_probs", "advantages", "returns"]:
@@ -702,9 +748,9 @@ class FSDPTrainRayActor(TrainRayActor):
         Values are per-edge tensors (length = num_edges) from the critic.
         We compute GAE over all edges, then store per-edge advantages/returns.
         """
-        assert len(episodes) == len(values), (
-            f"Number of episodes ({len(episodes)}) != number of value predictions ({len(values)})"
-        )
+        assert len(episodes) == len(
+            values
+        ), f"Number of episodes ({len(episodes)}) != number of value predictions ({len(values)})"
 
         B = len(episodes)
         max_E = max(ep.num_edges for ep in episodes)
@@ -724,7 +770,7 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
         if self.args.normalize_advantages:
-            advantages_flat = torch.cat([advantages_padded[i, :episodes[i].num_edges] for i in range(B)])
+            advantages_flat = torch.cat([advantages_padded[i, : episodes[i].num_edges] for i in range(B)])
             # Global normalization across all DP ranks
             local_sum = advantages_flat.sum()
             local_sq_sum = (advantages_flat**2).sum()
@@ -807,8 +853,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         if dist.get_rank() == 0:
             log_dict = {
-                f"{log_prefix}/{k}": (val.item() if torch.is_tensor(val) else val)
-                for k, val in aggregated.items()
+                f"{log_prefix}/{k}": (val.item() if torch.is_tensor(val) else val) for k, val in aggregated.items()
             }
             log_dict[f"{log_prefix}/grad_norm"] = grad_norm
             lr_values = self.lr_scheduler.get_last_lr()
@@ -981,7 +1026,23 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        self.weight_updater.update_weights()
+        # PEFT: merge adapters into base weights so state_dict() returns merged weights
+        # that sglang can use directly. Unmerge after sync to restore training state.
+        # When model is on CPU (after offload_train/sleep), wake up for merge then sleep after.
+        is_peft = hasattr(self.model, "peft_config")
+        if is_peft:
+            was_cpu = next(self.model.parameters()).is_cpu
+            if was_cpu:
+                self.wake_up()
+            self.model.merge_adapter()
+            try:
+                self.weight_updater.update_weights(peft_remap=True)
+            finally:
+                self.model.unmerge_adapter()
+                if was_cpu:
+                    self.sleep()
+        else:
+            self.weight_updater.update_weights()
 
         if self.args.ci_test and len(rollout_engines) > 0:
             engine = random.choice(rollout_engines)
@@ -1017,11 +1078,10 @@ class FSDPTrainRayActor(TrainRayActor):
             init_context = self._get_init_weight_context_manager()
 
             with init_context():
-                ref_model = self.get_model_cls().from_pretrained(
-                    ref_load_path,
-                    trust_remote_code=True,
-                    attn_implementation=self.args.attn_implementation,
-                )
+                ref_model = self.get_model_cls().from_pretrained(ref_load_path, **self._load_kwargs)
+
+            # Apply PEFT to ref model (fresh adapters, no checkpoint resume)
+            ref_model = self._maybe_apply_peft(ref_model)
 
             full_state = ref_model.state_dict()
 
@@ -1213,14 +1273,18 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = model._no_split_modules
-    assert len(layer_cls_to_wrap) > 0 and next(iter(layer_cls_to_wrap)) is not None
+    # PeftModel doesn't expose _no_split_modules, so unwrap to find which layer classes FSDP should shard
+    base_hf = getattr(model, "base_model", model)
+    base_hf = getattr(base_hf, "model", base_hf)
+    layer_cls_to_wrap = getattr(base_hf, "_no_split_modules", None)
+    assert layer_cls_to_wrap and next(iter(layer_cls_to_wrap)) is not None
+    model_config = getattr(base_hf, "config", model.config)
 
     modules = [
         module
         for name, module in model.named_modules()
         if module.__class__.__name__ in layer_cls_to_wrap
-        or (isinstance(module, torch.nn.Embedding) and not model.config.tie_word_embeddings)
+        or (isinstance(module, torch.nn.Embedding) and not model_config.tie_word_embeddings)
     ]
 
     # Determine precision policy based on args

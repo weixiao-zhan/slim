@@ -14,10 +14,9 @@ logger = logging.getLogger(__name__)
 
 def create_critic_model(
     checkpoint_path: str,
-    attn_implementation: str | None = None,
-    trust_remote_code: bool = True,
     init_context=None,
     model_cls=None,
+    **from_pretrained_kwargs,
 ):
     """Create a critic model from a pretrained causal LM checkpoint.
 
@@ -26,25 +25,21 @@ def create_critic_model(
 
     Args:
         checkpoint_path: Path to HuggingFace checkpoint directory.
-        attn_implementation: Attention implementation override.
-        trust_remote_code: Whether to trust remote code in HF models.
         init_context: Context manager factory for weight initialization
             (e.g., init_empty_weights for non-rank-0 processes).
         model_cls: Model class to use (e.g., AutoModelForImageTextToText
             for VLMs). Defaults to AutoModelForCausalLM.
+        **from_pretrained_kwargs: Additional kwargs passed to from_pretrained
+            (e.g., trust_remote_code, attn_implementation, torch_dtype).
     """
     if model_cls is None:
         model_cls = AutoModelForCausalLM
 
-    kwargs = {"trust_remote_code": trust_remote_code}
-    if attn_implementation:
-        kwargs["attn_implementation"] = attn_implementation
-
     if init_context is not None:
         with init_context():
-            model = model_cls.from_pretrained(checkpoint_path, **kwargs)
+            model = model_cls.from_pretrained(checkpoint_path, **from_pretrained_kwargs)
     else:
-        model = model_cls.from_pretrained(checkpoint_path, **kwargs)
+        model = model_cls.from_pretrained(checkpoint_path, **from_pretrained_kwargs)
 
     # Replace the lm_head with a value head.
     # Zero-init for stable PPO startup (V(s) ≈ 0 before critic warmup).

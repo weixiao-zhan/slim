@@ -152,6 +152,26 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                         """,
             )
 
+            # PEFT (LoRA/DoRA) support
+            parser.add_argument(
+                "--use-peft",
+                action="store_true",
+                default=False,
+                help="Apply PEFT (LoRA/DoRA) adapters to the model after loading.",
+            )
+            parser.add_argument(
+                "--peft-config",
+                type=json.loads,
+                default="{}",
+                help=(
+                    "JSON string of LoraConfig overrides for PEFT. "
+                    'Defaults: {"r": 16, "lora_alpha": 32, "use_dora": false, '
+                    '"target_modules": "all-linear", '
+                    '"exclude_modules": ["vision_tower", "multi_modal_projector"], '
+                    '"lora_dropout": 0.0, "bias": "none", "task_type": "CAUSAL_LM"}'
+                ),
+            )
+
             return parser
 
         # rollout

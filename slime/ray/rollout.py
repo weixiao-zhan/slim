@@ -624,6 +624,7 @@ class RolloutManager:
                 rewards = rewards / (std + 1e-6)
 
             for ep, r in zip(episodes, rewards.flatten().tolist(), strict=True):
+                ep.raw_reward = ep.reward
                 ep.reward = r
 
     def _apply_loss_masks(self, episodes: list[Episode]):

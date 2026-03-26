@@ -75,6 +75,25 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
+    """Resolve the latest checkpoint directory from a load root and args.
+
+    Returns the ``iter_NNNNNNN`` directory Path, or None if not found.
+    """
+    if load_root is None:
+        return None
+    root_path = Path(load_root).expanduser()
+    if not root_path.exists():
+        return None
+    target_step = getattr(args, "ckpt_step", None)
+    if target_step is None:
+        tracker_file = root_path / "latest_checkpointed_iteration.txt"
+        if not tracker_file.exists():
+            return None
+        target_step = int(tracker_file.read_text().strip())
+    return root_path / f"iter_{target_step:07d}"
+
+
 def load(actor: Any) -> dict[str, Any] | None:
     """Load checkpoint from disk.
 
@@ -82,24 +101,10 @@ def load(actor: Any) -> dict[str, Any] | None:
     This allows loading weights without optimizer or deleting optimizer before loading.
     """
     load_root = getattr(actor, "_checkpoint_load_dir", None) or getattr(actor.args, "load", None)
-    if load_root is None:
+    checkpoint_dir = resolve_checkpoint_dir(load_root, actor.args)
+    if checkpoint_dir is None:
+        logger.info(f"[FSDP] Checkpoint not found at {load_root}; skipping load.")
         return None
-
-    root_path = Path(load_root).expanduser()
-    if not root_path.exists():
-        logger.info(f"[FSDP] Checkpoint directory {root_path} not found; skipping load.")
-        return None
-
-    target_step = getattr(actor.args, "ckpt_step", None)
-    if target_step is None:
-        tracker_file = root_path / "latest_checkpointed_iteration.txt"
-        if not tracker_file.exists():
-            logger.info(f"[FSDP] No tracker file at {tracker_file}; skipping load.")
-            return None
-        tracker_text = tracker_file.read_text().strip()
-        target_step = int(tracker_text)
-
-    checkpoint_dir = root_path / f"iter_{target_step:07d}"
     model_dir = checkpoint_dir / "model"
     optimizer_dir = checkpoint_dir / "optimizer"
     lr_scheduler_dir = checkpoint_dir / "lr_scheduler"
@@ -108,7 +113,7 @@ def load(actor: Any) -> dict[str, Any] | None:
         logger.info(f"[FSDP] Model checkpoint {model_dir} not found; skipping load.")
         return None
 
-    # Load model weights (always)
+    # Load model weights (always — includes PEFT adapter weights if present)
     model_state = ModelState(actor.model)
     state_dict = {"model_state": model_state}
 
@@ -152,10 +157,13 @@ def load(actor: Any) -> dict[str, Any] | None:
 
     metadata = _read_checkpoint_metadata(checkpoint_dir / "meta.json")
 
+    # Extract step from directory name (e.g., "iter_0000001" → 1)
+    iteration = int(checkpoint_dir.name.split("_")[1])
+
     return {
         "rng": rng_state,
         "metadata": metadata,
-        "iteration": target_step,
+        "iteration": iteration,
     }
 
 
@@ -214,6 +222,9 @@ def save(actor: Any, iteration: int) -> None:
     model_state = ModelState(actor.model)
     state_dict = {"model_state": model_state}
     dcp.save(state_dict, checkpoint_id=str(model_dir))
+
+    # Note: PEFT adapter weights are included in the DCP model checkpoint above.
+    # No separate adapter save needed — checkpoint.load() restores everything.
 
     # Save optimizer state (skip if --no-save-optim is set)
     save_optimizer_state = not getattr(actor.args, "no_save_optim", False)

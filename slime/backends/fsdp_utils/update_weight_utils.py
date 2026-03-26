@@ -19,7 +19,6 @@ from sglang.srt.utils import MultiprocessingSerializer
 
 from slime.utils.distributed_utils import init_process_group
 
-
 try:
     from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
 except ImportError:
@@ -45,11 +44,28 @@ class UpdateWeight(abc.ABC):
     ) -> None:
         pass
 
-    def update_weights(self) -> None:
+    def update_weights(self, peft_remap: bool = False) -> None:
+        """Sync model weights to rollout engines.
+
+        Args:
+            peft_remap: If True, the model is a merged PeftModel. Keys are remapped to
+                HF-compatible names and adapter-only keys are skipped. Caller is responsible
+                for calling merge_adapter() before and unmerge_adapter() after.
+        """
         self.weight_version += 1
+
+        peft_prefix = self.model.base_model.prefix if peft_remap else ""
+
         bucket = []
         bucket_size = 0
         for name, param in self.model.state_dict().items():
+            if peft_remap:
+                name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                if peft_prefix and peft_prefix in name:
+                    continue
+                if "original_module" in name:
+                    continue
+
             param_size = param.numel() * param.element_size()
             if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
                 self.wait_and_update_bucket_weights(bucket)
@@ -59,7 +75,6 @@ class UpdateWeight(abc.ABC):
 
             param = param.cuda()
             if isinstance(param, DTensor):
-                # async version of param.full_tensor
                 param = param.redistribute(
                     placements=[Replicate()] * param.device_mesh.ndim,
                     async_op=True,
@@ -71,7 +86,6 @@ class UpdateWeight(abc.ABC):
             self.wait_and_update_bucket_weights(bucket)
             del bucket
             bucket = []
-            bucket_size = 0
 
     def wait_and_update_bucket_weights(self, bucket):
         bucket = [(name, param.wait()) if hasattr(param, "wait") else (name, param) for name, param in bucket]
@@ -141,7 +155,8 @@ class UpdateWeightFromTensor(UpdateWeight):
         if distributed_engines:
             self._distributed_updater = UpdateWeightFromDistributed(self.args, self.model)
             self._distributed_updater.connect_rollout_engines(
-                distributed_engines, rollout_engine_lock,
+                distributed_engines,
+                rollout_engine_lock,
                 engine_gpu_counts=distributed_gpu_counts,
             )
 
