@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -130,7 +131,11 @@ def load(actor: Any) -> dict[str, Any] | None:
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}
         try:
-            dcp.load(state_dict=optim_state_dict, checkpoint_id=str(optimizer_dir))
+            dcp.load(
+                state_dict=optim_state_dict,
+                checkpoint_id=str(optimizer_dir),
+                planner=DefaultLoadPlanner(allow_partial_load=True),
+            )
             logger.info(f"[FSDP] Loaded optimizer from {optimizer_dir}")
         except Exception as e:
             logger.warning(f"[FSDP] Failed to load optimizer from {optimizer_dir}: {e}")

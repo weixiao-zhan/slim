@@ -4,10 +4,10 @@
 
 import logging
 import math
+from typing import override
 
 import torch
 from torch.optim.lr_scheduler import LRScheduler
-from typing_extensions import override
 
 logger = logging.getLogger(__name__)
 

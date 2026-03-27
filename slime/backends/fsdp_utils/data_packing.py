@@ -94,17 +94,24 @@ def pack_sequences(
         if has_multimodal:
             multimodal_data = {}
             multimodal_num_items = {}
-            for i in indices:
+            for episode_idx, i in enumerate(indices):
                 mm = episodes[i].multimodal_train_inputs
-                if mm is None:
-                    continue
-                for key, mm_tensor in mm.items():
+                mm = mm or {}
+                for key in mm:
+                    if key not in multimodal_num_items:
+                        multimodal_num_items[key] = [0] * episode_idx
+
+                for key, counts in multimodal_num_items.items():
+                    mm_tensor = mm.get(key)
+                    if mm_tensor is None:
+                        counts.append(0)
+                        continue
+
                     if key not in multimodal_data:
                         multimodal_data[key] = mm_tensor
-                        multimodal_num_items[key] = [mm_tensor.size(0)]
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
-                        multimodal_num_items[key].append(mm_tensor.size(0))
+                    counts.append(mm_tensor.size(0))
             packed_batch["multimodal_train_inputs"] = multimodal_data
             packed_batch["multimodal_num_items"] = multimodal_num_items
 

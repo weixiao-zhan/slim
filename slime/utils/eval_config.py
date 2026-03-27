@@ -35,29 +35,6 @@ DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
-DATASET_SAMPLE_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
-    "input_key": {
-        "dataset_keys": ("input_key",),
-        "default_keys": ("input_key",),
-        "arg_attrs": ("eval_input_key", "input_key"),
-    },
-    "label_key": {
-        "dataset_keys": ("label_key",),
-        "default_keys": ("label_key",),
-        "arg_attrs": ("eval_label_key", "label_key"),
-    },
-    "tool_key": {
-        "dataset_keys": ("tool_key",),
-        "default_keys": ("tool_key",),
-        "arg_attrs": ("eval_tool_key", "tool_key"),
-    },
-    "metadata_key": {
-        "dataset_keys": ("metadata_key",),
-        "default_keys": ("metadata_key",),
-        "arg_attrs": ("metadata_key",),
-    },
-}
-
 
 def _first_not_missing(*values: Any) -> Any:
     for value in values:
@@ -99,12 +76,6 @@ class EvalDatasetConfig:
     path: str
     rm_type: str | None = None
 
-    # Dataset-specific overrides
-    input_key: str | None = None
-    label_key: str | None = None
-    tool_key: str | None = None
-    metadata_key: str | None = None
-
     n_samples_per_eval_prompt: int | None = None
 
     temperature: float | None = None
@@ -130,14 +101,7 @@ class EvalDatasetConfig:
     @property
     def cache_key(self) -> tuple[Any, ...]:
         """Return a tuple uniquely identifying dataset config for caching."""
-        return (
-            self.name,
-            self.path,
-            self.input_key,
-            self.label_key,
-            self.tool_key,
-            self.metadata_key,
-        )
+        return (self.name, self.path)
 
     def inject_metadata(self, sample_metadata: Any) -> dict[str, Any]:
         """Return updated metadata merging overrides."""
@@ -205,8 +169,7 @@ def build_eval_dataset_configs(
     datasets: list[EvalDatasetConfig] = []
     for cfg in raw_config:
         cfg_dict = dict(cfg or {})
-        combined_specs = {**DATASET_RUNTIME_SPECS, **DATASET_SAMPLE_SPECS}
-        _apply_dataset_field_overrides(args, cfg_dict, defaults, combined_specs)
+        _apply_dataset_field_overrides(args, cfg_dict, defaults, DATASET_RUNTIME_SPECS)
         dataset = EvalDatasetConfig(**cfg_dict)
         datasets.append(dataset)
     return datasets

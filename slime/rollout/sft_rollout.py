@@ -2,6 +2,7 @@ import logging
 
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.utils.mask_utils import MultiTurnLossMaskGenerator
+from slime.utils.processing_utils import build_processor_kwargs
 from slime.utils.processing_utils import load_processor, load_tokenizer
 from slime.utils.types import Episode
 
@@ -45,24 +46,25 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
 
     episodes = []
     for i, example in enumerate(examples):
-        messages = example.get("prompt", "")
-        tools = example.get("metadata", {}).get("tools", None)
+        ep = Episode.from_example(example)
 
-        token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(messages, tools=tools)
-        edge_loss_mask = loss_mask[1:] if len(token_ids) > 1 else []
+        if isinstance(ep.prompt, list) and ep.has_multimodal and PROCESSOR is not None:
+            prompt_text = PROCESSOR.apply_chat_template(ep.prompt, tokenize=False, tools=ep.tools)
+            processor_output = PROCESSOR(text=prompt_text, **build_processor_kwargs(ep.multimodal_inputs))
+            raw_ids = processor_output["input_ids"][0]
+            token_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
+            _, loss_mask = MASK_GENERATOR.get_loss_mask_with_multimodal_alignment(ep.prompt, token_ids, tools=ep.tools)
+        else:
+            token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(ep.prompt, tools=ep.tools)
 
-        ep = Episode(
-            tokens=token_ids,
-            reward=0.0,
-            loss_mask=edge_loss_mask,
-        )
+        ep.tokens = token_ids
+        ep.loss_mask = loss_mask[1:] if len(token_ids) > 1 else []
+        ep.reward = 0.0
         ep.ensure_edge_alignment()
         episodes.append(ep)
 
         if i == 0 and not SAMPLE_PRINTED:
-            logger.info(
-                f"sft_rollout::generate_rollout example data: {ep=} (raw){messages=} (raw){token_ids=} (raw){loss_mask=}"
-            )
+            logger.info(f"sft_rollout::generate_rollout example data: {ep=}")
             SAMPLE_PRINTED = True
 
     return RolloutFnTrainOutput(episodes=episodes)

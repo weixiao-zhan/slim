@@ -1,31 +1,33 @@
 [project]
 name = "minislime"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "accelerate",
-    "blobfile",
+    "aiohttp",
     "datasets",
     "flash-attn",
     "httpx[http2]",
-    "mcp[cli]",
-    "numba",
     "omegaconf",
-    "pillow",
+    "packaging",
+    "peft",
     "pybase64",
     "pylatexenc",
     "pyyaml",
     "qwen_vl_utils",
     "ray[default]",
-    "sglang[all]==0.5.5",
+    "requests",
+    "sglang==0.5.5",
     "sglang-router>=0.2.3",
-    "tensorboard",
+    "sympy",
+    "torch==2.8.0",
+    "tqdm",
+    "typer",
+    "python-dotenv",
     "transformers==4.57.1",
     "wandb",
 ]
 classifiers = [
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Environment :: GPU :: NVIDIA CUDA",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -37,27 +39,12 @@ dev = [
     "memray",
     "pre-commit",
     "pytest",
+    "tensorboard",
 ]
-docs = [
-    "gguf>=0.10.0",
-    "ipykernel",
-    "ipywidgets",
-    "jupyter_client",
-    "markdown>=3.4.0",
-    "matplotlib",
-    "myst-parser",
-    "nbconvert",
-    "nbsphinx",
-    "nbstripout",
-    "pandoc",
-    "pydantic",
-    "sphinx",
-    "sphinx-autobuild",
-    "sphinx-book-theme",
-    "sphinx-copybutton",
-    "sphinx-tabs",
-    "sphinxcontrib-mermaid",
-    "urllib3<2.0.0",
+server = [
+    "fastapi",
+    "openai",
+    "uvicorn",
 ]
 
 [build-system]
@@ -69,7 +56,7 @@ packages = ["slime", "slime_plugins"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -80,7 +67,7 @@ explicit = true
 profile = "black"  # black-compatible
 line_length = 119  # should match black parameters
 ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
-py_version = 310  # python 3.10 as a target version
+py_version = 312  # python 3.12 as a target version
 sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 default_section = "THIRDPARTY"
 extend_skip = ["setup.py", "docs/source/conf.py"]

@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 
@@ -9,7 +8,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from .timer import Timer
 
-__all__ = ["load_hf_dataset", "normalize_example", "get_minimum_num_micro_batch_size", "process_rollout_data"]
+__all__ = ["load_hf_dataset", "get_minimum_num_micro_batch_size", "process_rollout_data"]
 
 logger = logging.getLogger(__name__)
 
@@ -38,41 +37,6 @@ def load_hf_dataset(path: str):
         logger.info("load_hf_dataset path=%s applying slice row_slice=%s", real_path, row_slice)
         dataset = dataset.select(range(*row_slice.indices(len(dataset))))
     return dataset
-
-
-def normalize_example(
-    row: dict,
-    *,
-    prompt_key="text",
-    multimodal_keys=None,
-    label_key=None,
-    tool_key=None,
-    metadata_key="metadata",
-) -> dict:
-    example = {
-        "prompt": row.get(prompt_key),
-        "metadata": row.get(metadata_key) or {},
-    }
-
-    if label_key is not None:
-        example["label"] = row.get(label_key)
-
-    if tool_key is not None and tool_key in row:
-        tools = row[tool_key]
-        if isinstance(tools, str):
-            tools = json.loads(tools)
-        elif hasattr(tools, "tolist"):
-            tools = tools.tolist()
-        if tools is not None:
-            assert isinstance(tools, list), f"tools must be a list, got {type(tools)} instead"
-            example["tools"] = tools
-
-    if multimodal_keys:
-        multimodal_inputs = {kind: row[col] for kind, col in multimodal_keys.items() if col in row} or None
-        if multimodal_inputs:
-            example["multimodal_inputs"] = multimodal_inputs
-
-    return example
 
 
 def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):

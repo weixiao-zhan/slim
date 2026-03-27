@@ -54,14 +54,8 @@ python tools/convert_fsdp_to_hf.py \
 
 minislime supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.jsonl@[start:end]`.
 
-```bash
---input-key prompt           # field containing the prompt
---label-key label            # field containing the answer
---tool-key tools             # tool definitions (first-class field)
---metadata-key metadata      # structured metadata
---multimodal-keys '{"image": "images"}'  # VLM image columns
-```
-
+Each row should use standard keys: `prompt`, `label`, and optionally
+`images`, `videos`, `audio`, `tools`, and `metadata`.
 When the prompt is a list of chat messages, `apply_chat_template` is called automatically.
 When the prompt is a plain string, it is tokenized directly.
 

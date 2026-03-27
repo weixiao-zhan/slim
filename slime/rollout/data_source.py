@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from slime.utils.data import load_hf_dataset, normalize_example
+from slime.utils.data import load_hf_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,6 @@ class RolloutDataSource(DataSource):
         self.epoch_id = 0
         self.sample_offset = 0
         self.requeue: list[dict] = []
-        self._row_kwargs = dict(
-            prompt_key=args.input_key,
-            multimodal_keys=args.multimodal_keys,
-            label_key=args.label_key,
-            metadata_key=args.metadata_key,
-            tool_key=args.tool_key,
-        )
 
         if args.rollout_global_dataset:
             self.base_dataset = load_hf_dataset(args.prompt_data)
@@ -59,9 +52,6 @@ class RolloutDataSource(DataSource):
             return self.base_dataset
         return self.base_dataset.shuffle(seed=self.args.rollout_seed + epoch_id)
 
-    def _normalize_row(self, row: dict) -> dict:
-        return normalize_example(row, **self._row_kwargs)
-
     def get_examples(self, num_prompts: int) -> list[dict]:
         examples = self._pop_requeue(num_prompts)
         remaining = num_prompts - len(examples)
@@ -72,15 +62,15 @@ class RolloutDataSource(DataSource):
             return examples + [{} for _ in range(remaining)]
 
         if self.sample_offset + remaining <= len(self.dataset):
-            examples.extend(self._normalize_row(self.dataset[idx]) for idx in range(self.sample_offset, self.sample_offset + remaining))
+            examples.extend(self.dataset[idx] for idx in range(self.sample_offset, self.sample_offset + remaining))
             self.sample_offset += remaining
             return examples
 
-        examples.extend(self._normalize_row(self.dataset[idx]) for idx in range(self.sample_offset, len(self.dataset)))
+        examples.extend(self.dataset[idx] for idx in range(self.sample_offset, len(self.dataset)))
         remaining = num_prompts - len(examples)
         self.epoch_id += 1
         self.dataset = self._dataset_for_epoch(self.epoch_id)
-        examples.extend(self._normalize_row(self.dataset[idx]) for idx in range(remaining))
+        examples.extend(self.dataset[idx] for idx in range(remaining))
         self.sample_offset = remaining
         return examples
 

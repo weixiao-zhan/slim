@@ -49,9 +49,9 @@ def load_processor(name_or_path: str, **kwargs):
 
 
 def process_vision_info(prompt, processor):
-    # Deprecated: datasets should provide PIL images directly via --multimodal-keys columns.
-    # This function exists only for backward compatibility with datasets that embed image
-    # references in conversation messages (e.g. {"type": "image", "image": "url"}).
+    # Deprecated: the default path expects canonical datasets with top-level `images`
+    # aligned to {"type": "image"} prompt items. This helper remains only for older
+    # datasets that inline image references inside the prompt itself.
     from qwen_vl_utils import process_vision_info as qwen_process_vision_info
 
     if hasattr(processor.image_processor, "patch_size"):

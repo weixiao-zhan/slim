@@ -152,9 +152,15 @@ class FSDPTrainRayActor(TrainRayActor):
         self.model = model
 
         if args.gradient_checkpointing:
-            # PEFT + gradient checkpointing requires inputs to have requires_grad=True
+            # Gradient checkpointing requires inputs to have requires_grad=True
             if hasattr(self.model, "enable_input_require_grads"):
                 self.model.enable_input_require_grads()
+            else:
+
+                def _make_inputs_require_grad(module, input, output):
+                    output.requires_grad_(True)
+
+                self.model.get_input_embeddings().register_forward_hook(_make_inputs_require_grad)
             self.model.gradient_checkpointing_enable()
 
         if args.optimizer == "adam":

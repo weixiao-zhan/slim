@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,13 +64,34 @@ class Episode:
 
     @classmethod
     def from_example(cls, example: dict) -> "Episode":
+        if "prompt" not in example:
+            raise KeyError("Dataset example must contain a `prompt` field.")
+
+        tools = example.get("tools")
+        if isinstance(tools, str):
+            tools = json.loads(tools)
+        elif hasattr(tools, "tolist"):
+            tools = tools.tolist()
+
+        metadata = example.get("metadata") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+
+        multimodal_inputs = example.get("multimodal_inputs")
+        if multimodal_inputs is None and "images" in example:
+            multimodal_inputs = {"images": example.get("images")}
+
         return cls(
-            prompt=example.get("prompt", ""),
+            prompt=example["prompt"],
             label=example.get("label"),
-            tools=example.get("tools"),
-            multimodal_inputs=example.get("multimodal_inputs"),
-            metadata=dict(example.get("metadata", {})),
+            tools=tools,
+            multimodal_inputs=multimodal_inputs,
+            metadata=dict(metadata),
         )
+
+    @property
+    def has_multimodal(self) -> bool:
+        return bool(self.multimodal_inputs and any(v is not None for v in self.multimodal_inputs.values()))
 
     # --- Pre-freeze helpers (list phase) ---
 

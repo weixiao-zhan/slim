@@ -2,7 +2,11 @@
 
 import os
 
+from dotenv import load_dotenv
+
 import slime.utils.external_utils.command_utils as U
+
+load_dotenv()
 
 NUM_GPUS = 8
 MODEL_DIR = "/home/ubuntu/models/Qwen3-1.7B-Base"
@@ -14,19 +18,20 @@ def execute():
 
     rollout_args = (
         f"--prompt-data {DATASET_DIR}/gsm8k/train.parquet "
-        "--input-key prompt "
-        "--label-key label "
         "--rm-type math "
         "--num-rollout 10 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-context-len 4096 "
         "--rollout-temperature 1 "
-        "--global-batch-size 512 "
+        "--num-steps-per-rollout 1 "
         "--rollout-shuffle "
     )
 
-    fsdp_args = "--update-weight-buffer-size 536870912 "
+    fsdp_args = (
+        "--update-weight-buffer-size 536870912 "
+        "--attn-implementation flash_attention_2 "
+    )
 
     ppo_args = (
         "--advantage-estimator ppo "
@@ -51,8 +56,27 @@ def execute():
 
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
-        "--sglang-decode-log-interval 1000 "
-        "--attn-implementation flash_attention_2 "
+    )
+
+    wandb_args = (
+        "--use-wandb "
+        "--wandb-project minislime "
+        "--wandb-group ppo-gsm8k-qwen3-1.7b "
+        f"--wandb-key '{os.environ.get('WANDB_API_KEY', '')}' "
+        "--disable-wandb-random-suffix "
+    )
+
+    eval_args = (
+        "--eval-interval 20 "
+        "--skip-eval-before-train "
+        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
+        "--n-samples-per-eval-prompt 1 "
+        "--eval-max-context-len 4096 "
+    )
+
+    save_args = (
+        "--save /home/ubuntu/outputs/ppo-gsm8k-qwen3-1.7b "
+        "--save-interval 20 "
     )
 
     misc_args = (
@@ -64,6 +88,8 @@ def execute():
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 4096 "
         "--gradient-checkpointing "
+        "--log-pass-ratio "
+        "--use-fault-tolerance "
     )
 
     train_args = (
@@ -72,7 +98,10 @@ def execute():
         f"{optimizer_args} "
         f"{ppo_args} "
         f"{fsdp_args} "
+        f"{eval_args} "
+        f"{save_args} "
         f"{sglang_args} "
+        f"{wandb_args} "
         f"{misc_args} "
     )
 

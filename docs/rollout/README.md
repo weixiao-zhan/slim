@@ -47,8 +47,6 @@ SGLANG_ARGS=(
 ```bash
 ROLLOUT_ARGS=(
    --prompt-data /root/dapo-math-17k/dapo-math-17k.parquet
-   --input-key prompt
-   --label-key label
    --rollout-shuffle
    --rm-type deepscaler
 
@@ -63,6 +61,9 @@ ROLLOUT_ARGS=(
    --balance-data
 )
 ```
+
+The default rollout path expects canonical dataset rows with `prompt`, `label`, and
+optional `images`, `tools`, and `metadata`.
 
 The rollout-train constraint: **`(rollout-batch-size x n-samples-per-prompt) = (global-batch-size x num-steps-per-rollout)`**
 

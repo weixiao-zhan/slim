@@ -163,43 +163,57 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> bool:
+async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
     """Tokenize prompt into episode.tokens if not already set.
 
     Sets episode._max_tokens (total context budget) on first call.
-    Returns has_multimodal.
     """
     state = GenerateState(args)
     loop = asyncio.get_event_loop()
     from slime.utils.processing_utils import build_processor_kwargs
 
     if episode.tokens:
-        has_multimodal = episode.multimodal_inputs and any(v is not None for v in episode.multimodal_inputs.values())
-        return bool(has_multimodal)
+        return
 
-    prompt_for_processing = episode.prompt
+    has_multimodal = episode.has_multimodal
+    prompt_ids = None
+
+    if has_multimodal and state.processor is None:
+        raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
+
     if isinstance(episode.prompt, list):
         messages = episode.prompt
         tools = episode.tools
-        prompt_for_processing = await loop.run_in_executor(
-            state.cpu_executor,
-            lambda: state.tokenizer.apply_chat_template(
-                messages, tools=tools, tokenize=False, add_generation_prompt=True, **state.chat_template_kwargs
-            ),
-        )
-        episode.prompt = prompt_for_processing
-
-    has_multimodal = episode.multimodal_inputs and any(v is not None for v in episode.multimodal_inputs.values())
-    prompt_ids = await loop.run_in_executor(
-        state.cpu_executor,
-        lambda: state.tokenizer.encode(prompt_for_processing, add_special_tokens=False),
-    )
+        if state.processor and has_multimodal:
+            prompt_text = await loop.run_in_executor(
+                state.cpu_executor,
+                lambda: state.processor.apply_chat_template(
+                    messages,
+                    tools=tools,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    **state.chat_template_kwargs,
+                ),
+            )
+        else:
+            prompt_ids = await loop.run_in_executor(
+                state.cpu_executor,
+                lambda: state.tokenizer.apply_chat_template(
+                    messages,
+                    tools=tools,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    **state.chat_template_kwargs,
+                ),
+            )
+    else:
+        prompt_text = episode.prompt
 
     if state.processor and has_multimodal:
         processor_kwargs = build_processor_kwargs(episode.multimodal_inputs)
         processor_output = await loop.run_in_executor(
             state.cpu_executor,
-            lambda: state.processor(text=prompt_for_processing, **processor_kwargs),
+            lambda: state.processor(text=prompt_text, **processor_kwargs),
         )
         raw_ids = processor_output["input_ids"][0]
         prompt_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
@@ -208,6 +222,11 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
+    elif prompt_ids is None:
+        prompt_ids = await loop.run_in_executor(
+            state.cpu_executor,
+            lambda: state.tokenizer.encode(prompt_text, add_special_tokens=False),
+        )
 
     episode.tokens = list(prompt_ids)
     edge_len = max(len(episode.tokens) - 1, 0)
@@ -215,7 +234,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
     episode.rollout_log_probs = [0.0] * edge_len
     episode._max_tokens = max_context_tokens
 
-    return bool(has_multimodal)
 
 
 async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
@@ -226,7 +244,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
-    has_multimodal = await _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
+    await _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
 
     assert episode.rollout_log_probs is not None
     max_new_tokens = episode._max_tokens - len(episode.tokens)
@@ -246,8 +264,9 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 
-    if has_multimodal and episode.multimodal_inputs and episode.multimodal_inputs.get("images"):
-        image_data = episode.multimodal_inputs["images"]
+    image_inputs = episode.multimodal_inputs.get("images") if episode.multimodal_inputs else None
+    if episode.has_multimodal and image_inputs:
+        image_data = image_inputs
         payload["image_data"] = await asyncio.gather(
             *[loop.run_in_executor(state.cpu_executor, encode_image_for_rollout_engine, img) for img in image_data]
         )
@@ -487,7 +506,7 @@ async def eval_rollout_single_dataset(
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     global EVAL_PROMPT_DATASET
-    from slime.utils.data import load_hf_dataset, normalize_example
+    from slime.utils.data import load_hf_dataset
 
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
@@ -508,24 +527,9 @@ async def eval_rollout_single_dataset(
 
     tasks = []
     for raw_row in dataset:
-        example = normalize_example(
-            raw_row,
-            prompt_key=dataset_cfg.input_key,
-            label_key=dataset_cfg.label_key,
-            multimodal_keys=args.multimodal_keys,
-            metadata_key=dataset_cfg.metadata_key,
-            tool_key=dataset_cfg.tool_key,
-        )
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
-            episode = Episode.from_example(
-                {
-                    "prompt": example.get("prompt", ""),
-                    "label": example.get("label"),
-                    "tools": example.get("tools"),
-                    "multimodal_inputs": example.get("multimodal_inputs"),
-                    "metadata": dataset_cfg.inject_metadata(example.get("metadata")),
-                }
-            )
+            episode = Episode.from_example(raw_row)
+            episode.metadata = dataset_cfg.inject_metadata(episode.metadata)
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params
             if getattr(args, "sglang_enable_deterministic_inference", False):

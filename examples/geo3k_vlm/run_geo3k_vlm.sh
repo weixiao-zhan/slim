@@ -100,9 +100,6 @@ ROLLOUT_ARGS=(
    --global-batch-size 512
 )
 
-# required for vlm datasets
-MULTIMODAL_KEYS='{"image": "images"}'
-
 EVAL_ARGS=(
    --eval-interval 20
    --eval-prompt-data ${DATASET_LOCAL_NAME} /root/datasets/${DATASET_LOCAL_NAME}/test.parquet
@@ -181,7 +178,6 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node ${NUM_GPUS} \
-   --multimodal-keys "${MULTIMODAL_KEYS}" \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${EVAL_ARGS[@]} \

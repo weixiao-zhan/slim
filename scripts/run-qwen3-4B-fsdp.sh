@@ -41,9 +41,7 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
    --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
-   --input-key prompt
-   --label-key label
-   
+
    --rollout-shuffle
    --balance-data
    --rm-type deepscaler
@@ -89,7 +87,6 @@ fi
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
    --sglang-mem-fraction-static 0.75
-   --sglang-decode-log-interval 1000
    --sglang-chunked-prefill-size 4096
    --sglang-attention-backend fa3
 )
