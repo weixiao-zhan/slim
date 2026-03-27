@@ -7,7 +7,7 @@ The `Episode` class (`slime.utils.types.Episode`) is the single data record that
 ### Lifecycle
 
 1. **Created** from a dataset example via `Episode.from_example(example)` -- all sequence fields are Python lists.
-2. **Mutated in-place** during async generation (tokens, loss_mask, rollout_log_probs are appended) and reward scoring (reward is set).
+2. **Mutated in-place** during async generation (tokens, loss_mask, rollout_log_probs are appended) and reward scoring (reward is set, generated_text is cached — the decoded loss_mask==1 tokens).
 3. **Frozen** via `episode.freeze()` -- converts `tokens`, `loss_mask`, and `rollout_log_probs` to tensors.
 4. **Consumed** by normalization, packing, and the training loop -- all tensor ops from this point.
 
@@ -19,6 +19,7 @@ The `Episode` class (`slime.utils.types.Episode`) is the single data record that
 | `loss_mask` | `list[int]` | `IntTensor` | **Edge-aligned** (length = `len(tokens) - 1`). `loss_mask[i]` indicates whether predicting `tokens[i+1]` contributes to loss. Prompt edges are `0`, generated edges are `1`. |
 | `rollout_log_probs` | `list[float]` | `FloatTensor` | **Edge-aligned**. `rollout_log_probs[i]` is the log-probability of `tokens[i+1]` under the rollout policy. |
 | `reward` | `float \| None` | `float \| None` | Scalar reward assigned by the reward model. |
+| `generated_text` | `str \| None` | `str \| None` | Decoded text of loss_mask==1 tokens, cached during RM scoring. |
 | `prompt` | `str \| list[dict]` | -- | Original prompt (string or chat messages). |
 | `label` | `str \| None` | -- | Optional ground-truth label for reward functions. |
 | `status` | `str` | -- | One of `PENDING`, `COMPLETED`, `TRUNCATED`, `ABORTED`, `FAILED`. |

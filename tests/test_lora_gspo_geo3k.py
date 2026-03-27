@@ -20,7 +20,7 @@ def execute():
     rollout_args = (
         f"--prompt-data {DATASET_DIR}/train.parquet "
         "--rm-type math "
-        "--num-rollout 500 "
+        "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-context-len 8192 "
@@ -48,12 +48,7 @@ def execute():
         '--peft-config \'{"r": 128, "lora_alpha": 256, "target_modules": "all-linear"}\' '
     )
 
-    filter_args = (
-        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
-        "--over-sampling-batch-size 48 "
-    )
-
-    gspo_args = (
+    loss_args = (
         "--advantage-estimator gspo "
         "--kl-loss-coef 0.01 "
         "--kl-loss-type low_var_kl "
@@ -66,6 +61,7 @@ def execute():
     optimizer_args = (
         "--optimizer adam "
         "--lr 5e-5 "
+        "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -99,15 +95,14 @@ def execute():
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 8192 "
         "--log-pass-ratio "
-        "--use-fault-tolerance "
+        ""
     )
 
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{gspo_args} "
-        f"{filter_args} "
+        f"{loss_args} "
         f"{peft_args} "
         f"{fsdp_args} "
         f"{save_args} "

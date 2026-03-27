@@ -401,12 +401,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
         def add_fault_tolerance_arguments(parser):
             parser.add_argument(
-                "--use-fault-tolerance",
-                action="store_true",
-                default=False,
-                help="Whether to enable the fault tolerance function during rollout.",
-            )
-            parser.add_argument(
                 "--rollout-health-check-interval",
                 type=float,
                 default=30.0,

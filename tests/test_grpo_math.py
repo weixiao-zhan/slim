@@ -41,7 +41,7 @@ def execute():
         "--attn-implementation flash_attention_2 "
     )
 
-    grpo_args = (
+    loss_args = (
         "--advantage-estimator grpo "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
@@ -54,6 +54,7 @@ def execute():
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-6 "
+        "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -85,14 +86,14 @@ def execute():
         "--max-tokens-per-gpu 4096 "
         "--gradient-checkpointing "
         "--log-pass-ratio "
-        "--use-fault-tolerance "
+        ""
     )
 
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{grpo_args} "
+        f"{loss_args} "
         f"{fsdp_args} "
         f"{eval_args} "
         f"{save_args} "

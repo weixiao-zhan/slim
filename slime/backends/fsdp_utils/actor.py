@@ -1019,7 +1019,7 @@ class FSDPTrainRayActor(TrainRayActor):
             return
 
         rollout_engines, rollout_engine_lock, num_new_engines, engine_gpu_counts, engine_gpu_offsets = ray.get(
-            self.rollout_manager.get_updatable_engines_and_lock.remote()
+            self.rollout_manager.recover_and_get_updatable_engines.remote()
         )
         if num_new_engines > 0:
             self.weight_updater.connect_rollout_engines(

@@ -19,7 +19,7 @@ def execute():
     rollout_args = (
         f"--prompt-data {DATASET_DIR}/gsm8k/train.parquet "
         "--rm-type math "
-        "--num-rollout 10 "
+        "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-context-len 4096 "
@@ -33,7 +33,7 @@ def execute():
         "--attn-implementation flash_attention_2 "
     )
 
-    ppo_args = (
+    loss_args = (
         "--advantage-estimator ppo "
         "--gamma 1.0 "
         "--lambd 0.95 "
@@ -48,6 +48,7 @@ def execute():
         "--optimizer adam "
         "--lr 1e-6 "
         "--critic-lr 5e-6 "
+        "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
@@ -89,14 +90,14 @@ def execute():
         "--max-tokens-per-gpu 4096 "
         "--gradient-checkpointing "
         "--log-pass-ratio "
-        "--use-fault-tolerance "
+        ""
     )
 
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{ppo_args} "
+        f"{loss_args} "
         f"{fsdp_args} "
         f"{eval_args} "
         f"{save_args} "

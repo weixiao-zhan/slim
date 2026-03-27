@@ -42,7 +42,7 @@ def execute():
         "--attn-implementation flash_attention_2 "
     )
 
-    grpo_args = (
+    loss_args = (
         "--advantage-estimator grpo "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
@@ -77,8 +77,6 @@ def execute():
         "--disable-wandb-random-suffix "
     )
 
-    load_args = "--load /home/ubuntu/outputs/grpo-geo3k-qwen3vl2b "
-
     save_args = (
         "--save /home/ubuntu/outputs/grpo-geo3k-qwen3vl2b "
         "--save-interval 20 "
@@ -91,17 +89,16 @@ def execute():
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 8192 "
         "--log-pass-ratio "
-        "--use-fault-tolerance "
+        ""
     )
 
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
         f"{optimizer_args} "
-        f"{grpo_args} "
+        f"{loss_args} "
         f"{fsdp_args} "
         f"{eval_args} "
-        f"{load_args} "
         f"{save_args} "
         f"{sglang_args} "
         f"{wandb_args} "
@@ -111,7 +108,6 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
-        extra_env_vars={"SGLANG_DISABLE_CUDNN_CHECK": "1"},
     )
 
 
@@ -120,6 +116,5 @@ if __name__ == "__main__":
         os.environ.pop(proxy_var, None)
 
     os.environ["SLIME_SCRIPT_EXTERNAL_RAY"] = "1"
-    os.environ["SGLANG_DISABLE_CUDNN_CHECK"] = "1"
 
     execute()

@@ -78,6 +78,7 @@ async def async_rm(args, episode: Episode, **kwargs):
     metadata = episode.metadata if isinstance(episode.metadata, dict) else {}
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
     response = _decode_generated_text(args, episode)
+    episode.generated_text = response
     label = episode.label
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""

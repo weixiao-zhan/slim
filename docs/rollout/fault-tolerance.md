@@ -1,8 +1,6 @@
 # Fault Tolerance
 
-To ensure long-term, stable RL training, minislime enables a certain level of fault tolerance by default. This section introduces the design philosophy behind fault tolerance in minislime.
-
-To enable the fault tolerance function in minislime, please set `--use-fault-tolerance`.
+To ensure long-term, stable RL training, minislime enables fault tolerance by default. This section introduces the design philosophy behind fault tolerance in minislime.
 
 ## Rollout Fault Tolerance
 
