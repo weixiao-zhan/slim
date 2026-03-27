@@ -11,21 +11,19 @@ Below is a summary of all available customization interfaces and their purposes.
 | [`--rollout-function-path`](#1-rollout-function---rollout-function-path) | Override the entire rollout generation logic. |
 | [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) | Override only the generation step (e.g., for RAG or tool use). |
 | [`--custom-rm-path`](#3-reward-model---custom-rm-path) | Implement custom reward computation logic. |
-| [`--dynamic-sampling-filter-path`](#4-dynamic-sampling-filter---dynamic-sampling-filter-path) | Filter samples during dynamic sampling (e.g., DAPO). |
-| [`--buffer-filter-path`](#5-buffer-filter---buffer-filter-path) | Filter samples in the rollout buffer before training. |
-| [`--rollout-sample-filter-path`](#6-rollout-sample-filter---rollout-sample-filter-path) | Determine if individual samples participate in loss calculation. |
-| [`--rollout-all-samples-process-path`](#7-rollout-all-samples-process---rollout-all-samples-process-path) | Process all samples (including filtered ones) after rollout. |
-| [`--rollout-data-postprocess-path`](#8-rollout-data-postprocess---rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
-| [`--custom-loss-function-path`](#9-custom-loss-function---custom-loss-function-path) | Implement custom training loss computation. |
-| [`--custom-tis-function-path`](#10-custom-tisrs-function---custom-tis-function-path) | Implement custom importance sampling for off-policy correction. |
-| [`--custom-pg-loss-reducer-function-path`](#11-custom-pg-loss-reducer---custom-pg-loss-reducer-function-path) | Customize pg_loss reduction (e.g., for Dr.GRPO). |
-| [`--custom-reward-post-process-path`](#12-reward-post-processing---custom-reward-post-process-path) | Custom post-processing of rewards before advantage computation. |
-| [`--custom-convert-samples-to-train-data-path`](#13-samples-to-train-data-conversion---custom-convert-samples-to-train-data-path) | Override the conversion of samples to training data format. |
-| [`--custom-rollout-log-function-path`](#14-logging-functions) | Custom logging for training rollouts. |
-| [`--custom-eval-rollout-log-function-path`](#14-logging-functions) | Custom logging for evaluation rollouts. |
-| [`--data-source-path`](#15-data-source---data-source-path) | Override the data source for rollout prompts. |
-| [`--eval-function-path`](#16-evaluation-function---eval-function-path) | Override the rollout function specifically for evaluation. |
-| [`--slime-router-middleware-paths`](#17-slime-router-middleware---slime-router-middleware-paths) | Add custom middleware to the slime router. |
+| [`--dynamic-sampling-filter-path`](#4-dynamic-sampling-filter---dynamic-sampling-filter-path) | Filter episodes during dynamic sampling (e.g., DAPO). |
+| [`--rollout-sample-filter-path`](#5-rollout-sample-filter---rollout-sample-filter-path) | Determine if individual episodes participate in loss calculation. |
+| [`--rollout-all-samples-process-path`](#6-rollout-all-samples-process---rollout-all-samples-process-path) | Process all episodes (including filtered ones) after rollout. |
+| [`--rollout-data-postprocess-path`](#7-rollout-data-postprocess---rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
+| [`--custom-loss-function-path`](#8-custom-loss-function---custom-loss-function-path) | Implement custom training loss computation. |
+| [`--custom-tis-function-path`](#9-custom-tisrs-function---custom-tis-function-path) | Implement custom importance sampling for off-policy correction. |
+| [`--custom-pg-loss-reducer-function-path`](#10-custom-pg-loss-reducer---custom-pg-loss-reducer-function-path) | Customize pg_loss reduction (e.g., for Dr.GRPO). |
+| [`--custom-reward-post-process-path`](#11-reward-post-processing---custom-reward-post-process-path) | Custom post-processing of rewards before advantage computation. |
+| [`--custom-rollout-log-function-path`](#12-logging-functions) | Custom logging for training rollouts. |
+| [`--custom-eval-rollout-log-function-path`](#12-logging-functions) | Custom logging for evaluation rollouts. |
+| [`--data-source-path`](#13-data-source---data-source-path) | Override the data source for rollout prompts. |
+| [`--eval-function-path`](#14-evaluation-function---eval-function-path) | Override the rollout function specifically for evaluation. |
+| [`--slime-router-middleware-paths`](#15-slime-router-middleware---slime-router-middleware-paths) | Add custom middleware to the slime router. |
 
 ## Detailed Interface Reference
 
@@ -57,7 +55,12 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 
 **Signature**:
 ```python
-async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample
+async def custom_generate(args, episode: Episode, sampling_params: dict) -> Episode
+```
+
+An optional `evaluation` keyword argument is also supported:
+```python
+async def custom_generate(args, episode: Episode, sampling_params: dict, evaluation: bool = False) -> Episode
 ```
 
 **Use Cases**:
@@ -65,7 +68,7 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample
 - Adding retrieval-augmented generation (RAG)
 - Multi-turn conversation handling
 
-**Example**: See [examples/search-r1/generate_with_search.py](../examples/search-r1/generate_with_search.py)
+**Example**: See [examples/search-r1/generate_with_search.py](../../examples/search-r1/generate_with_search.py)
 
 ---
 
@@ -75,14 +78,14 @@ async def custom_generate(args, sample: Sample, sampling_params: dict) -> Sample
 
 **Purpose**: Implement custom reward computation logic.
 
-**Signature** (single sample mode):
+**Signature** (single episode mode):
 ```python
-async def custom_rm(args, sample: Sample) -> float
+async def custom_rm(args, episode: Episode, **kwargs) -> float
 ```
 
 **Signature** (batch mode, when `--group-rm` is enabled):
 ```python
-async def batched_custom_rm(args, samples: list[Sample]) -> list[float]
+async def batched_custom_rm(args, episodes: list[Episode], **kwargs) -> list[float]
 ```
 
 **Use Cases**:
@@ -99,91 +102,77 @@ async def batched_custom_rm(args, samples: list[Sample]) -> list[float]
 - `ifbench`: IFBench reward computation
 - `remote_rm`: Remote reward model service (requires `--rm-url`)
 
+Additionally, any `--rm-type` value can be prefixed with `boxed_` (e.g. `boxed_math`) to first extract a boxed answer from the response before applying the reward function.
+
 ---
 
 ### 4. Dynamic Sampling Filter (`--dynamic-sampling-filter-path`)
 
 **Default**: `None`
 
-**Purpose**: Filter samples during dynamic sampling (e.g., DAPO-style filtering).
+**Purpose**: Filter episodes during dynamic sampling (e.g., DAPO-style filtering).
 
 **Signature**:
 ```python
-def filter_function(args, samples: list[Sample], **kwargs) -> DynamicFilterOutput
+def filter_function(args, episodes: list[Episode], **kwargs) -> DynamicFilterOutput
 ```
 
 **Return Type**:
 ```python
 @dataclass
 class DynamicFilterOutput:
-    keep: bool  # Whether to keep this sample group
+    keep: bool  # Whether to keep this episode group
     reason: str | None  # Reason for filtering (for logging)
 ```
 
 **Use Cases**:
-- Filtering out samples where all responses have the same reward
+- Filtering out groups where all responses have the same reward
 - Implementing curriculum learning strategies
-- Quality-based sample selection
+- Quality-based group selection
 
 **Example**: `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
 
 ---
 
-### 5. Buffer Filter (`--buffer-filter-path`)
+### 5. Rollout Sample Filter (`--rollout-sample-filter-path`)
 
 **Default**: `None`
 
-**Purpose**: Filter samples in the rollout buffer before training.
+**Purpose**: Determine whether individual episodes participate in loss calculation.
 
 **Signature**:
 ```python
-def buffer_filter(args, rollout_id, buffer: list[list[Sample]], num_samples: int) -> list[list[Sample]]
+def filter_function(args, groups: list[RolloutGroup]) -> None
 ```
 
-**Use Cases**:
-- Removing low-quality samples before training
-- Implementing priority-based sample selection
-- Balancing sample distributions
-
----
-
-### 6. Rollout Sample Filter (`--rollout-sample-filter-path`)
-
-**Default**: `None`
-
-**Purpose**: Determine whether individual samples participate in loss calculation.
-
-**Signature**:
-```python
-def filter_function(args, samples: list[Sample]) -> None
-```
-
-**Note**: This function should directly modify the `remove_sample` attribute of each `Sample` object.
+Where `RolloutGroup` has an `episodes: list[Episode]` attribute. The function should modify groups in-place (e.g., setting episode loss masks to all zeros to exclude them from training).
 
 **Use Cases**:
-- Filtering samples based on response quality
+- Filtering episodes based on response quality
 - Implementing selective training strategies
 
 ---
 
-### 7. Rollout All Samples Process (`--rollout-all-samples-process-path`)
+### 6. Rollout All Samples Process (`--rollout-all-samples-process-path`)
 
 **Default**: `None`
 
-**Purpose**: Process all samples (including filtered ones) after rollout.
+**Purpose**: Process all episodes (including filtered ones) after rollout.
 
 **Signature**:
 ```python
-def process_function(args, samples: list[list[Sample]], data_source) -> None
+def process_function(args, all_groups: list[list[Episode]], get_examples) -> None
 ```
 
+**Note**: The third argument is the `get_examples` callable from the data source, not the data source object itself.
+
 **Use Cases**:
-- Logging and analysis of all generated samples
-- Computing statistics across filtered and kept samples
+- Logging and analysis of all generated episodes
+- Computing statistics across filtered and kept episodes
 
 ---
 
-### 8. Rollout Data Postprocess (`--rollout-data-postprocess-path`)
+### 7. Rollout Data Postprocess (`--rollout-data-postprocess-path`)
 
 **Default**: `None`
 
@@ -191,16 +180,16 @@ def process_function(args, samples: list[list[Sample]], data_source) -> None
 
 **Signature**:
 ```python
-def postprocess_function(args, samples: list[list[Sample]]) -> None
+def postprocess_function(args) -> None
 ```
 
 **Use Cases**:
 - Updating loss masks based on computed values
-- Adding additional metadata to samples
+- Adding additional metadata to episodes
 
 ---
 
-### 9. Custom Loss Function (`--custom-loss-function-path`)
+### 8. Custom Loss Function (`--custom-loss-function-path`)
 
 **Default**: `None` (requires `--loss-type custom_loss`)
 
@@ -213,7 +202,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 10. Custom TIS/RS Function (`--custom-tis-function-path`)
+### 9. Custom TIS/RS Function (`--custom-tis-function-path`)
 
 **Default**: `None`
 
@@ -227,7 +216,7 @@ def postprocess_function(args, samples: list[list[Sample]]) -> None
 
 ---
 
-### 11. Custom pg_loss Reducer (`--custom-pg-loss-reducer-function-path`)
+### 10. Custom pg_loss Reducer (`--custom-pg-loss-reducer-function-path`)
 
 **Default**: `None`
 
@@ -251,11 +240,18 @@ def get_pg_loss_reducer(
 
 ---
 
-### 12. Reward Post-Processing (`--custom-reward-post-process-path`)
+### 11. Reward Post-Processing (`--custom-reward-post-process-path`)
 
 **Default**: `None` (uses default GRPO normalization)
 
 **Purpose**: Custom post-processing of rewards before advantage computation.
+
+**Signature**:
+```python
+def reward_post_process(args, episodes: list[Episode]) -> None
+```
+
+The function modifies episode rewards in-place.
 
 **Use Cases**:
 - Custom reward normalization strategies
@@ -263,53 +259,13 @@ def get_pg_loss_reducer(
 
 ---
 
-### 13. Samples to Train Data Conversion (`--custom-convert-samples-to-train-data-path`)
-
-**Default**: `None` (uses built-in conversion logic)
-
-**Purpose**: Override the conversion of samples to training data format.
-
-**Signature**:
-```python
-def convert_samples_to_train_data(
-    args,
-    samples: list[Sample] | list[list[Sample]],
-) -> dict
-```
-
-**Return Type**:
-```python
-dict: {
-    "tokens": list[list[int]],           # Token IDs for each sample
-    "response_lengths": list[int],        # Response lengths
-    "rewards": list[float],               # Normalized rewards
-    "raw_reward": list[float],            # Raw rewards
-    "truncated": list[int],               # Truncation flags (0 or 1)
-    "sample_indices": list[int],          # Sample indices
-    "loss_masks": list[list[int]],        # Loss masks for each sample
-    # Optional fields:
-    "round_number": list[int],            # Round numbers (for rollout buffer)
-    "rollout_log_probs": list,            # Log probs (for off-policy correction)
-    "rollout_routed_experts": list,       # Routed experts (for MoE)
-    "metadata": list,                     # Train metadata
-    "multimodal_train_inputs": list,      # Multimodal tensors (for VLM)
-    "teacher_log_probs": list,            # Teacher log probs (for distillation)
-}
-```
-
-**Use Cases**:
-- Handling `list[list[Sample]]` inputs
-- Custom data format requirements for training
-
----
-
-### 14. Logging Functions
+### 12. Logging Functions
 
 #### Training Rollout Logging (`--custom-rollout-log-function-path`)
 
 **Signature**:
 ```python
-def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool
+def log_rollout_data(rollout_id, args, episodes, rollout_extra_metrics, rollout_time) -> bool
 ```
 
 **Return**: `True` to skip default logging, `False` to continue with default logging.
@@ -325,9 +281,9 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ---
 
-### 15. Data Source (`--data-source-path`)
+### 13. Data Source (`--data-source-path`)
 
-**Default**: `slime.rollout.data_source.RolloutDataSourceWithBuffer`
+**Default**: `slime.rollout.data_source.RolloutDataSource`
 
 **Purpose**: Override the data source for rollout prompts.
 
@@ -336,25 +292,25 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 **Required Methods**:
 ```python
 class CustomDataSource(DataSource):
-    def get_samples(self, num_samples: int) -> list[list[Sample]]:
-        """Return num_samples samples"""
-        
-    def add_samples(self, samples: list[list[Sample]]):
-        """Add samples back to the data source"""
-        
-    def save(self, rollout_id):
-        """Save state for checkpointing"""
-        
-    def load(self, rollout_id=None):
-        """Load state from checkpoint"""
+    def get_examples(self, num_prompts: int) -> list[dict]:
+        """Return num_prompts raw dataset examples (dicts)."""
 
-    def __len__(self):
-        """Length of the data source. May change when samples are added/fetched."""
+    def add_examples(self, examples: list[dict]):
+        """Re-queue examples (e.g. aborted prompts) back into the source."""
+
+    def save(self, rollout_id):
+        """Save state for checkpointing."""
+
+    def load(self, rollout_id=None):
+        """Load state from checkpoint."""
+
+    def __len__(self) -> int:
+        """Length of the data source. May change when examples are added/fetched."""
 ```
 
 ---
 
-### 16. Evaluation Function (`--eval-function-path`)
+### 14. Evaluation Function (`--eval-function-path`)
 
 **Default**: Same as `--rollout-function-path`
 
@@ -366,7 +322,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 17. Slime Router Middleware (`--slime-router-middleware-paths`)
+### 15. Slime Router Middleware (`--slime-router-middleware-paths`)
 
 **Purpose**: Add custom middleware to the minislime router for request processing.
 
@@ -377,7 +333,7 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 18. MoE Routing Replay
+### 16. MoE Routing Replay
 
 > **Note**: R2 (Routing Replay) and R3 (Rollout Routing Replay) were implemented for the Megatron actor only and are **not functional** in minislime's FSDP backend. The CLI flags exist but have no effect.
 
@@ -401,9 +357,9 @@ The tests live under `tests/plugin_contracts/` and are grouped by hook shape:
 - `tests/plugin_contracts/test_plugin_generate_contracts.py`
   Covers `--custom-generate-function-path`
 - `tests/plugin_contracts/test_plugin_path_loading_contracts.py`
-  Covers `--eval-function-path`, `--custom-rm-path`, `--dynamic-sampling-filter-path`, `--buffer-filter-path`, `--data-source-path`, `--rollout-sample-filter-path`, and `--rollout-all-samples-process-path`
+  Covers `--eval-function-path`, `--custom-rm-path`, `--dynamic-sampling-filter-path`, `--data-source-path`, `--rollout-sample-filter-path`, and `--rollout-all-samples-process-path`
 - `tests/plugin_contracts/test_plugin_runtime_hook_contracts.py`
-  Covers `--custom-rollout-log-function-path`, `--custom-eval-rollout-log-function-path`, `--custom-reward-post-process-path`, `--custom-convert-samples-to-train-data-path`, and `--rollout-data-postprocess-path`
+  Covers `--custom-rollout-log-function-path`, `--custom-eval-rollout-log-function-path`, `--custom-reward-post-process-path`, and `--rollout-data-postprocess-path`
 
 Run all customization contract tests locally:
 
@@ -436,17 +392,17 @@ minislime supports complex agent scenarios (multi-turn interaction, tool calling
 
 ### Three Steps
 
-1. **Data Preparation**: Map conversation history, labels, and metadata to `Sample` fields (`prompt`, `label`, `metadata`, `tools`).
+1. **Data Preparation**: Map conversation history, labels, and metadata to the supported `Episode` fields (`prompt`, `label`, `metadata`, `tools`). Keep dataset top-level columns within the standard finite schema and store extra task-specific fields inside `metadata`.
 
 2. **Custom Generation Function** (`--custom-generate-function-path`):
    ```python
-   async def generate(args, sample: Sample, sampling_params) -> Sample:
+   async def generate(args, episode: Episode, sampling_params) -> Episode:
    ```
    Implement the interaction loop: model generates action -> execute tool -> append observation -> repeat.
 
 3. **Custom Reward Function** (`--custom-rm-path`):
    ```python
-   async def reward_func(args, sample: Sample, **kwargs) -> float:
+   async def reward_func(args, episode: Episode, **kwargs) -> float:
    ```
 
 ### Loss Masking
@@ -458,34 +414,32 @@ For multi-turn training, `loss_mask` controls which tokens contribute to loss:
 ### Generation Pseudocode
 
 ```python
-async def generate(args, sample: Sample, sampling_params) -> Sample:
-    prompt, full_response, loss_masks = sample.prompt, "", []
+async def generate(args, episode: Episode, sampling_params) -> Episode:
+    # episode.tokens starts with tokenized prompt; episode.loss_mask has 0s for prompt edges
 
     for _ in range(max_turns):
-        model_output = await call_sglang(prompt + full_response, ...)
-        loss_masks += [1] * len(model_tokens)
-        full_response += model_output
+        model_output = await call_sglang(episode.tokens, ...)
+        episode.tokens.extend(model_tokens)
+        episode.loss_mask.extend([1] * len(model_tokens))
 
         action, content = parse_action(model_output)
         if action == "search":
             tool_output = await google_search(content)
-            loss_masks += [0] * len(tool_tokens)
-            full_response += tool_output
+            episode.tokens.extend(tool_tokens)
+            episode.loss_mask.extend([0] * len(tool_tokens))
         elif action == "answer":
             break
 
-    sample.response = full_response
-    sample.tokens = ...
-    sample.loss_mask = loss_masks
-    return sample
+    episode.status = Episode.Status.COMPLETED
+    return episode
 ```
 
 ### Configuration
 
 ```bash
 CUSTOM_ARGS=(
-   --custom-generate-function-path your_module.generate
-   --custom-rm-path your_module.reward_func
+    --custom-generate-function-path your_module.generate
+    --custom-rm-path your_module.reward_func
 )
 ```
 

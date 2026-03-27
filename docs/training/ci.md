@@ -4,6 +4,8 @@ minislime uses GitHub Actions for CI. Tests are triggered by **PR labels** — a
 
 ## How It Works
 
+Note: The workflow files (`.github/workflows/pr-test.yml`, `pr-test.yml.j2`, `generate_github_workflows.py`) and `tests/ci/gpu_lock_exec.py` are not yet present in this repository. The description below documents the intended CI design.
+
 The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
 
 1. Runs on a self-hosted GPU runner inside a Docker container (`minislimerl/minislime:latest`).

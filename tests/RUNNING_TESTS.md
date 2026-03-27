@@ -35,6 +35,10 @@ Geo3K canonical schema:
 - `label`: ground-truth answer
 - `images`: ordered image list aligned with the prompt placeholders
 
+Dataset schema note:
+- Test datasets should stick to the finite supported top-level columns: `prompt`, `label`, and optional `images`, `videos`, `audio`, `tools`, `metadata`
+- Put any extra task-specific fields under `metadata` instead of adding new top-level columns
+
 ## Running
 
 ```bash

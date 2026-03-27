@@ -51,7 +51,20 @@ Execute the training:
 
 ```bash
 cd /root/minislime
-bash script/run-qwen3-4B-base-sft.sh
+python train_async.py \
+   --hf-checkpoint /root/Qwen3-4B-Base \
+   --load /root/Qwen3-4B-Base \
+   --rollout-function-path slime.rollout.sft_rollout.generate_rollout \
+   --prompt-data /root/openhermes2_5.parquet \
+   --rollout-shuffle \
+   --num-epoch 3 \
+   --rollout-batch-size 128 \
+   --global-batch-size 128 \
+   --loss-type sft_loss \
+   --calculate-per-token-loss \
+   --disable-compute-advantages-and-returns \
+   --debug-train-only \
+   [additional options]
 ```
 
 ### Parameter Introduction

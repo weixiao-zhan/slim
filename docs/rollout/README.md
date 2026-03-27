@@ -62,8 +62,11 @@ ROLLOUT_ARGS=(
 )
 ```
 
-The default rollout path expects canonical dataset rows with `prompt`, `label`, and
-optional `images`, `tools`, and `metadata`.
+The default rollout path expects canonical dataset rows with a finite supported schema:
+- Required: `prompt`
+- Optional: `label`, `images`, `tools`, `metadata`, `multimodal_inputs`
+
+Avoid adding arbitrary extra top-level dataset columns. Put task-specific auxiliary fields inside `metadata` instead.
 
 The rollout-train constraint: **`(rollout-batch-size x n-samples-per-prompt) = (global-batch-size x num-steps-per-rollout)`**
 
@@ -79,15 +82,6 @@ Enable DAPO-style dynamic sampling:
 ```
 
 Samples 64 prompts, filters groups with zero reward variance, and re-samples when too many are discarded.
-
-## Partial Rollout
-
-Cache half-generated samples for continuation in the next rollout:
-
-```bash
---partial-rollout
---buffer-filter-path <custom_filter>  # default: pop_first (FIFO)
-```
 
 ## Evaluation
 

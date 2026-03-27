@@ -77,7 +77,7 @@ def execute():
         "--disable-wandb-random-suffix "
     )
 
-    load_args = ""
+    load_args = "--load /home/ubuntu/outputs/grpo-geo3k-qwen3vl2b "
 
     save_args = (
         "--save /home/ubuntu/outputs/grpo-geo3k-qwen3vl2b "

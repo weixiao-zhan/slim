@@ -6,7 +6,7 @@ We love slime — it is versatile, well-customizable.
 Meanwhile, we also love HF Transformers and PyTorch FSDP — they are simple and sufficient.
 However, slime is [deprecating its FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron-only. 
 
-Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while reducing the intrusion on dataset and enhancing concurrency. With FSDP backend, you can directly customize the HF model. 
+Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while standardizing the dataset contract around a small fixed schema and enhancing concurrency. With FSDP backend, you can directly customize the HF model. 
 
 ### 🏗️ Roadmap
 
@@ -14,7 +14,7 @@ Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping
 - [ ] Threadpooled generation (when GIL is deprecated, the agents will able to run truely concurrently)
 - [x] Overlap actor forward pass for log-probs and ref-log-probs and critif forward pass for values.
 - [x] Unifiy data layout to use tokens.
-- [x] Improve dataset loading: dataset should be prepared in a format readily consumable by the tokenizer. Defer apply chat template to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
+- [x] Improve dataset loading: datasets now use a finite set of supported columns (`prompt`, `label`, and optional multimodal / control columns) and defer `apply_chat_template` to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
 - [x] Remove megatron dependency. No more mbridge converter and docker. It's `uv` friendly now.
 
 ### 🚧 Known Broken Features
@@ -35,4 +35,3 @@ Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping
 
 
 ## Quick Start
-

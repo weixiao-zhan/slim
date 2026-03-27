@@ -88,7 +88,10 @@ class UpdateWeight(abc.ABC):
             bucket = []
 
     def wait_and_update_bucket_weights(self, bucket):
-        bucket = [(name, param.wait()) if hasattr(param, "wait") else (name, param) for name, param in bucket]
+        bucket = [
+            (name, param.wait().contiguous()) if hasattr(param, "wait") else (name, param.contiguous())
+            for name, param in bucket
+        ]
         self.update_bucket_weights(bucket, weight_version=self.weight_version)
 
     @abc.abstractmethod

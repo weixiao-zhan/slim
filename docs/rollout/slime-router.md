@@ -48,7 +48,7 @@ Use the radix cache when you have text-based rollout code and want token-level p
 
 ### 2.2 Rollout routing replay (R3) for MoE
 
-> **Note**: R3 was implemented for the Megatron actor only and is **not functional** in minislime's FSDP backend. This section is preserved for reference.
+> **Note**: R3 requires `--use-slime-router` and `--use-rollout-routing-replay` to be set.
 
 For MoE models, slime supports rollout routing replay (R3): record expert routing decisions during rollout and replay them during training to improve stability.
 

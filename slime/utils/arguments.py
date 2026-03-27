@@ -633,6 +633,15 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
             )
             reset_arg(parser, "--load", type=str, default=None)
+            parser.add_argument(
+                "--ckpt-step",
+                type=int,
+                default=None,
+                help=(
+                    "The checkpoint step for actor/critic training resumption. "
+                    "When unset, the loader uses `latest_checkpointed_iteration.txt` under --load."
+                ),
+            )
             reset_arg(parser, "--save", type=str, default=None)
             reset_arg(parser, "--save-interval", type=int, default=None)
             reset_arg(parser, "--async-save", action="store_true")

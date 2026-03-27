@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_di
 from torch.distributed.checkpoint.stateful import Stateful
 
 logger = logging.getLogger(__name__)
+_ITERATION_DIR_PATTERN = re.compile(r"iter_(\d+)$")
 
 
 class ModelState(Stateful):
@@ -86,6 +88,9 @@ def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
     root_path = Path(load_root).expanduser()
     if not root_path.exists():
         return None
+    direct_match = _ITERATION_DIR_PATTERN.fullmatch(root_path.name)
+    if direct_match is not None:
+        return root_path
     target_step = getattr(args, "ckpt_step", None)
     if target_step is None:
         tracker_file = root_path / "latest_checkpointed_iteration.txt"
@@ -136,7 +141,13 @@ def load(actor: Any) -> dict[str, Any] | None:
                 checkpoint_id=str(optimizer_dir),
                 planner=DefaultLoadPlanner(allow_partial_load=True),
             )
-            logger.info(f"[FSDP] Loaded optimizer from {optimizer_dir}")
+            optimizer_state_count = len(getattr(actor.optimizer, "state", {}))
+            logger.info(f"[FSDP] Loaded optimizer from {optimizer_dir} ({optimizer_state_count} state entries)")
+            if optimizer_state_count == 0:
+                logger.warning(
+                    "[FSDP] Optimizer checkpoint load completed but optimizer.state is empty. "
+                    "Training will continue with fresh optimizer moments."
+                )
         except Exception as e:
             logger.warning(f"[FSDP] Failed to load optimizer from {optimizer_dir}: {e}")
     elif load_optimizer:
@@ -149,7 +160,9 @@ def load(actor: Any) -> dict[str, Any] | None:
         lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
         try:
             dcp.load(state_dict=lr_scheduler_state_dict, checkpoint_id=str(lr_scheduler_dir))
-            logger.info(f"[FSDP] Loaded LR scheduler from {lr_scheduler_dir}")
+            logger.info(
+                f"[FSDP] Loaded LR scheduler from {lr_scheduler_dir} (last_epoch={actor.lr_scheduler.last_epoch})"
+            )
         except Exception as e:
             logger.warning(f"[FSDP] Failed to load LR scheduler from {lr_scheduler_dir}: {e}")
     elif hasattr(actor, "lr_scheduler"):

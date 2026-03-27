@@ -1,6 +1,6 @@
 # Training Backend
 
-minislime uses PyTorch FSDP2 as its training backend. FSDP loads HuggingFace weights directly via `AutoModelForCausalLM.from_pretrained()` -- no checkpoint conversion needed.
+minislime uses PyTorch FSDP2 as its training backend. FSDP loads HuggingFace weights directly via `from_pretrained()` (using `AutoModelForCausalLM` for text models and `AutoModelForImageTextToText` for vision models) -- no checkpoint conversion needed.
 
 ## Installation
 
@@ -28,7 +28,7 @@ Share GPUs between training and inference with CPU offloading:
 ```bash
 --actor-num-nodes 1
 --actor-num-gpus-per-node 8
---colocate                       # ignores --rollout-num-gpus
+--colocate                       # overrides --rollout-num-gpus to match actor GPUs
 ```
 
 ## Checkpoints
@@ -37,11 +37,12 @@ Share GPUs between training and inference with CPU offloading:
 --hf-checkpoint /root/Model          # HF checkpoint for SGLang + tokenizer
 --ref-load /root/Model               # reference model (for KL)
 --load /root/Model_minislime/        # actor checkpoint (resume training)
+--ckpt-step 20                       # optional: resume a specific iter_0000020 checkpoint
 --save /root/Model_minislime/        # save path
 --save-interval 20                   # save every N steps
 ```
 
-FSDP loads HF checkpoints directly. To convert FSDP checkpoints back to HF format:
+FSDP loads HF checkpoints directly via `from_pretrained()`. To convert FSDP checkpoints back to HF format:
 
 ```bash
 python tools/convert_fsdp_to_hf.py \
@@ -54,8 +55,15 @@ python tools/convert_fsdp_to_hf.py \
 
 minislime supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.jsonl@[start:end]`.
 
-Each row should use standard keys: `prompt`, `label`, and optionally
-`images`, `videos`, `audio`, `tools`, and `metadata`.
+Each row should use the supported finite column set:
+- Required: `prompt`
+- Optional: `label`, `images`, `tools`, `metadata`
+
+For other multimodal inputs (e.g. videos), place them inside a `multimodal_inputs` dict rather than as top-level columns.
+
+The default loaders and rollout path expect this fixed schema rather than arbitrary extra top-level columns.
+If you need to carry additional per-row information, place it under `metadata`.
+
 When the prompt is a list of chat messages, `apply_chat_template` is called automatically.
 When the prompt is a plain string, it is tokenized directly.
 
@@ -63,7 +71,8 @@ Example data entry:
 ```json
 {
   "prompt": [{"role": "user", "content": "Solve: ...", "step_loss_mask": 1}],
-  "label": "34"
+  "label": "34",
+  "metadata": {"source": "custom-dataset"}
 }
 ```
 
@@ -129,13 +138,13 @@ ray job submit --address="http://127.0.0.1:8265" \
 
 ## FAQ
 
-1. **Garbled text during training?** -- Check that `--load` or `--ref-load` points to a valid HF checkpoint.
+1. **Garbled text during training?** -- Check that `--hf-checkpoint` points to a valid HF checkpoint and that weights were synced correctly from FSDP to SGLang. See [Debugging](debug.md).
 
 2. **Task stuck on Ray submission?** -- Verify total GPU count >= `actor_num_nodes * actor_num_gpus_per_node + rollout_num_gpus` (or just actor GPUs if `--colocate`).
 
 3. **OOM during training?** -- Lower `--max-tokens-per-gpu`. Only active with `--use-dynamic-batch-size`.
 
-4. **How to resume training?** -- Set `--load` to your `--save` directory.
+4. **How to resume training?** -- Set `--load` to your `--save` directory. To resume a specific checkpoint, add `--ckpt-step N`.
 
 5. **Batch size calculation?** -- One rollout produces `rollout_batch_size * n_samples_per_prompt` samples. Use `--num-steps-per-rollout` to control update frequency.
 
