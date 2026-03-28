@@ -26,6 +26,7 @@ class RolloutHealthMonitor:
         self._thread = None
         self._stop_event = None
         self._pause_event = None  # When set, health checking is paused
+        self._check_lock = threading.Lock()  # Held while a health check is in-flight
         self._check_interval = args.rollout_health_check_interval
         self._check_timeout = args.rollout_health_check_timeout
         self._check_first_wait = args.rollout_health_check_first_wait
@@ -82,12 +83,20 @@ class RolloutHealthMonitor:
         self._is_checking_enabled = False
 
     def pause(self) -> None:
-        """Pause health checking. Called when engines are offloaded."""
+        """Pause health checking. Called when engines are offloaded.
+
+        Waits for any in-flight health check to complete before returning,
+        so that no health_generate requests are active when the caller
+        proceeds to release_memory_occupation.
+        """
         if self._pause_event is None:
             return
         logger.info("Pausing health monitor...")
         self._pause_event.set()
         self._is_checking_enabled = False
+        # Wait for any in-flight health check to finish
+        self._check_lock.acquire()
+        self._check_lock.release()
 
     def resume(self) -> None:
         """Resume health checking. Called when engines are onloaded."""
@@ -135,12 +144,13 @@ class RolloutHealthMonitor:
                 break
 
     def _run_health_checks(self) -> None:
-        for rollout_engine_id, engine in enumerate(self._server_group.engines):
-            if self._stop_event is not None and self._stop_event.is_set():
-                break
-            if self._pause_event is not None and self._pause_event.is_set():
-                break
-            self._check_engine_health(rollout_engine_id, engine)
+        with self._check_lock:
+            for rollout_engine_id, engine in enumerate(self._server_group.engines):
+                if self._stop_event is not None and self._stop_event.is_set():
+                    break
+                if self._pause_event is not None and self._pause_event.is_set():
+                    break
+                self._check_engine_health(rollout_engine_id, engine)
 
     def _check_engine_health(self, rollout_engine_id, engine) -> None:
         if engine is None:
