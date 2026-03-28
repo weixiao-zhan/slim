@@ -5,7 +5,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "accelerate",
     "aiohttp",
-    "datasets",
+    "datasets>=3.2.0",
     "flash-attn",
     "httpx[http2]",
     "omegaconf",

@@ -1,0 +1,8 @@
+aws:
+  vpc_name: skypilot-vpc
+  use_internal_ips: true
+  use_ssm: true
+  remote_identity: SERVICE_ACCOUNT
+  prioritize_reservations: true
+  specific_reservations:
+    - "cr-"
