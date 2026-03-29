@@ -531,9 +531,10 @@ class FSDPTrainRayActor(TrainRayActor):
                         target_tokens=batch["tokens"],
                         allow_compile=not self.args.true_on_policy_mode,
                         temperature=self.args.rollout_temperature,
+                        need_full_log_probs=store_prefix == "" and self.args.use_rollout_entropy,
                     )
                     batch[f"{store_prefix}log_probs"] = log_probs_result
-                    if store_prefix == "":
+                    if entropy_result is not None:
                         batch["entropy"] = entropy_result
             return rollout_data
 
@@ -881,14 +882,17 @@ class FSDPTrainRayActor(TrainRayActor):
         logits = self.model(**model_args).logits.squeeze(0).float()
 
         # Compute log probs and entropy
+        need_full_log_probs = self.args.entropy_coef != 0.0
         log_probs, entropy_result = get_logprob_and_entropy(
             logits=logits,
             target_tokens=packed_batch["tokens"],
             allow_compile=not self.args.true_on_policy_mode,
             temperature=self.args.rollout_temperature,
+            need_full_log_probs=need_full_log_probs,
         )
         packed_batch["cur_log_probs"] = log_probs
-        packed_batch["entropy"] = entropy_result
+        if entropy_result is not None:
+            packed_batch["entropy"] = entropy_result
 
         unpacked_batches = unpack_sequences(packed_batch)
 
@@ -963,8 +967,11 @@ class FSDPTrainRayActor(TrainRayActor):
                 train_rollout_logprob_abs_diff, edge_lengths, loss_masks
             ).detach()
 
-        entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
-        entropy_loss = sum_of_sample_mean(entropy, edge_lengths, loss_masks)
+        if need_full_log_probs:
+            entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
+            entropy_loss = sum_of_sample_mean(entropy, edge_lengths, loss_masks)
+        else:
+            entropy_loss = torch.zeros((), dtype=log_probs.dtype, device=log_probs.device)
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss
 
@@ -1158,8 +1165,8 @@ def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> 
     Returns:
         Tensor of shape [...] containing the log-probabilities corresponding to `input_ids`.
     """
-    logprobs = logits.log_softmax(dim=-1)
-    return torch.gather(logprobs, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
+    selected_logits = torch.gather(logits, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
+    return selected_logits - torch.logsumexp(logits, dim=-1)
 
 
 selective_log_softmax_compiled = torch.compile(dynamic=True)(selective_log_softmax_raw)
@@ -1204,7 +1211,8 @@ def get_logprob_and_entropy(
     target_tokens: torch.Tensor,
     allow_compile: bool,
     temperature: float | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    need_full_log_probs: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Compute log probabilities and entropy.
 
     Parameters:
@@ -1215,15 +1223,17 @@ def get_logprob_and_entropy(
 
     Returns:
         log_probs: Log probabilities with shape [seq_len - 1]
-        entropy: Entropy with shape [seq_len - 1]
+        entropy: Optional entropy with shape [seq_len - 1]
     """
     shifted_logits = logits[:-1, :]
     log_probs = gather_log_probs_packed(
         shifted_logits, target_tokens, allow_compile=allow_compile, temperature=temperature
     )
-    log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
-    probs = torch.softmax(shifted_logits, dim=-1)
-    entropy = -(probs * log_probs_full).sum(dim=-1)
+    entropy = None
+    if need_full_log_probs:
+        log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
+        probs = torch.softmax(shifted_logits, dim=-1)
+        entropy = -(probs * log_probs_full).sum(dim=-1)
     return log_probs, entropy
 
 
