@@ -7,11 +7,11 @@ name: gspo-geo3k
 
 workdir: ../..
 
-num_nodes: 2
+num_nodes: 1
 
 resources:
-  infra: aws/us-west-2
-  instance_type: p4de.24xlarge
+  infra: aws/us-west-1
+  instance_type: p5.48xlarge
   disk_size: 500
   network_tier: best  # Enables EFA
   image_id:
@@ -26,10 +26,14 @@ envs:
 setup: | # shell
   set -ex
   uv sync
+  # FA3 (Hopper kernels) for --attn-implementation flash_attention_3
+  uv pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch280
 
 run: | # shell
   set -ex
   uv sync
+  # Re-install FA3 after uv sync (uv removes packages not in pyproject.toml)
+  uv pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch280
   # Download model and prepare dataset
   mkdir -p /home/ubuntu/models /home/ubuntu/datasets
   if [ ! -d "/home/ubuntu/models/${MODEL_NAME}" ]; then
@@ -59,11 +63,9 @@ run: | # shell
 
   # Kill any previous Ray on our port (not SkyPilot's on 6380)
   pkill -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
-  sleep 5
-  # Escalate to force-kill if still running
-  pkill -9 -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
   pkill -9 sglang 2>/dev/null || true
   pkill -9 slime 2>/dev/null || true
+  lsof -ti :${RAY_PORT} | xargs -r kill -9 2>/dev/null || true
   sleep 10
 
   # Worker nodes: connect to Ray head and block
@@ -144,45 +146,47 @@ run: | # shell
     --prompt-data ${DATASET_DIR}/train.parquet \
     --rm-type math \
     --num-rollout 200 \
-    --rollout-batch-size 64 \
+    --rollout-batch-size 32 \
     --n-samples-per-prompt 16 \
-    --rollout-max-context-len 8192 \
+    --rollout-max-context-len 16384 \
     --rollout-temperature 1 \
     --num-steps-per-rollout 1 \
+    --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+    --over-sampling-batch-size 48 \
     \
     --eval-interval 20 \
     --skip-eval-before-train \
     --eval-prompt-data geo3k ${DATASET_DIR}/test.parquet \
     --n-samples-per-eval-prompt 1 \
-    --eval-max-context-len 8192 \
+    --eval-max-context-len 16384 \
     --save ${OUTPUT_DIR} \
-    --save-interval 100 \
+    --save-interval 40 \
     \
     --rollout-num-gpus-per-engine 1 \
     --sglang-mem-fraction-static 0.6 \
-    --sglang-attention-backend flashinfer \
+    --sglang-attention-backend fa3 \
     --sglang-mm-enable-dp-encoder \
     --log-pass-ratio \
     --colocate \
     \
     --actor-num-nodes ${SKYPILOT_NUM_NODES} \
     --actor-num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
-    --use-dynamic-batch-size \
-    --max-tokens-per-gpu 8192 \
-    --attn-implementation flash_attention_2 \
+    --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
     --update-weight-buffer-size 536870912 \
+    --use-dynamic-batch-size \
+    --max-tokens-per-gpu 16384 \
     \
-    --advantage-estimator grpo \
+    --advantage-estimator gspo \
     --disable-grpo-std-normalization \
+    --use-rollout-logprobs \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \
     --entropy-coef 0.0 \
     --kl-coef 0.0 \
-    --use-rollout-logprobs \
     \
     --optimizer adam \
-    --lr 1e-6 \
+    --lr 1e-5 \
     --lr-warmup-iters 10 \
     --lr-decay-style constant \
     --weight-decay 0.1 \

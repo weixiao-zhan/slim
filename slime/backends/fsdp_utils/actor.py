@@ -1165,8 +1165,8 @@ def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> 
     Returns:
         Tensor of shape [...] containing the log-probabilities corresponding to `input_ids`.
     """
-    selected_logits = torch.gather(logits, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
-    return selected_logits - torch.logsumexp(logits, dim=-1)
+    logprobs = logits.log_softmax(dim=-1)
+    return torch.gather(logprobs, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
 
 
 selective_log_softmax_compiled = torch.compile(dynamic=True)(selective_log_softmax_raw)
