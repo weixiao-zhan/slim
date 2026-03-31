@@ -93,6 +93,21 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
 
             time.sleep(2)
 
+        # use flush_cache to make sure the working queue is empty, so that we can do offload
+        while True:
+            try:
+                response = session.get(f"{base_url}/flush_cache", headers=headers)
+                if response.status_code == 200:
+                    break
+
+            except requests.RequestException:
+                pass
+
+            if not is_process_alive():
+                raise Exception("Server process terminated unexpectedly.")
+
+            time.sleep(2)
+
 
 class SGLangEngine(RayActor):
     def __init__(

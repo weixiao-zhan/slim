@@ -58,9 +58,6 @@ run: | # shell
 
   # Kill any previous Ray on our port (not SkyPilot's on 6380)
   pkill -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
-  sleep 5
-  # Escalate to force-kill if still running
-  pkill -9 -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
   pkill -9 sglang 2>/dev/null || true
   pkill -9 slime 2>/dev/null || true
   sleep 5
