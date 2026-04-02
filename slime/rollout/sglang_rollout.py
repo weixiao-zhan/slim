@@ -4,33 +4,15 @@ import logging
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-try:
-    import pybase64
-except ModuleNotFoundError:  # pragma: no cover
-    pybase64 = None
-
-try:
-    import sglang_router
-except ModuleNotFoundError:  # pragma: no cover
-    sglang_router = None
-
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover
-    torch = None
-
+import pybase64
+import sglang_router
+import torch
 from packaging.version import parse
-
-try:
-    from tqdm import tqdm
-except ModuleNotFoundError:  # pragma: no cover
-    def tqdm(iterable=None, *args, **kwargs):
-        return iterable if iterable is not None else []
+from tqdm import tqdm
 
 from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
@@ -43,23 +25,6 @@ from slime.utils.types import Episode
 __all__ = ["generate_rollout", "get_model_url"]
 
 logger = logging.getLogger(__name__)
-
-
-def _require_rollout_runtime() -> None:
-    missing = [
-        name
-        for name, module in {
-            "pybase64": pybase64,
-            "sglang_router": sglang_router,
-            "torch": torch,
-        }.items()
-        if module is None
-    ]
-    if missing:
-        raise ModuleNotFoundError(
-            f"Missing rollout runtime dependencies: {', '.join(missing)}. "
-            "Install the project runtime environment before using rollout generation."
-        )
 
 
 def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate") -> str:
@@ -80,7 +45,6 @@ class RolloutGroup:
 
 class GenerateState(metaclass=SingletonMeta):
     def __init__(self, args: Namespace) -> None:
-        _require_rollout_runtime()
         from slime.utils.processing_utils import load_processor, load_tokenizer
 
         self.args = args
@@ -89,7 +53,6 @@ class GenerateState(metaclass=SingletonMeta):
 
         concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.cpu_executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="sglang_processor")
         self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
@@ -169,7 +132,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
     Sets episode._max_tokens (total context budget) on first call.
     """
     state = GenerateState(args)
-    loop = asyncio.get_event_loop()
     from slime.utils.processing_utils import build_processor_kwargs
 
     if episode.tokens:
@@ -185,36 +147,27 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
         messages = episode.prompt
         tools = episode.tools
         if state.processor and has_multimodal:
-            prompt_text = await loop.run_in_executor(
-                state.cpu_executor,
-                lambda: state.processor.apply_chat_template(
-                    messages,
-                    tools=tools,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    **state.chat_template_kwargs,
-                ),
+            prompt_text = state.processor.apply_chat_template(
+                messages,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=True,
+                **state.chat_template_kwargs,
             )
         else:
-            prompt_ids = await loop.run_in_executor(
-                state.cpu_executor,
-                lambda: state.tokenizer.apply_chat_template(
-                    messages,
-                    tools=tools,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    **state.chat_template_kwargs,
-                ),
+            prompt_ids = state.tokenizer.apply_chat_template(
+                messages,
+                tools=tools,
+                tokenize=True,
+                add_generation_prompt=True,
+                **state.chat_template_kwargs,
             )
     else:
         prompt_text = episode.prompt
 
     if state.processor and has_multimodal:
         processor_kwargs = build_processor_kwargs(episode.multimodal_inputs)
-        processor_output = await loop.run_in_executor(
-            state.cpu_executor,
-            lambda: state.processor(text=prompt_text, **processor_kwargs),
-        )
+        processor_output = state.processor(text=prompt_text, **processor_kwargs)
         raw_ids = processor_output["input_ids"][0]
         prompt_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
         episode.multimodal_train_inputs = {
@@ -223,10 +176,7 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
     elif prompt_ids is None:
-        prompt_ids = await loop.run_in_executor(
-            state.cpu_executor,
-            lambda: state.tokenizer.encode(prompt_text, add_special_tokens=False),
-        )
+        prompt_ids = state.tokenizer.encode(prompt_text, add_special_tokens=False)
 
     episode.tokens = list(prompt_ids)
     edge_len = max(len(episode.tokens) - 1, 0)
@@ -239,7 +189,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
 async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
-    loop = asyncio.get_event_loop()
     from slime.utils.processing_utils import encode_image_for_rollout_engine
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
@@ -267,9 +216,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     image_inputs = episode.multimodal_inputs.get("images") if episode.multimodal_inputs else None
     if episode.has_multimodal and image_inputs:
         image_data = image_inputs
-        payload["image_data"] = await asyncio.gather(
-            *[loop.run_in_executor(state.cpu_executor, encode_image_for_rollout_engine, img) for img in image_data]
-        )
+        payload["image_data"] = [encode_image_for_rollout_engine(img) for img in image_data]
 
     headers = None
     if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:
@@ -373,7 +320,9 @@ async def generate_and_rm_group(
     return group
 
 
-async def abort(args: Namespace) -> None:
+async def abort(args: Namespace) -> list[dict]:
+    aborted_examples = []
+
     state = GenerateState(args)
     assert not state.aborted
     state.aborted = True
@@ -386,11 +335,22 @@ async def abort(args: Namespace) -> None:
         urls = [worker["url"] for worker in response["workers"]]
 
     logger.info(f"Abort request for {urls}")
-    abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
-    abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
-    for url, result in zip(urls, abort_results, strict=False):
-        if isinstance(result, Exception):
-            logger.warning(f"Failed to abort worker at {url}: {result}")
+    await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
+
+    # make sure all the pending tasks are finished
+    while state.pendings:
+        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+
+        if not args.partial_rollout:
+            continue
+
+        # for partial rollout, collect the partial examples into the data buffer
+        for task in done:
+            group = task.result()
+            if not group.completed:
+                aborted_examples.append(group.example)
+
+    return aborted_examples
 
 
 async def generate_rollout_async(
@@ -419,9 +379,6 @@ async def generate_rollout_async(
 
         done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
-            if task.exception() is not None:
-                logger.error(f"generate_and_rm_group task failed: {task.exception()}", exc_info=task.exception())
-                raise task.exception()
             group: RolloutGroup = task.result()
 
             if do_print:
@@ -433,10 +390,6 @@ async def generate_rollout_async(
 
             assert len(group.episodes) == args.n_samples_per_prompt
             all_groups.append(group)
-
-            if not group.completed:
-                state.remaining_batch_size -= 1
-                continue
 
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group.episodes)
             if not dynamic_filter_output.keep:
@@ -454,15 +407,7 @@ async def generate_rollout_async(
         f"Finish rollout: {[_episode_full_text(args, ep)]}, label: {ep.label}, reward: {ep.reward}",
     )
 
-    await abort(args)
-
-    aborted_examples = []
-    while state.pendings:
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            group = task.result()
-            if not group.completed:
-                aborted_examples.append(group.example)
+    aborted_examples = await abort(args)
 
     assert len(kept_groups) == args.rollout_batch_size, f"Got {len(kept_groups)} samples, expected {args.rollout_batch_size}"
     kept_groups.sort(key=lambda group: group.index)

@@ -23,10 +23,12 @@ def execute():
         "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
-        "--rollout-max-context-len 4096 "
+        "--rollout-max-context-len 2048 "
         "--rollout-temperature 1 "
         "--num-steps-per-rollout 1 "
         "--rollout-shuffle "
+        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
+        "--over-sampling-batch-size 48 "
     )
 
     eval_args = (
@@ -34,7 +36,7 @@ def execute():
         "--skip-eval-before-train "
         f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
         "--n-samples-per-eval-prompt 1 "
-        "--eval-max-context-len 4096 "
+        "--eval-max-context-len 2048 "
     )
 
     fsdp_args = (
@@ -49,16 +51,16 @@ def execute():
         "--gamma 1.0 "
         "--lambd 0.95 "
         "--value-clip 0.2 "
+        "--kl-coef 0.0 "
+        "--entropy-coef 0.0 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        "--entropy-coef 0.0 "
-        "--kl-coef 0.0 "
     )
 
     optimizer_args = (
         "--optimizer adam "
-        "--lr 1e-6 "
-        "--critic-lr 5e-6 "
+        "--lr 1e-5 "
+        "--critic-lr 5e-5 "
         "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
@@ -68,7 +70,10 @@ def execute():
 
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
+        "--sglang-mem-fraction-static 0.6 "
         "--sglang-attention-backend fa3 "
+        "--sglang-mm-enable-dp-encoder "
+        "--use-fault-tolerance "
     )
 
     save_args = (
@@ -91,7 +96,7 @@ def execute():
         "--critic-num-gpus-per-node 4 "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
+        "--max-tokens-per-gpu 8192 "
         "--log-pass-ratio "
         ""
     )

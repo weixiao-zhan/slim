@@ -109,10 +109,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
         init_context = self._get_init_weight_context_manager()
 
-        # Downcast to bf16 if model config doesn't specify a dtype and flash_attention_2 is requested,
-        # since FA2 requires float16/bfloat16 (e.g. Gemma-3's Siglip vision encoder defaults to float32).
+        # Downcast to bf16 if model config doesn't specify a dtype and flash attention is requested,
+        # since FA2/FA3 require float16/bfloat16 (e.g. Gemma-3's Siglip vision encoder defaults to float32).
         load_dtype = getattr(self.hf_config, "torch_dtype", None)
-        if load_dtype is None and self.args.attn_implementation == "flash_attention_2":
+        if load_dtype is None and self.args.attn_implementation in ("flash_attention_2", "flash_attention_3"):
             load_dtype = torch.bfloat16
 
         # Shared kwargs for from_pretrained — reused by _create_ref_model

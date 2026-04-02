@@ -552,6 +552,8 @@ def _compute_server_args(
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.
         "enable_draft_weights_cpu_backup": True,
+        # disable fast image processor to avoid compatibility issues with some VLMs.
+        "disable_fast_image_processor": True,
     }
 
     if worker_type == "prefill":

@@ -40,7 +40,6 @@ dev = [
     "memray",
     "pre-commit",
     "pytest",
-    "tensorboard",
 ]
 server = [
     "fastapi",
@@ -128,5 +127,5 @@ markers = [
 
 [tool.uv]
 override-dependencies = [
-    "nvidia-cudnn-cu12>=9.16",
+    "nvidia-cudnn-cu12==9.16.0.29",
 ]

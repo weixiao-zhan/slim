@@ -10,8 +10,7 @@ Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping
 
 ### 🏗️ Roadmap
 
-- [ ] Add PEFT
-- [ ] Threadpooled generation (when GIL is deprecated, the agents will able to run truely concurrently)
+- [x] Add PEFT
 - [x] Overlap actor forward pass for log-probs and ref-log-probs and critif forward pass for values.
 - [x] Unifiy data layout to use tokens.
 - [x] Improve dataset loading: datasets now use a finite set of supported columns (`prompt`, `label`, and optional multimodal / control columns) and defer `apply_chat_template` to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))

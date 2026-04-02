@@ -23,10 +23,12 @@ def execute():
         "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
-        "--rollout-max-context-len 8192 "
+        "--rollout-max-context-len 2048 "
         "--rollout-temperature 1 "
         "--num-steps-per-rollout 1 "
         "--rollout-shuffle "
+        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
+        "--over-sampling-batch-size 48 "
     )
 
     eval_args = (
@@ -34,13 +36,13 @@ def execute():
         "--skip-eval-before-train "
         f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
-        "--eval-max-context-len 8192 "
+        "--eval-max-context-len 2048 "
     )
 
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
         "--gradient-checkpointing "
-        "--attn-implementation flash_attention_2 "
+        "--attn-implementation flash_attention_3 "
         """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
@@ -57,7 +59,7 @@ def execute():
 
     optimizer_args = (
         "--optimizer adam "
-        "--lr 1e-6 "
+        "--lr 1e-5 "
         "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
@@ -70,6 +72,7 @@ def execute():
         "--sglang-mem-fraction-static 0.6 "
         "--sglang-attention-backend fa3 "
         "--sglang-mm-enable-dp-encoder "
+        "--use-fault-tolerance "
     )
 
     save_args = (

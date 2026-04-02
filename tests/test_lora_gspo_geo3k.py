@@ -23,10 +23,12 @@ def execute():
         "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
-        "--rollout-max-context-len 8192 "
+        "--rollout-max-context-len 2048 "
         "--rollout-temperature 1 "
         "--num-steps-per-rollout 1 "
         "--rollout-shuffle "
+        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
+        "--over-sampling-batch-size 48 "
     )
 
     eval_args = (
@@ -34,7 +36,7 @@ def execute():
         "--skip-eval-before-train "
         f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
-        "--eval-max-context-len 8192 "
+        "--eval-max-context-len 2048 "
     )
 
     fsdp_args = (
@@ -51,6 +53,7 @@ def execute():
 
     loss_args = (
         "--advantage-estimator gspo "
+        "--disable-grpo-std-normalization "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
@@ -74,6 +77,7 @@ def execute():
         "--sglang-mem-fraction-static 0.6 "
         "--sglang-attention-backend fa3 "
         "--sglang-mm-enable-dp-encoder "
+        "--use-fault-tolerance "
     )
 
     save_args = (
@@ -94,7 +98,7 @@ def execute():
         "--actor-num-gpus-per-node 8 "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 8192 "
+        "--max-tokens-per-gpu 16384 "
         "--log-pass-ratio "
         ""
     )
