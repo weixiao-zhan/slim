@@ -11,6 +11,7 @@ load_dotenv()
 NUM_GPUS = 8
 MODEL_DIR = os.environ.get("VLM_MODEL_DIR", "/home/ubuntu/models/Qwen3-VL-2B-Instruct")
 DATASET_DIR = os.environ.get("VLM_DATASET_DIR", "/home/ubuntu/datasets/geo3k")
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/ppo-geo3k-qwen3vl2b")
 
 
 def execute():
@@ -39,7 +40,8 @@ def execute():
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
         "--gradient-checkpointing "
-        "--attn-implementation flash_attention_2 "
+        "--attn-implementation flash_attention_3 "
+        """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
     loss_args = (
@@ -67,8 +69,13 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.6 "
-        "--sglang-attention-backend flashinfer "
+        "--sglang-attention-backend fa3 "
         "--sglang-mm-enable-dp-encoder "
+    )
+
+    save_args = (
+        f"--save {SAVE_DIR} "
+        "--save-interval 20 "
     )
 
     wandb_args = (
@@ -77,11 +84,6 @@ def execute():
         "--wandb-group ppo-geo3k-qwen3vl2b "
         f"--wandb-key '{os.environ.get('WANDB_API_KEY', '')}' "
         "--disable-wandb-random-suffix "
-    )
-
-    save_args = (
-        "--save /home/ubuntu/outputs/ppo-geo3k-qwen3vl2b "
-        "--save-interval 20 "
     )
 
     misc_args = (
@@ -102,8 +104,8 @@ def execute():
         f"{optimizer_args} "
         f"{loss_args} "
         f"{fsdp_args} "
-        f"{eval_args} "
         f"{save_args} "
+        f"{eval_args} "
         f"{sglang_args} "
         f"{wandb_args} "
         f"{misc_args} "
@@ -112,6 +114,7 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
+        train_script=str(U.repo_base_dir / "train.py"),
     )
 
 

@@ -1,4 +1,4 @@
-"""GRPO on math (GSM8K). 8 actor GPUs colocated with rollout, batch size 512."""
+"""GSPO on math (GSM8K). 8 actor GPUs colocated with rollout, batch size 512."""
 
 import os
 
@@ -9,8 +9,9 @@ import slime.utils.external_utils.command_utils as U
 load_dotenv()
 
 NUM_GPUS = 8
-MODEL_DIR = "/home/ubuntu/models/Qwen3-1.7B-Base"
-DATASET_DIR = "/home/ubuntu/datasets"
+MODEL_DIR = os.environ.get("LLM_MODEL_DIR", "/home/ubuntu/models/Qwen3-1.7B-Base")
+DATASET_DIR = os.environ.get("LLM_DATASET_DIR", "/home/ubuntu/datasets")
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/gspo-gsm8k-qwen3-1.7b")
 
 
 def execute():
@@ -38,11 +39,14 @@ def execute():
 
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
+        "--gradient-checkpointing "
         "--attn-implementation flash_attention_2 "
+        """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
     loss_args = (
-        "--advantage-estimator grpo "
+        "--advantage-estimator gspo "
+        "--disable-grpo-std-normalization "
         "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
@@ -63,28 +67,30 @@ def execute():
 
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
+        "--sglang-mem-fraction-static 0.6 "
+        "--sglang-attention-backend fa3 "
+        "--sglang-mm-enable-dp-encoder "
+    )
+
+    save_args = (
+        f"--save {SAVE_DIR} "
+        "--save-interval 20 "
     )
 
     wandb_args = (
         "--use-wandb "
         "--wandb-project minislime "
-        "--wandb-group grpo-gsm8k-qwen3-1.7b "
+        "--wandb-group gspo-gsm8k-qwen3-1.7b "
         f"--wandb-key '{os.environ.get('WANDB_API_KEY', '')}' "
         "--disable-wandb-random-suffix "
     )
 
-    save_args = (
-        "--save /home/ubuntu/outputs/grpo-gsm8k-qwen3-1.7b "
-        "--save-interval 20 "
-    )
-
     misc_args = (
-        f"--actor-num-nodes 1 "
-        f"--actor-num-gpus-per-node {NUM_GPUS} "
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 8 "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 4096 "
-        "--gradient-checkpointing "
+        "--max-tokens-per-gpu 8192 "
         "--log-pass-ratio "
         ""
     )
@@ -95,8 +101,8 @@ def execute():
         f"{optimizer_args} "
         f"{loss_args} "
         f"{fsdp_args} "
-        f"{eval_args} "
         f"{save_args} "
+        f"{eval_args} "
         f"{sglang_args} "
         f"{wandb_args} "
         f"{misc_args} "
@@ -105,6 +111,7 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
+        train_script=str(U.repo_base_dir / "train.py"),
     )
 
 

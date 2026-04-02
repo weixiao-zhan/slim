@@ -40,7 +40,8 @@ def execute():
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
         "--gradient-checkpointing "
-        "--attn-implementation flash_attention_2 "
+        "--attn-implementation flash_attention_3 "
+        """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
     peft_args = (
@@ -50,7 +51,7 @@ def execute():
 
     loss_args = (
         "--advantage-estimator gspo "
-        "--kl-loss-coef 0.01 "
+        "--kl-loss-coef 0.00 "
         "--kl-loss-type low_var_kl "
         "--kl-coef 0.00 "
         "--entropy-coef 0.00 "
@@ -71,7 +72,7 @@ def execute():
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
         "--sglang-mem-fraction-static 0.6 "
-        "--sglang-attention-backend flashinfer "
+        "--sglang-attention-backend fa3 "
         "--sglang-mm-enable-dp-encoder "
     )
 
@@ -123,8 +124,6 @@ if __name__ == "__main__":
     for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
         os.environ.pop(proxy_var, None)
 
-    # Use external Ray (already started) and skip ray job submit
-    # (run train.py directly so it uses the venv's python + packages)
     os.environ["SLIME_SCRIPT_EXTERNAL_RAY"] = "1"
 
     execute()
