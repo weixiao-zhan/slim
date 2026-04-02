@@ -324,6 +324,27 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
+            # partial rollout
+            parser.add_argument(
+                "--partial-rollout",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to use partial rollout. "
+                    "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
+                    "This is useful for long responses."
+                ),
+            )
+            parser.add_argument(
+                "--mask-offpolicy-in-partial-rollout",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to mask previous generation in partial rollout. "
+                    "If set, only on-policy generated tokens will be used in training"
+                ),
+            )
+
             parser.add_argument(
                 "--custom-generate-function-path",
                 type=str,
@@ -400,6 +421,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_fault_tolerance_arguments(parser):
+            parser.add_argument(
+                "--use-fault-tolerance",
+                action="store_true",
+                default=False,
+                help="Whether to enable the fault tolerance function during rollout.",
+            )
             parser.add_argument(
                 "--rollout-health-check-interval",
                 type=float,
