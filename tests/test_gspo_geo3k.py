@@ -1,4 +1,4 @@
-"""PPO on Geo3K VLM. 4 actor + 4 critic GPUs colocated with 8 rollout, batch size 512."""
+"""GSPO on Geo3K VLM. 8 actor GPUs with 8 rollout engines, batch size 512."""
 
 import os
 
@@ -11,7 +11,7 @@ load_dotenv()
 NUM_GPUS = 8
 MODEL_DIR = os.environ.get("VLM_MODEL_DIR", "/home/ubuntu/models/Qwen3-VL-2B-Instruct")
 DATASET_DIR = os.environ.get("VLM_DATASET_DIR", "/home/ubuntu/datasets/geo3k")
-SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/ppo-geo3k-qwen3vl2b")
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/gspo-geo3k-qwen3vl2b")
 
 
 def execute():
@@ -40,25 +40,24 @@ def execute():
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
         "--gradient-checkpointing "
-        "--attn-implementation flash_attention_3 "
+        "--attn-implementation flash_attention_2 "
         """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
     loss_args = (
-        "--advantage-estimator ppo "
-        "--gamma 1.0 "
-        "--lambd 0.95 "
-        "--value-clip 0.2 "
+        "--advantage-estimator gspo "
+        "--disable-grpo-std-normalization "
+        "--kl-loss-coef 0.00 "
+        "--kl-loss-type low_var_kl "
+        "--kl-coef 0.00 "
+        "--entropy-coef 0.00 "
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
-        "--entropy-coef 0.0 "
-        "--kl-coef 0.0 "
     )
 
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-6 "
-        "--critic-lr 5e-6 "
         "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "
@@ -81,19 +80,17 @@ def execute():
     wandb_args = (
         "--use-wandb "
         "--wandb-project minislime "
-        "--wandb-group ppo-geo3k-qwen3vl2b "
+        "--wandb-group gspo-geo3k-qwen3vl2b "
         f"--wandb-key '{os.environ.get('WANDB_API_KEY', '')}' "
         "--disable-wandb-random-suffix "
     )
 
     misc_args = (
         "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 4 "
-        "--critic-num-nodes 1 "
-        "--critic-num-gpus-per-node 4 "
+        "--actor-num-gpus-per-node 8 "
         "--colocate "
         "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 8192 "
+        "--max-tokens-per-gpu 16384 "
         "--log-pass-ratio "
         ""
     )

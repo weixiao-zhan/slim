@@ -16,6 +16,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 from slime.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
 from slime.utils import logging_utils
+from slime.utils.external_utils.command_utils import _get_nvidia_ld_library_path
 from slime.utils.health_monitor import RolloutHealthMonitor
 from slime.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
 from slime.utils.logging_utils import configure_logger, init_tracking
@@ -107,7 +108,7 @@ class ServerGroup:
                 placement_group_bundle_index=reordered_bundle_indices[gpu_index],
             )
 
-            env_vars = {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
+            env_vars = _get_nvidia_ld_library_path() | {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
                 key: os.environ.get(key, default_val)
                 for key, default_val in {
                     "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "false",

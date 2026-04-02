@@ -43,14 +43,14 @@ Dataset schema note:
 
 ```bash
 # Start Ray
-uv run ray start --head --num-gpus 8 --disable-usage-stats
+uv run ray stop --force; uv run ray start --head --num-gpus 8 --disable-usage-stats
 
 # Run a test (pick one)
-SLIME_SCRIPT_EXTERNAL_RAY=1 uv run python tests/test_grpo_math.py
-SLIME_SCRIPT_EXTERNAL_RAY=1 uv run python tests/test_ppo_math.py
-SLIME_SCRIPT_EXTERNAL_RAY=1 uv run python tests/test_grpo_geo3k.py
-SLIME_SCRIPT_EXTERNAL_RAY=1 uv run python tests/test_ppo_geo3k.py
-SLIME_SCRIPT_EXTERNAL_RAY=1 uv run python tests/test_lora_gspo_geo3k.py
+uv run python tests/test_ppo_math.py
+uv run python tests/test_gspo_math.py
+uv run python tests/test_ppo_geo3k.py
+uv run python tests/test_gspo_geo3k.py
+uv run python tests/test_lora_gspo_geo3k.py
 
 # Follow logs
 uv run ray job logs --follow $(uv run ray job list 2>&1 | \

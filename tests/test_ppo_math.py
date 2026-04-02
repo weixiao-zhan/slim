@@ -9,8 +9,9 @@ import slime.utils.external_utils.command_utils as U
 load_dotenv()
 
 NUM_GPUS = 8
-MODEL_DIR = "/home/ubuntu/models/Qwen3-1.7B-Base"
-DATASET_DIR = "/home/ubuntu/datasets"
+MODEL_DIR = os.environ.get("LLM_MODEL_DIR", "/home/ubuntu/models/Qwen3-1.7B-Base")
+DATASET_DIR = os.environ.get("LLM_DATASET_DIR", "/home/ubuntu/datasets")
+SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/ppo-gsm8k-qwen3-1.7b")
 
 
 def execute():
@@ -28,9 +29,19 @@ def execute():
         "--rollout-shuffle "
     )
 
+    eval_args = (
+        "--eval-interval 20 "
+        "--skip-eval-before-train "
+        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
+        "--n-samples-per-eval-prompt 1 "
+        "--eval-max-context-len 4096 "
+    )
+
     fsdp_args = (
         "--update-weight-buffer-size 536870912 "
-        "--attn-implementation flash_attention_2 "
+        "--gradient-checkpointing "
+        "--attn-implementation flash_attention_3 "
+        """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
 
     loss_args = (
@@ -57,6 +68,12 @@ def execute():
 
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
+        "--sglang-attention-backend fa3 "
+    )
+
+    save_args = (
+        f"--save {SAVE_DIR} "
+        "--save-interval 20 "
     )
 
     wandb_args = (
@@ -67,19 +84,6 @@ def execute():
         "--disable-wandb-random-suffix "
     )
 
-    eval_args = (
-        "--eval-interval 20 "
-        "--skip-eval-before-train "
-        f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
-        "--n-samples-per-eval-prompt 1 "
-        "--eval-max-context-len 4096 "
-    )
-
-    save_args = (
-        "--save /home/ubuntu/outputs/ppo-gsm8k-qwen3-1.7b "
-        "--save-interval 20 "
-    )
-
     misc_args = (
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 4 "
@@ -88,7 +92,6 @@ def execute():
         "--colocate "
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 4096 "
-        "--gradient-checkpointing "
         "--log-pass-ratio "
         ""
     )
@@ -99,8 +102,8 @@ def execute():
         f"{optimizer_args} "
         f"{loss_args} "
         f"{fsdp_args} "
-        f"{eval_args} "
         f"{save_args} "
+        f"{eval_args} "
         f"{sglang_args} "
         f"{wandb_args} "
         f"{misc_args} "
@@ -109,6 +112,7 @@ def execute():
     U.execute_train(
         train_args=train_args,
         num_gpus_per_node=NUM_GPUS,
+        train_script=str(U.repo_base_dir / "train.py"),
     )
 
 
