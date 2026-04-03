@@ -27,13 +27,11 @@ def execute():
         "--rollout-temperature 1 "
         "--num-steps-per-rollout 1 "
         "--rollout-shuffle "
-        "--dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std "
-        "--over-sampling-batch-size 48 "
     )
 
     eval_args = (
         "--eval-interval 20 "
-        "--skip-eval-before-train "
+        # "--skip-eval-before-train "
         f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
         "--eval-max-context-len 2048 "
@@ -60,7 +58,8 @@ def execute():
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-5 "
-        "--critic-lr 5e-5 "
+        "--critic-lr 2e-5 "
+        "--num-critic-only-steps 20"
         "--lr-warmup-iters 10 "
         "--lr-decay-style constant "
         "--weight-decay 0.1 "

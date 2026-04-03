@@ -33,7 +33,7 @@ def execute():
 
     eval_args = (
         "--eval-interval 20 "
-        "--skip-eval-before-train "
+        # "--skip-eval-before-train "
         f"--eval-prompt-data gsm8k_test {DATASET_DIR}/gsm8k/test.parquet "
         "--n-samples-per-eval-prompt 1 "
         "--eval-max-context-len 2048 "
