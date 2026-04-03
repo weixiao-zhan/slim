@@ -426,7 +426,7 @@ class FSDPTrainRayActor(TrainRayActor):
             for batch in tqdm(packed_batches, desc="critic_values", disable=dist.get_rank() != 0):
                 model_args = self._get_model_inputs_args(batch)
                 values = self.model(**model_args).logits.squeeze(-1).squeeze(0).float()
-                batch["cur_values"] = values[:-1]
+                batch["cur_values"] = strip_cross_boundary(values[:-1], batch["cu_seqlens"])
 
         self.model.train()
 
@@ -532,6 +532,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         allow_compile=not self.args.true_on_policy_mode,
                         temperature=self.args.rollout_temperature,
                         need_full_log_probs=store_prefix == "" and self.args.use_rollout_entropy,
+                        cu_seqlens=batch["cu_seqlens"],
                     )
                     batch[f"{store_prefix}log_probs"] = log_probs_result
                     if entropy_result is not None:
@@ -814,7 +815,7 @@ class FSDPTrainRayActor(TrainRayActor):
         model_args = self._get_model_inputs_args(packed_batch)
         # Value head outputs [..., 1]; shift by 1 to align with response tokens (same as log_probs)
         values_output = self.model(**model_args).logits.squeeze(-1).squeeze(0).float()
-        packed_batch["cur_values"] = values_output[:-1]
+        packed_batch["cur_values"] = strip_cross_boundary(values_output[:-1], packed_batch["cu_seqlens"])
 
         unpacked_batches = unpack_sequences(packed_batch)
 
@@ -889,6 +890,7 @@ class FSDPTrainRayActor(TrainRayActor):
             allow_compile=not self.args.true_on_policy_mode,
             temperature=self.args.rollout_temperature,
             need_full_log_probs=need_full_log_probs,
+            cu_seqlens=packed_batch["cu_seqlens"],
         )
         packed_batch["cur_log_probs"] = log_probs
         if entropy_result is not None:
@@ -1152,6 +1154,24 @@ def _update_packed_advantages(packed_batches: list[dict], episodes: list[Episode
             batch["old_values"] = torch.cat(val_parts)
 
 
+def strip_cross_boundary(flat_edges: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """Remove cross-boundary entries from a flat edge tensor computed via [:-1].
+
+    When multiple sequences are packed and we compute logits[:-1], the result
+    has total_tokens - 1 entries, including cross-boundary entries between
+    adjacent sequences.  This function extracts only the valid within-sequence
+    edges (total_tokens - num_sequences entries).
+    """
+    if len(cu_seqlens) <= 2:
+        # Single sequence — no cross-boundary entries
+        return flat_edges
+    indices = torch.cat([
+        torch.arange(cu_seqlens[i], cu_seqlens[i + 1] - 1, device=flat_edges.device)
+        for i in range(len(cu_seqlens) - 1)
+    ])
+    return flat_edges[indices]
+
+
 def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
     """Fused version of the common `log_softmax -> gather` operation.
 
@@ -1212,6 +1232,7 @@ def get_logprob_and_entropy(
     allow_compile: bool,
     temperature: float | None = None,
     need_full_log_probs: bool = True,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Compute log probabilities and entropy.
 
@@ -1220,10 +1241,14 @@ def get_logprob_and_entropy(
         target_tokens: Target tokens with shape [seq_len]
         allow_compile: Whether to allow compilation
         temperature: Temperature parameter (optional)
+        cu_seqlens: Cumulative sequence lengths for packed sequences.
+            When provided, cross-boundary entries between packed sequences
+            are stripped so the output is edge-aligned (sum of per-sequence
+            num_tokens - 1).
 
     Returns:
-        log_probs: Log probabilities with shape [seq_len - 1]
-        entropy: Optional entropy with shape [seq_len - 1]
+        log_probs: Edge-aligned log probabilities
+        entropy: Optional edge-aligned entropy
     """
     shifted_logits = logits[:-1, :]
     log_probs = gather_log_probs_packed(
@@ -1234,6 +1259,10 @@ def get_logprob_and_entropy(
         log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
         probs = torch.softmax(shifted_logits, dim=-1)
         entropy = -(probs * log_probs_full).sum(dim=-1)
+    if cu_seqlens is not None:
+        log_probs = strip_cross_boundary(log_probs, cu_seqlens)
+        if entropy is not None:
+            entropy = strip_cross_boundary(entropy, cu_seqlens)
     return log_probs, entropy
 
 
