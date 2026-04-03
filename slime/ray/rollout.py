@@ -996,8 +996,6 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
         rewards = [ep.reward for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
-        truncated = [int(ep.status == Episode.Status.TRUNCATED) for ep in episodes]
-        log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
         if args.log_passrate:
             log_dict |= dict_add_prefix(
                 compute_pass_rate(flat_rewards=rewards, group_size=args.n_samples_per_eval_prompt),
@@ -1034,10 +1032,10 @@ def _compute_episode_metrics(args, episodes: list[Episode]):
     log_dict = {}
     log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
     log_dict |= _compute_zero_std_metrics(args, episodes)
-    log_dict["repetition_frac"] = sum(int(has_repetition(ep.generated_text or "")) for ep in episodes) / max(
+    log_dict["response_len/repetition_frac"] = sum(int(has_repetition(ep.generated_text or "")) for ep in episodes) / max(
         len(episodes), 1
     )
-    log_dict["truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
+    log_dict["response_len/truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
         len(episodes), 1
     )
     return log_dict
