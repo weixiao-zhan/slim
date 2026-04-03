@@ -94,7 +94,7 @@ def execute():
         "--colocate "
         "--use-dynamic-batch-size "
         "--max-tokens-per-gpu 16384 "
-        "--log-pass-ratio "
+        "--log-passrate "
         ""
     )
 
