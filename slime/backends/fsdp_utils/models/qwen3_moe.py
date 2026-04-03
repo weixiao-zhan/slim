@@ -117,9 +117,3 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         )
 
         return final_hidden_states, router_logits
-
-
-def apply_true_on_policy_patch_for_qwen3_moe():
-    from transformers.models.qwen3_moe import modeling_qwen3_moe
-
-    modeling_qwen3_moe.Qwen3MoeSparseMoeBlock = Qwen3MoeSparseMoeBlock

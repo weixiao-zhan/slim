@@ -76,7 +76,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.offload_train and self.fsdp_cpu_offload:
             self.args.offload_train = False
 
-        self._enable_true_on_policy_optimizations(args)
+        self._apply_moe_patch()
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
 
@@ -233,24 +233,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
             return AutoModelForCausalLM
 
-    def _enable_true_on_policy_optimizations(self, args):
-        if args.true_on_policy_mode:
-            from sglang.srt.batch_invariant_ops import enable_batch_invariant_mode
+    def _apply_moe_patch(self):
+        from .models.qwen3_moe_hf import apply_fsdp_moe_patch
 
-            from .models.qwen3_moe import apply_true_on_policy_patch_for_qwen3_moe
-
-            logger.info("FSDPTrainRayActor call enable_batch_invariant_mode for true-on-policy")
-            enable_batch_invariant_mode(
-                # In Qwen3, rope `inv_freq_expanded.float() @ position_ids_expanded.float()` uses bmm
-                # and disabling it will make it aligned
-                enable_bmm=False,
-            )
-
-            apply_true_on_policy_patch_for_qwen3_moe()
-        else:
-            from .models.qwen3_moe_hf import apply_fsdp_moe_patch
-
-            apply_fsdp_moe_patch()
+        apply_fsdp_moe_patch()
 
     def _setup_device_mesh(self) -> None:
         """Setup device mesh for data parallelism."""
@@ -529,7 +515,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     log_probs_result, entropy_result = get_logprob_and_entropy(
                         logits=logits,
                         target_tokens=batch["tokens"],
-                        allow_compile=not self.args.true_on_policy_mode,
+                        allow_compile=True,
                         temperature=self.args.rollout_temperature,
                         need_full_log_probs=store_prefix == "" and self.args.use_rollout_entropy,
                         cu_seqlens=batch["cu_seqlens"],
@@ -670,13 +656,6 @@ class FSDPTrainRayActor(TrainRayActor):
             logger.info(f"rollout {rollout_id}: {log_dict}")
             log_dict["rollout/step"] = compute_rollout_step(self.args, rollout_id)
             logging_utils.log(self.args, log_dict, step_key="rollout/step")
-
-        if self.args.ci_test and self.args.true_on_policy_mode:
-            assert log_dict["rollout/log_probs"] == log_dict["rollout/rollout_log_probs"], (
-                f"CI check failed: true_on_policy_mode is enabled, but log_probs "
-                f"({log_dict['rollout/log_probs']}) != rollout_log_probs "
-                f"({log_dict['rollout/rollout_log_probs']})"
-            )
 
     def _train_core(
         self,
@@ -887,7 +866,7 @@ class FSDPTrainRayActor(TrainRayActor):
         log_probs, entropy_result = get_logprob_and_entropy(
             logits=logits,
             target_tokens=packed_batch["tokens"],
-            allow_compile=not self.args.true_on_policy_mode,
+            allow_compile=True,
             temperature=self.args.rollout_temperature,
             need_full_log_probs=need_full_log_probs,
             cu_seqlens=packed_batch["cu_seqlens"],
