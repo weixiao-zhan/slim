@@ -19,21 +19,6 @@ _ = exec_command, dataclass_cli
 repo_base_dir = Path(os.path.abspath(__file__)).resolve().parents[3]
 
 
-def _get_nvidia_ld_library_path() -> dict[str, str]:
-    """Auto-detect nvidia lib paths from pip-installed packages for LD_LIBRARY_PATH."""
-    try:
-        import glob
-
-        nvidia_base = os.path.join(os.path.dirname(os.path.dirname(__import__("nvidia").__file__)), "nvidia")
-        lib_dirs = glob.glob(os.path.join(nvidia_base, "*/lib"))
-        if lib_dirs:
-            existing = os.environ.get("LD_LIBRARY_PATH", "")
-            return {"LD_LIBRARY_PATH": ":".join(lib_dirs) + (f":{existing}" if existing else "")}
-    except (ImportError, Exception):
-        pass
-    return {}
-
-
 def rsync_simple(path_src: str, path_dst: str):
     exec_command(f"mkdir -p {path_dst} && rsync -a --info=progress2 {path_src}/ {path_dst}")
 
@@ -94,7 +79,6 @@ def execute_train(
                 "NCCL_NVLS_ENABLE": str(int(check_has_nvlink())),
                 "no_proxy": f"127.0.0.1,{master_addr}",
                 "MASTER_ADDR": master_addr,
-                **(_get_nvidia_ld_library_path()),
                 **(
                     {
                         "CUDA_ENABLE_COREDUMP_ON_EXCEPTION": "1",

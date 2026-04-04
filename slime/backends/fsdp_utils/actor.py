@@ -66,6 +66,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.train_parallel_config = {
             "dp_size": self.dp_size,
+            "fsdp_strategy": self.args.fsdp_strategy,
         }
 
         if self.args.debug_rollout_only:
@@ -245,16 +246,30 @@ class FSDPTrainRayActor(TrainRayActor):
         world_size = dist.get_world_size()
         rank = dist.get_rank()
 
-        # Pure data parallelism
         self.dp_size = world_size
         self.dp_rank = rank
 
-        # Create 1D device mesh for data parallelism
-        self.mesh = init_device_mesh("cuda", mesh_shape=(self.dp_size,), mesh_dim_names=("dp",))
-        self.dp_group = self.mesh.get_group("dp")
-        self.dp_mesh = self.mesh
-
-        logger.info(f"[Rank {rank}] Device mesh (1D): world_size={world_size}, dp_size={self.dp_size}")
+        if self.args.fsdp_strategy == "hybrid":
+            assert world_size == self.args.actor_num_nodes * self.args.actor_num_gpus_per_node, (
+                f"world_size {world_size} != actor_num_nodes {self.args.actor_num_nodes} * "
+                f"actor_num_gpus_per_node {self.args.actor_num_gpus_per_node}"
+            )
+            self.mesh = init_device_mesh(
+                "cuda",
+                mesh_shape=(self.args.actor_num_nodes, self.args.actor_num_gpus_per_node),
+                mesh_dim_names=("replicate", "shard"),
+            )
+            self.dp_mesh = self.mesh
+            self.dp_group = dist.new_group()
+            logger.info(
+                f"[Rank {rank}] Device mesh (2D HSDP): replicate={self.args.actor_num_nodes}, "
+                f"shard={self.args.actor_num_gpus_per_node}, world_size={world_size}"
+            )
+        else:
+            self.mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=("dp",))
+            self.dp_mesh = self.mesh
+            self.dp_group = self.mesh.get_group("dp")
+            logger.info(f"[Rank {rank}] Device mesh (1D full shard): world_size={world_size}")
 
     def _get_init_weight_context_manager(self):
         """Get context manager for model initialization.
@@ -1318,7 +1333,8 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
     if args.fp16:
         param_dtype = torch.float16
 
-    logger.info(f"FSDP MixedPrecision Policy: param_dtype={param_dtype}, reduce_dtype={reduce_dtype}")
+    mesh_desc = f"{mesh.ndim}D mesh={mesh.shape}" if mesh is not None else "default"
+    logger.info(f"FSDP MixedPrecision Policy: param_dtype={param_dtype}, reduce_dtype={reduce_dtype}, {mesh_desc}")
 
     fsdp_kwargs = {
         "mp_policy": MixedPrecisionPolicy(
