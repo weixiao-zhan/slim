@@ -8,8 +8,8 @@ However, slime is [deprecating its FSDP backend](https://github.com/THUDM/slime/
 
 Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping Slime's customizability and efficient RL orchestration while standardizing the dataset contract around a small fixed schema and enhancing concurrency. With FSDP backend, you can directly customize the HF model. 
 
-### 🏗️ Roadmap
-
+### 🏗️ Features
+- [x] Support mm mixed dataset
 - [x] Add PEFT
 - [x] Overlap actor forward pass for log-probs and ref-log-probs and critif forward pass for values.
 - [x] Unifiy data layout to use tokens.
@@ -20,7 +20,7 @@ Thus we forked `mini-slime`, focusing on small agentic VLMs training — keeping
 
 - **R2 (Routing Replay) and R3 (Rollout Routing Replay)** were implemented for Megatron actor only. HF transformers does not support router replay yet.
 - **sglang v0.5.9** release won't load Qwen3-VL vision weight correctly. [fix](https://github.com/sgl-project/sglang/commit/d566816d838ce92d3ae044209f7d67eaa58ce74a)
-
+- **rollout engine TP==1** weight sync not supported to TP > 1 sgl
 
 ## What Changed from Upstream slime
 

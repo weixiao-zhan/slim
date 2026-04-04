@@ -132,53 +132,44 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
     Sets episode._max_tokens (total context budget) on first call.
     """
     state = GenerateState(args)
-    from slime.utils.processing_utils import build_processor_kwargs
 
     if episode.tokens:
         return
 
-    has_multimodal = episode.has_multimodal
-    prompt_ids = None
-
-    if has_multimodal and state.processor is None:
+    if episode.has_multimodal and state.processor is None:
         raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
 
-    if isinstance(episode.prompt, list):
-        messages = episode.prompt
-        tools = episode.tools
-        if state.processor and has_multimodal:
-            prompt_text = state.processor.apply_chat_template(
-                messages,
-                tools=tools,
-                tokenize=False,
-                add_generation_prompt=True,
-                **state.chat_template_kwargs,
-            )
-        else:
-            prompt_ids = state.tokenizer.apply_chat_template(
-                messages,
-                tools=tools,
-                tokenize=True,
-                add_generation_prompt=True,
-                **state.chat_template_kwargs,
-            )
-    else:
-        prompt_text = episode.prompt
-
-    if state.processor and has_multimodal:
-        processor_kwargs = build_processor_kwargs(episode.multimodal_inputs)
-        processor_output = state.processor(text=prompt_text, **processor_kwargs)
-        raw_ids = processor_output["input_ids"][0]
-        prompt_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
+    if isinstance(episode.prompt, list) and state.processor:
+        # VLM processor + conversation
+        prompt_text = state.processor.apply_chat_template(
+            episode.prompt,
+            tools=episode.tools,
+            tokenize=False,
+            add_generation_prompt=True,
+            **state.chat_template_kwargs,
+        )
+        mm = {k: v for k, v in (episode.multimodal_inputs or {}).items() if v}
+        processor_output = state.processor(text=prompt_text, **mm, return_tensors="pt")
+        prompt_ids = processor_output["input_ids"][0].tolist()
         episode.multimodal_train_inputs = {
             k: v
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
-    elif prompt_ids is None:
-        prompt_ids = state.tokenizer.encode(prompt_text, add_special_tokens=False)
+    elif isinstance(episode.prompt, list):
+        # LLM tokenizer + conversation
+        prompt_ids = state.tokenizer.apply_chat_template(
+            episode.prompt,
+            tools=episode.tools,
+            tokenize=True,
+            add_generation_prompt=True,
+            **state.chat_template_kwargs,
+        )
+    else:
+        # Raw string prompt
+        prompt_ids = state.tokenizer.encode(episode.prompt, add_special_tokens=False)
 
-    episode.tokens = list(prompt_ids)
+    episode.tokens = prompt_ids
     edge_len = max(len(episode.tokens) - 1, 0)
     episode.loss_mask = [0] * edge_len
     episode.rollout_log_probs = [0.0] * edge_len

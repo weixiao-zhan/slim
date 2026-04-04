@@ -1,8 +1,9 @@
 import logging
 
+import torch
+
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.utils.mask_utils import MultiTurnLossMaskGenerator
-from slime.utils.processing_utils import build_processor_kwargs
 from slime.utils.processing_utils import load_processor, load_tokenizer
 from slime.utils.types import Episode
 
@@ -48,13 +49,20 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
     for i, example in enumerate(examples):
         ep = Episode.from_example(example)
 
-        if isinstance(ep.prompt, list) and ep.has_multimodal and PROCESSOR is not None:
+        if isinstance(ep.prompt, list) and PROCESSOR is not None:
+            # VLM processor + conversation
             prompt_text = PROCESSOR.apply_chat_template(ep.prompt, tokenize=False, tools=ep.tools)
-            processor_output = PROCESSOR(text=prompt_text, **build_processor_kwargs(ep.multimodal_inputs))
-            raw_ids = processor_output["input_ids"][0]
-            token_ids = raw_ids.tolist() if hasattr(raw_ids, "tolist") else list(raw_ids)
+            mm = {k: v for k, v in (ep.multimodal_inputs or {}).items() if v}
+            processor_output = PROCESSOR(text=prompt_text, **mm, return_tensors="pt")
+            token_ids = processor_output["input_ids"][0].tolist()
+            ep.multimodal_train_inputs = {
+                k: v
+                for k, v in processor_output.items()
+                if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
+            } or None
             _, loss_mask = MASK_GENERATOR.get_loss_mask_with_multimodal_alignment(ep.prompt, token_ids, tools=ep.tools)
         else:
+            # LLM tokenizer + conversation / raw string
             token_ids, loss_mask = MASK_GENERATOR.get_loss_mask(ep.prompt, tools=ep.tools)
 
         ep.tokens = token_ids
