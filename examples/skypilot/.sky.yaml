@@ -5,4 +5,5 @@ aws:
   remote_identity: SERVICE_ACCOUNT
   prioritize_reservations: true
   specific_reservations:
-    - "cr-"
+    - "cr-0b499ab7fbcdab23c"
+    - "cr-0de49c0884c3f7351"
