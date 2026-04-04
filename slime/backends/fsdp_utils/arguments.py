@@ -37,6 +37,7 @@ class FSDPArgs:
     fp16: bool = False
 
     # FSDP configuration
+    fsdp_strategy: str = "hybrid"  # "hybrid" (shard intra-node, replicate inter-node) or "full" (shard all GPUs)
     fsdp_state_dict_cpu_offload: bool = True  # If True, offload full state dict to CPU during collection.
     fsdp_cpu_offload: bool = (
         False  # If True, offload parameters, gradients, and optimizer states to CPU (optimizer runs on CPU)
@@ -60,7 +61,7 @@ class FSDPArgs:
 
 
 def _parse_fsdp_cli(extra_args_provider=None, ignore_unknown_args=False):
-    parser = argparse.ArgumentParser("FSDP SFT Training (slime)")
+    parser = argparse.ArgumentParser("FSDP Training (slime)", allow_abbrev=False)
     parser.add_argument("--config", type=str, default=None, help="YAML config path")
     for f in dataclasses.fields(FSDPArgs):
         if f.name == "config":
@@ -98,4 +99,7 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
                 setattr(args, k, v)
     args.rank = 0  # Primary process rank for wandb initialization
     args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+    # Hybrid sharding fall back to full shard on single node.
+    if args.fsdp_strategy == "hybrid" and args.actor_num_nodes <= 1:
+        args.fsdp_strategy = "full"
     return args

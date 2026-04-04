@@ -124,7 +124,11 @@ def load(actor: Any) -> dict[str, Any] | None:
     state_dict = {"model_state": model_state}
 
     try:
-        dcp.load(state_dict=state_dict, checkpoint_id=str(model_dir))
+        dcp.load(
+            state_dict=state_dict,
+            checkpoint_id=str(model_dir),
+            planner=DefaultLoadPlanner(allow_partial_load=True),
+        )
         logger.info(f"[FSDP] Loaded model from {model_dir}")
     except Exception as e:
         logger.error(f"[FSDP] Failed to load model from {model_dir}: {e}")
