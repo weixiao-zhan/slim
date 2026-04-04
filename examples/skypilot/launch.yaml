@@ -1,9 +1,9 @@
-# GSPO on Geo3K VLM — 2 nodes, colocated rollout, HSDP (hybrid sharding)
+# GRPO on mixed math+VLM — 2 nodes, colocated rollout, HSDP (hybrid sharding)
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
 #   sky launch launch.yaml --env-file ../../.env -c miniSlime
 #   sky exec miniSlime launch.yaml --env-file ../../.env
 
-name: gspo-geo3k
+name: grpo-mixed-math-vlm
 
 workdir: ../..
 
@@ -37,8 +37,8 @@ run: | # shell
   if [ ! -d "/home/ubuntu/models/${MODEL_NAME}" ]; then
     uv run hf download "Qwen/${MODEL_NAME}" --local-dir "/home/ubuntu/models/${MODEL_NAME}"
   fi
-  if [ ! -f "/home/ubuntu/datasets/geo3k/train.parquet" ]; then
-    uv run python tests/prepare_geo3k_processor_ready.py
+  if [ ! -f "/home/ubuntu/datasets/mixed_math_vlm/train.parquet" ]; then
+    uv run python tests/prepare_mixed_math_vlm.py
   fi
 
   # =========================================================================
@@ -113,8 +113,8 @@ run: | # shell
   # Head node: submit training job
   # =========================================================================
   MODEL_DIR="/home/ubuntu/models/${MODEL_NAME}"
-  DATASET_DIR="/home/ubuntu/datasets/geo3k"
-  OUTPUT_DIR="/home/ubuntu/outputs/grpo-geo3k-${MODEL_NAME,,}"
+  DATASET_DIR="/home/ubuntu/datasets/mixed_math_vlm"
+  OUTPUT_DIR="/home/ubuntu/outputs/grpo-mixed-math-vlm-${MODEL_NAME,,}"
 
   # Wandb args (only if WANDB_API_KEY is set)
   WANDB_ARGS=()
@@ -122,7 +122,7 @@ run: | # shell
     WANDB_ARGS=(
       --use-wandb
       --wandb-project minislime
-      --wandb-group "gspo-geo3k-${MODEL_NAME,,}"
+      --wandb-group "grpo-mixed-math-vlm-${MODEL_NAME,,}"
       --wandb-key "${WANDB_API_KEY}"
       --disable-wandb-random-suffix
     )
@@ -153,8 +153,7 @@ run: | # shell
     --over-sampling-batch-size 96 \
     \
     --eval-interval 20 \
-    --skip-eval-before-train \
-    --eval-prompt-data geo3k ${DATASET_DIR}/test.parquet \
+    --eval-prompt-data math ${DATASET_DIR}/test_math.parquet geo3k ${DATASET_DIR}/test_geo3k.parquet \
     --n-samples-per-eval-prompt 1 \
     --eval-max-context-len 8192 \
     --save ${OUTPUT_DIR} \
@@ -174,10 +173,10 @@ run: | # shell
     --gradient-checkpointing \
     --update-weight-buffer-size 536870912 \
     --use-dynamic-batch-size \
-    --max-tokens-per-gpu 16384 \
+    --max-tokens-per-gpu 8192 \
     --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' \
     \
-    --advantage-estimator gspo \
+    --advantage-estimator grpo \
     --disable-grpo-std-normalization \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \

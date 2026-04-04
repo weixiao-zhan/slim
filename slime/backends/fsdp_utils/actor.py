@@ -312,7 +312,7 @@ class FSDPTrainRayActor(TrainRayActor):
             lora_alpha=32,
             use_dora=False,
             target_modules="all-linear",
-            exclude_modules=["vision_tower", "multi_modal_projector"],
+            exclude_modules=["visual", "vision_tower", "vision_model", "audio", "speech"],
             lora_dropout=0.0,
             bias="none",
             task_type="CAUSAL_LM",
@@ -1319,12 +1319,21 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
     assert layer_cls_to_wrap and next(iter(layer_cls_to_wrap)) is not None
     model_config = getattr(base_hf, "config", model.config)
 
-    modules = [
-        module
-        for name, module in model.named_modules()
-        if module.__class__.__name__ in layer_cls_to_wrap
-        or (isinstance(module, torch.nn.Embedding) and not model_config.tie_word_embeddings)
-    ]
+    # Vision/audio encoder modules are replicated and frozen for mm - text mixed dataset
+    _REPLICATED_PATH_KEYWORDS = ("visual", "vision_tower", "vision_model", "audio", "speech")
+
+    modules = []
+    ignored_params = set()
+    for name, m in model.named_modules():
+        replicated = any(kw in name for kw in _REPLICATED_PATH_KEYWORDS)
+        if replicated:
+            for p in m.parameters():
+                p.requires_grad_(False)
+                ignored_params.add(p)
+        elif type(m).__name__ in layer_cls_to_wrap:
+            modules.append(m)
+        elif isinstance(m, torch.nn.Embedding) and not model_config.tie_word_embeddings:
+            modules.append(m)
 
     # Determine precision policy based on args
     param_dtype = torch.bfloat16  # Default to bf16 as before

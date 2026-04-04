@@ -17,22 +17,6 @@ def load_tokenizer(name_or_path: str, **kwargs):
     return AutoTokenizer.from_pretrained(name_or_path, **kwargs)
 
 
-def build_processor_kwargs(multimodal_inputs: dict | None = None) -> dict:
-
-    modality_forced = {"return_tensors": "pt"}
-
-    result = dict(multimodal_inputs) if multimodal_inputs else {}
-
-    # return_tensors=None for text (input_ids as lists), "pt" for modality-specific outputs
-    result["text_kwargs"] = {**result.get("text_kwargs", {}), "return_tensors": None}
-    for key in ("audio_kwargs", "images_kwargs", "videos_kwargs"):
-        if key in result:
-            result[key] = {**result[key], **modality_forced}
-        else:
-            result[key] = modality_forced.copy()
-
-    return result
-
 
 def load_processor(name_or_path: str, **kwargs):
     try:
