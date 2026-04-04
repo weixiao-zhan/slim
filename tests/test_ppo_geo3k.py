@@ -15,35 +15,45 @@ SAVE_DIR = os.environ.get("SAVE_DIR", "/home/ubuntu/outputs/ppo-geo3k-qwen3vl2b"
 
 
 def execute():
-    ckpt_args = f"--hf-checkpoint {MODEL_DIR} "
-
-    rollout_args = (
-        f"--prompt-data {DATASET_DIR}/train.parquet "
-        "--rm-type math "
+    orch_args = (
         "--num-rollout 200 "
         "--rollout-batch-size 32 "
         "--n-samples-per-prompt 16 "
         "--rollout-max-context-len 2048 "
         "--rollout-temperature 1 "
         "--num-steps-per-rollout 1 "
-        "--rollout-shuffle "
     )
-
-    eval_args = (
-        "--eval-interval 20 "
+    data_args = (
+        f"--prompt-data {DATASET_DIR}/train.parquet "
+        "--rm-type math "
+        "--rollout-shuffle "
+        "--log-passrate "
         # "--skip-eval-before-train "
+        "--eval-interval 20 "
         f"--eval-prompt-data geo3k {DATASET_DIR}/test.parquet "
         "--n-samples-per-eval-prompt 1 "
         "--eval-max-context-len 2048 "
     )
-
-    fsdp_args = (
-        "--update-weight-buffer-size 536870912 "
-        "--gradient-checkpointing "
+    rollout_args = (
+        "--rollout-num-gpus-per-engine 1 "
+        "--sglang-mem-fraction-static 0.6 "
+        "--sglang-attention-backend fa3 "
+        "--sglang-mm-enable-dp-encoder "
+        "--use-fault-tolerance "
+    )
+    actor_args = (
+        "--actor-num-nodes 1 "
+        "--actor-num-gpus-per-node 4 "
+        "--critic-num-nodes 1 "
+        "--critic-num-gpus-per-node 4 "
         "--attn-implementation flash_attention_3 "
+        "--gradient-checkpointing "
+        "--update-weight-buffer-size 536870912 "
+        "--colocate "
+        "--use-dynamic-batch-size "
+        "--max-tokens-per-gpu 8192 "
         """--train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' """
     )
-
     loss_args = (
         "--advantage-estimator ppo "
         "--gamma 1.0 "
@@ -54,7 +64,6 @@ def execute():
         "--eps-clip 0.2 "
         "--eps-clip-high 0.28 "
     )
-
     optimizer_args = (
         "--optimizer adam "
         "--lr 1e-5 "
@@ -66,20 +75,11 @@ def execute():
         "--adam-beta1 0.9 "
         "--adam-beta2 0.98 "
     )
-
-    sglang_args = (
-        "--rollout-num-gpus-per-engine 1 "
-        "--sglang-mem-fraction-static 0.6 "
-        "--sglang-attention-backend fa3 "
-        "--sglang-mm-enable-dp-encoder "
-        "--use-fault-tolerance "
-    )
-
-    save_args = (
+    ckpt_args = (
+        f"--hf-checkpoint {MODEL_DIR} "
         f"--save {SAVE_DIR} "
         "--save-interval 20 "
     )
-
     wandb_args = (
         "--use-wandb "
         "--wandb-project minislime "
@@ -88,29 +88,15 @@ def execute():
         "--disable-wandb-random-suffix "
     )
 
-    misc_args = (
-        "--actor-num-nodes 1 "
-        "--actor-num-gpus-per-node 4 "
-        "--critic-num-nodes 1 "
-        "--critic-num-gpus-per-node 4 "
-        "--colocate "
-        "--use-dynamic-batch-size "
-        "--max-tokens-per-gpu 8192 "
-        "--log-passrate "
-        ""
-    )
-
     train_args = (
-        f"{ckpt_args} "
+        f"{orch_args} "
+        f"{data_args} "
         f"{rollout_args} "
-        f"{optimizer_args} "
+        f"{actor_args} "
         f"{loss_args} "
-        f"{fsdp_args} "
-        f"{save_args} "
-        f"{eval_args} "
-        f"{sglang_args} "
+        f"{optimizer_args} "
+        f"{ckpt_args} "
         f"{wandb_args} "
-        f"{misc_args} "
     )
 
     U.execute_train(
