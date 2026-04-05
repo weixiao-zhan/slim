@@ -2,7 +2,7 @@
 
 ## Aligning Precision
 
-During the development of minislime, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
+During the development of slim, it is often necessary to check if the model's precision is correct. This can be verified in the following ways:
 
 1.  **First Training Step**
     1.  Check if the generated `rollout` is coherent. If not, there are several possible reasons:
@@ -24,20 +24,20 @@ During the development of minislime, it is often necessary to check if the model
 
 ## Separate Debugging for Training and Inference
 
-minislime supports debugging the training and inference parts separately, which allows for the following:
+slim supports debugging the training and inference parts separately, which allows for the following:
 
 * When tuning/debugging the inference part, you can start the task with only a few GPUs.
 * When tuning/debugging the training part, you can ensure the model input is fixed, removing the randomness of rollouts.
 
-Specifically, minislime currently provides the following parameters for separate debugging:
+Specifically, slim currently provides the following parameters for separate debugging:
 
 1.  `--debug-rollout-only`
 
-    When enabled, minislime will not load the training backend and will only initialize SGLang. You can use this method to debug the inference part.
+    When enabled, slim will not load the training backend and will only initialize SGLang. You can use this method to debug the inference part.
 
 2.  `--debug-train-only`
 
-    When enabled, minislime will not load SGLang and will only initialize the FSDP training backend. You can use this method to debug the training part.
+    When enabled, slim will not load SGLang and will only initialize the FSDP training backend. You can use this method to debug the training part.
 
 3.  `--save-debug-rollout-data /your/saved/debug/data_{rollout_id}.pt`
 
@@ -49,7 +49,7 @@ Specifically, minislime currently provides the following parameters for separate
 
 ## INT4 / Compressed-Tensors Quantization Checkpoint Issues
 
-When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (FSDP → SGLang), minislime also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
+When using INT4-quantized models (e.g., `compressed-tensors` with `W4A16`), the checkpoint's `config.json` contains a `quantization_config.ignore` list that specifies which parameters should **not** be quantized. During online weight updates (FSDP → SGLang), slim also reads this ignore list to decide which parameters to INT4-quantize. An incorrect ignore list can cause silent errors:
 
 1. **MoE router weights (`mlp.gate.weight`) become all zeros**
 

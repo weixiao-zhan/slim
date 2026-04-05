@@ -17,7 +17,7 @@ EOF
 ### GSM8K (math tests)
 
 ```bash
-uv run huggingface-cli download Qwen/Qwen3-1.7B-Base \
+huggingface-cli download Qwen/Qwen3-1.7B-Base \
     --local-dir /home/ubuntu/models/Qwen3-1.7B-Base
 # Ensure /home/ubuntu/datasets/gsm8k/{train,test}.parquet exist
 ```
@@ -25,50 +25,31 @@ uv run huggingface-cli download Qwen/Qwen3-1.7B-Base \
 ### Geo3K (VLM tests)
 
 ```bash
-uv run huggingface-cli download Qwen/Qwen3-VL-2B-Instruct \
+huggingface-cli download Qwen/Qwen3-VL-2B-Instruct \
     --local-dir /home/ubuntu/models/Qwen3-VL-2B-Instruct
-uv run python tests/prepare_geo3k_processor_ready.py
+python tests/prepare_geo3k_processor_ready.py
 ```
-
-Geo3K canonical schema:
-- `prompt`: chat-format messages with `{"type": "image"}` placeholders
-- `label`: ground-truth answer
-- `images`: ordered image list aligned with the prompt placeholders
-
-Dataset schema note:
-- Test datasets should stick to the finite supported top-level columns: `prompt`, `label`, and optional `images`, `videos`, `audio`, `tools`, `metadata`
-- Put any extra task-specific fields under `metadata` instead of adding new top-level columns
 
 ## Running
 
 ```bash
-# Start Ray
-uv run ray stop --force; uv run ray start --head --num-gpus 8 --disable-usage-stats
-
-# Run a test (pick one)
-uv run python tests/test_ppo_math.py
-uv run python tests/test_gspo_math.py
-uv run python tests/test_ppo_geo3k.py
-uv run python tests/test_gspo_geo3k.py
-uv run python tests/test_lora_gspo_geo3k.py
-
-# Follow logs
-uv run ray job logs --follow $(uv run ray job list 2>&1 | \
-    grep -oP "submission_id='[^']*'" | head -1 | grep -oP "'[^']*'" | tr -d "'")
-
-# Stop Ray when done
-uv run ray stop --force
+# Run a test (pick one) — each script handles ray start/stop
+bash tests/test_ppo_math.sh
+bash tests/test_gspo_math.sh
+bash tests/test_ppo_geo3k.sh
+bash tests/test_gspo_geo3k.sh
+bash tests/test_lora_gspo_geo3k.sh
 ```
 
 ## Available Tests
 
 | Test | Algorithm | Task | Model | Notes |
 |------|-----------|------|-------|-------|
-| `test_grpo_math.py` | GRPO | GSM8K | Qwen3-1.7B-Base | 8 actor GPUs colocated |
-| `test_ppo_math.py` | PPO | GSM8K | Qwen3-1.7B-Base | 4 actor + 4 critic GPUs |
-| `test_grpo_geo3k.py` | GRPO | Geo3K | Qwen3-VL-2B-Instruct | 8 actor GPUs, VLM |
-| `test_ppo_geo3k.py` | PPO | Geo3K | Qwen3-VL-2B-Instruct | 4 actor + 4 critic, VLM |
-| `test_lora_gspo_geo3k.py` | GSPO + LoRA | Geo3K | Qwen3-VL-2B-Instruct | LoRA r=128, PEFT required |
+| `test_gspo_math.sh` | GSPO | GSM8K | Qwen3-1.7B-Base | 8 actor GPUs colocated |
+| `test_ppo_math.sh` | PPO | GSM8K | Qwen3-1.7B-Base | 4 actor + 4 critic GPUs |
+| `test_gspo_geo3k.sh` | GSPO | Geo3K | Qwen3-VL-2B-Instruct | 8 actor GPUs, VLM |
+| `test_ppo_geo3k.sh` | PPO | Geo3K | Qwen3-VL-2B-Instruct | 4 actor + 4 critic, VLM |
+| `test_lora_gspo_geo3k.sh` | GSPO + LoRA | Geo3K | Qwen3-VL-2B-Instruct | LoRA r=128, PEFT |
 
 ## Environment Variables
 
@@ -76,5 +57,8 @@ uv run ray stop --force
 |----------|---------|-------------|
 | `VLM_MODEL_DIR` | `/home/ubuntu/models/Qwen3-VL-2B-Instruct` | VLM model path (geo3k tests) |
 | `VLM_DATASET_DIR` | `/home/ubuntu/datasets/geo3k` | Geo3K dataset path |
-| `SAVE_DIR` | `/home/ubuntu/checkpoints/lora-gspo-geo3k-qwen3vl2b` | Checkpoint save path (lora test) |
+| `LLM_MODEL_DIR` | `/home/ubuntu/models/Qwen3-1.7B-Base` | LLM model path (math tests) |
+| `LLM_DATASET_DIR` | `/home/ubuntu/datasets` | LLM dataset path |
+| `SAVE_DIR` | `/home/ubuntu/outputs/<test>` | Checkpoint save path |
 | `WANDB_API_KEY` | (from `.env`) | Weights & Biases API key |
+| `NUM_GPUS` | `8` | Number of GPUs for ray |

@@ -1,12 +1,12 @@
 # Training Backend
 
-minislime uses PyTorch FSDP2 as its training backend. FSDP loads HuggingFace weights directly via `from_pretrained()` (using `AutoModelForCausalLM` for text models and `AutoModelForImageTextToText` for vision models) -- no checkpoint conversion needed.
+slim uses PyTorch FSDP2 as its training backend. FSDP loads HuggingFace weights directly via `from_pretrained()` (using `AutoModelForCausalLM` for text models and `AutoModelForImageTextToText` for vision models) -- no checkpoint conversion needed.
 
 ## Installation
 
 ```bash
-git clone <your-minislime-repo> minislime
-cd minislime
+git clone <your-slim-repo> slim
+cd slim
 pip install -e .       # or: uv sync
 ```
 
@@ -36,9 +36,9 @@ Share GPUs between training and inference with CPU offloading:
 ```bash
 --hf-checkpoint /root/Model          # HF checkpoint for SGLang + tokenizer
 --ref-load /root/Model               # reference model (for KL)
---load /root/Model_minislime/        # actor checkpoint (resume training)
+--load /root/Model_slim/        # actor checkpoint (resume training)
 --ckpt-step 20                       # optional: resume a specific iter_0000020 checkpoint
---save /root/Model_minislime/        # save path
+--save /root/Model_slim/        # save path
 --save-interval 20                   # save every N steps
 ```
 
@@ -53,7 +53,7 @@ python tools/convert_fsdp_to_hf.py \
 
 ## Data Format
 
-minislime supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.jsonl@[start:end]`.
+slim supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.jsonl@[start:end]`.
 
 Each row should use the supported finite column set:
 - Required: `prompt`

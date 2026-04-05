@@ -1,12 +1,12 @@
 # SGLang Config: Advanced Engine Deployment
 
-`--sglang-config` is a YAML-based configuration system for fine-grained control over SGLang engine deployment in minislime. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone SGLang launcher** for complex inference topologies.
+`--sglang-config` is a YAML-based configuration system for fine-grained control over SGLang engine deployment in slim. It enables **multi-model serving**, **Prefill-Decode (PD) disaggregation**, **heterogeneous server groups**, and can even serve as a **standalone SGLang launcher** for complex inference topologies.
 
 ---
 
 ## Architecture Overview
 
-In the default setup (without `--sglang-config`), minislime deploys a single model behind a single router with uniform server groups:
+In the default setup (without `--sglang-config`), slim deploys a single model behind a single router with uniform server groups:
 
 ![architecture overview](../images/arch.png)
 
@@ -170,8 +170,8 @@ python train.py \
 **Accessing models in custom rollout functions:**
 
 ```python
-from slime.rollout.sglang_rollout import get_model_url
-from slime.utils.http_utils import post
+from slim.rollout.sglang_rollout import get_model_url
+from slim.utils.http_utils import post
 
 async def my_generate(args, sample, sampling_params):
     # Route to the actor model (default)
@@ -257,25 +257,25 @@ Overrides take **highest priority**, overriding both the base `--sglang-*` CLI a
 
 ### 7. Standalone SGLang Launcher
 
-While `--sglang-config` is designed for minislime's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring minislime to focus solely on serving.
+While `--sglang-config` is designed for slim's training pipeline, it also works as a powerful launcher for pure inference scenarios using the `--rollout-external` pattern or by configuring slim to focus solely on serving.
 
 **Using external engines with a pre-launched topology:**
 
-For complex production deployments, you may want to pre-launch SGLang engines independently and connect them to minislime:
+For complex production deployments, you may want to pre-launch SGLang engines independently and connect them to slim:
 
 ```bash
 # Step 1: Launch SGLang engines externally
 python -m sglang.launch_server --model-path /path/to/model --port 10090 ...
 python -m sglang.launch_server --model-path /path/to/model --port 10091 ...
 
-# Step 2: Connect minislime to external engines
+# Step 2: Connect slim to external engines
 python train.py \
   --rollout-external \
   --rollout-external-engine-addrs host1:10090 host2:10091 \
   ...
 ```
 
-> **Note:** `--sglang-config` and `--rollout-external` are mutually exclusive. Use `--sglang-config` when you want minislime to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
+> **Note:** `--sglang-config` and `--rollout-external` are mutually exclusive. Use `--sglang-config` when you want slim to manage the full engine lifecycle; use `--rollout-external` when engines are pre-deployed.
 
 ---
 
@@ -297,7 +297,7 @@ You can configure the routing policy:
 
 For multi-turn dialogues and agentic workloads, session affinity ensures that all requests belonging to the same conversation are routed to the same backend worker. This significantly improves prefix cache hit rates because the worker already has the conversation history cached.
 
-minislime automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hashing`, this ID is passed as the `X-SMG-Routing-Key` header, and SGLang Model Gateway uses it to deterministically route all turns of the same session to the same worker.
+slim automatically assigns each sample a unique `session_id` (stored in `sample.session_id`). When the router policy is `consistent_hashing`, this ID is passed as the `X-SMG-Routing-Key` header, and SGLang Model Gateway uses it to deterministically route all turns of the same session to the same worker.
 
 ```bash
 --router-policy consistent_hashing
@@ -306,7 +306,7 @@ minislime automatically assigns each sample a unique `session_id` (stored in `sa
 **How it works:**
 
 1. Each sample is assigned a unique `session_id` via UUID
-2. On each request, minislime passes `X-SMG-Routing-Key: <session_id>` in the HTTP header
+2. On each request, slim passes `X-SMG-Routing-Key: <session_id>` in the HTTP header
 3. SGLang Model Gateway's consistent hashing policy maps this key to a specific worker
 4. Subsequent turns reuse the same `session_id`, ensuring they hit the same worker
 
@@ -314,7 +314,7 @@ minislime automatically assigns each sample a unique `session_id` (stored in `sa
 
 ## Resolution Rules
 
-When the config is loaded, minislime applies the following resolution cascade:
+When the config is loaded, slim applies the following resolution cascade:
 
 1. **GPU per engine fallback:** Group `num_gpus_per_engine` → Model `num_gpus_per_engine` → `args.rollout_num_gpus_per_engine`
 2. **Model path fallback:** Group `overrides.model_path` → Model `model_path` → `args.hf_checkpoint`
@@ -392,8 +392,8 @@ python train.py \
 **Custom rollout function (`my_agent/rollout.py`):**
 
 ```python
-from slime.rollout.sglang_rollout import get_model_url
-from slime.utils.http_utils import post
+from slim.rollout.sglang_rollout import get_model_url
+from slim.utils.http_utils import post
 
 async def generate_with_models(args, sample, sampling_params):
     """Generate using actor, score with reward model, compare with reference."""
@@ -442,11 +442,11 @@ No. All server groups within a model must share the same `model_path`. This is v
 
 ### Q: How do I access the router address for a specific model at runtime?
 
-Use `get_model_url(args, "model_name", "/endpoint")` from `slime.rollout.sglang_rollout`. It reads from `args.sglang_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
+Use `get_model_url(args, "model_name", "/endpoint")` from `slim.rollout.sglang_rollout`. It reads from `args.sglang_model_routers`, which is a dict `{ model_name: (ip, port) }` populated automatically.
 
 ### Q: Can I use `--sglang-config` without training (inference only)?
 
-While `--sglang-config` is designed for minislime's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone SGLang serving, consider using SGLang's native `launch_server` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
+While `--sglang-config` is designed for slim's training loop, you can effectively use it for inference-only scenarios by configuring a rollout-only run. For fully standalone SGLang serving, consider using SGLang's native `launch_server` directly or the `--rollout-external` mode for connecting to pre-deployed engines.
 
 ### Q: What is the relationship between `--sglang-config` and `--prefill-num-servers`?
 

@@ -1,6 +1,6 @@
 # Rollout (Inference)
 
-Rollout is the data generation phase of the RL loop. minislime uses SGLang as its inference backend, orchestrated by Ray.
+Rollout is the data generation phase of the RL loop. slim uses SGLang as its inference backend, orchestrated by Ray.
 
 ## SGLang Setup
 
@@ -9,13 +9,13 @@ Loading SGLang requires only one parameter:
 - `--hf-checkpoint`: The HuggingFace checkpoint used to initialize SGLang.
 
 Notes:
-- Before the first training step, minislime syncs parameters from the FSDP backend to SGLang. So `--hf-checkpoint` doesn't need the latest training parameters.
+- Before the first training step, slim syncs parameters from the FSDP backend to SGLang. So `--hf-checkpoint` doesn't need the latest training parameters.
 - Override the max context length with `--sglang-context-length`.
 - During colocated mode, reduce `--sglang-mem-fraction-static` (e.g., 0.8) to leave memory for training.
 
 ### Parameter Pass-Through
 
-minislime forwards SGLang parameters with the `--sglang-` prefix:
+slim forwards SGLang parameters with the `--sglang-` prefix:
 
 ```bash
 --sglang-mem-fraction-static 0.8    # SGLang's --mem-fraction-static
@@ -24,13 +24,13 @@ minislime forwards SGLang parameters with the `--sglang-` prefix:
 --sglang-enable-dp-attention        # SGLang's --enable-dp-attention
 ```
 
-Resource scheduling parameters are set by minislime directly:
+Resource scheduling parameters are set by slim directly:
 - `--tp-size` is set via `--rollout-num-gpus-per-engine`
 - `--model-path` is set via `--hf-checkpoint`
 
 ### Router
 
-minislime uses [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) to load-balance across SGLang servers. Configure with `--sglang-router-ip` and `--sglang-router-port`, or let minislime start one automatically.
+slim uses [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) to load-balance across SGLang servers. Configure with `--sglang-router-ip` and `--sglang-router-port`, or let slim start one automatically.
 
 Pass sgl-router parameters with a `router` prefix: e.g., `--router-balance-abs-threshold 0`.
 
@@ -78,7 +78,7 @@ Enable DAPO-style dynamic sampling:
 --rollout-batch-size 32
 --n-samples-per-prompt 8
 --over-sampling-batch-size 64
---dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+--dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 ```
 
 Samples 64 prompts, filters groups with zero reward variance, and re-samples when too many are discarded.
@@ -98,7 +98,6 @@ EVAL_ARGS=(
 ## Further Reading
 
 - [SGLang Config](sglang-config.md) -- Multi-model serving, PD disaggregation, YAML deployment
-- [Slime Router](slime-router.md) -- Training-oriented HTTP router with radix-tree caching
 - [Speculative Decoding](speculative-decoding.md) -- MTP-based draft model acceleration
 - [On-Policy Distillation](on-policy-distillation.md) -- Teacher-student distillation via SGLang
 - [Fault Tolerance](fault-tolerance.md) -- Heartbeat-based rollout recovery

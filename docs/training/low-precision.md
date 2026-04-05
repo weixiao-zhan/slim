@@ -15,7 +15,7 @@ python tools/convert_hf_to_fp8.py \
     --max-workers 4
 ```
 
-Please ensure that the converted checkpoint points to a directory where the `config.json` contains the correct `quantization_config` so that minislime can automatically use FP8 quantization during weight updates.
+Please ensure that the converted checkpoint points to a directory where the `config.json` contains the correct `quantization_config` so that slim can automatically use FP8 quantization during weight updates.
 
 ## INT4 QAT Training
 
@@ -24,7 +24,7 @@ This guide provides examples for INT4 STE (Straight-Through Estimator) training 
 ### Quick Start
 
 1. Convert HuggingFace Weights to INT4
-Use the `tools/convert_hf_to_int4_direct.py` script to convert BF16 weights to INT4 format. Ensure that the `--hf-checkpoint` parameter points to a directory where `config.json` contains the correct `quantization_config`. minislime will automatically utilize INT4 quantization during weight updates.
+Use the `tools/convert_hf_to_int4_direct.py` script to convert BF16 weights to INT4 format. Ensure that the `--hf-checkpoint` parameter points to a directory where `config.json` contains the correct `quantization_config`. slim will automatically utilize INT4 quantization during weight updates.
 
 ```bash
 python tools/convert_hf_to_int4_direct.py \

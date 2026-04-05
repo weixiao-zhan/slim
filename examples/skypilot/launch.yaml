@@ -1,7 +1,7 @@
 # GRPO on mixed math+VLM — 2 nodes, colocated rollout, HSDP (hybrid sharding)
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
-#   sky launch launch.yaml --env-file ../../.env -c miniSlime
-#   sky exec miniSlime launch.yaml --env-file ../../.env
+#   sky launch launch.yaml --env-file ../../.env -c slim
+#   sky exec slim launch.yaml --env-file ../../.env
 
 name: grpo-mixed-math-vlm
 
@@ -63,7 +63,7 @@ run: | # shell
   lsof -ti :${RAY_PORT} | xargs -r kill -9 2>/dev/null || true
   pkill -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
   pkill -9 sglang 2>/dev/null || true
-  pkill -9 slime 2>/dev/null || true
+  pkill -9 slim 2>/dev/null || true
   sleep 10
 
   # Worker nodes: connect to Ray head and block
@@ -121,7 +121,7 @@ run: | # shell
   if [ -n "${WANDB_API_KEY}" ]; then
     WANDB_ARGS=(
       --use-wandb
-      --wandb-project minislime
+      --wandb-project slim
       --wandb-group "grpo-mixed-math-vlm-${MODEL_NAME,,}"
       --wandb-key "${WANDB_API_KEY}"
       --disable-wandb-random-suffix
@@ -145,7 +145,7 @@ run: | # shell
     --rollout-max-context-len 8192 \
     --rollout-temperature 1 \
     --num-steps-per-rollout 1 \
-    --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
     --over-sampling-batch-size 96 \
     \
     --prompt-data ${DATASET_DIR}/train.parquet \
