@@ -1,6 +1,6 @@
 # CI (Continuous Integration)
 
-minislime uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding a specific label to a PR will run the corresponding test suite.
+slim uses GitHub Actions for CI. Tests are triggered by **PR labels** — adding a specific label to a PR will run the corresponding test suite.
 
 ## How It Works
 
@@ -8,12 +8,12 @@ Note: The workflow files (`.github/workflows/pr-test.yml`, `pr-test.yml.j2`, `ge
 
 The workflow is defined in `.github/workflows/pr-test.yml` (auto-generated from `pr-test.yml.j2`). Each CI job:
 
-1. Runs on a self-hosted GPU runner inside a Docker container (`minislimerl/minislime:latest`).
-2. Installs minislime with `pip install -e . --no-deps`.
+1. Runs on a self-hosted GPU runner inside a Docker container (`slimrl/slim:latest`).
+2. Installs slim with `pip install -e . --no-deps`.
 3. Acquires the required GPUs via `tests/ci/gpu_lock_exec.py --count <num_gpus>`.
-4. Executes the test file: `python <test_path>.py` or `python tests/<test_file>.py`, depending on whether the test lives under `tests/` or a subdirectory such as `tests/plugin_contracts/`.
+4. Executes the test script: `bash tests/test_<name>.sh`.
 
-Each test file follows a standard pattern: a `prepare()` function downloads models/datasets, and an `execute()` function builds CLI arguments and calls `U.execute_train(...)`.
+Each test is a self-contained shell script that sources `tests/common.sh` for shared helpers (ray start/stop, cleanup, wandb args), then calls `run_train` with the training arguments.
 
 ## CI Labels
 
@@ -25,65 +25,37 @@ Add a label to your PR to trigger the corresponding test suite:
 | `run-ci-fsdp` | `e2e-test-fsdp` | FSDP backend tests (true on-policy, VL, etc.). |
 | `run-ci-precision` | `e2e-test-precision` | Numerical precision validation (parallel check, etc.). |
 | `run-ci-ckpt` | `e2e-test-ckpt` | Checkpoint save/load correctness (sync and async-save). |
-| `run-ci-image` | `e2e-test-image` | Full test suite run on `minislimerl/minislime-test:latest` image (for image validation). |
+| `run-ci-image` | `e2e-test-image` | Full test suite run on `slimrl/slim-test:latest` image (for image validation). |
 | `run-ci-changed` | `e2e-test-changed` | **Dynamically** detects new/modified test files in the PR and runs only those. |
 
 All labels also run when triggered via `workflow_dispatch` (manual run from the Actions tab).
 
-## Key Labels Explained
-
-### `run-ci-changed` — Run Only New or Modified Tests
-
-This is the most useful label for development. When you add a new test file or modify an existing one, just add `run-ci-changed` to your PR and CI will:
-
-1. **Detect** which `tests/test_*.py` or `tests/plugin_contracts/test_*.py` files are added or modified relative to `origin/main` (via `git diff --diff-filter=AM`).
-2. **Extract** the `NUM_GPUS` value from each detected test file automatically.
-3. **Build** a dynamic GitHub Actions matrix and run each test in parallel.
-
-This means you don't need to manually register your new test in the workflow — just make sure your test file has a top-level `NUM_GPUS = <N>` constant and `run-ci-changed` will pick it up.
-
-**Example**: If your PR adds `tests/test_qwen3_8B_opd_sglang.py` with `NUM_GPUS = 8`, adding the `run-ci-changed` label will automatically run that test on 8 GPUs.
-
-### `run-ci-image` — Full Suite on Test Image
-
-This runs **all** registered tests on the `minislimerl/minislime-test:latest` Docker image. Use this label to:
-
-- Validate a newly built Docker image before release.
-- Run the entire test suite for a comprehensive pre-merge check.
-
-Since this includes every test, it consumes significant GPU time — use it sparingly and prefer more targeted labels for routine development.
-
 ## Writing a New Test
 
-1. Create `tests/test_<your_test_name>.py` following the standard pattern:
+1. Create `tests/test_<your_test_name>.sh` following the standard pattern:
 
-```python
-import os
-import slime.utils.external_utils.command_utils as U
+```bash
+#!/usr/bin/env bash
+source "$(dirname "$0")/common.sh"
 
-MODEL_NAME = "Qwen2.5-0.5B-Instruct"
-MODEL_TYPE = "qwen2.5-0.5B"
-NUM_GPUS = 4  # This constant is used by run-ci-changed
+MODEL_DIR="${MODEL_DIR:-/home/ubuntu/models/YourModel}"
+DATASET_DIR="${DATASET_DIR:-/home/ubuntu/datasets/your_data}"
 
-def prepare():
-    U.exec_command("mkdir -p /root/models /root/datasets")
-    U.exec_command(f"huggingface-cli download Qwen/{MODEL_NAME} --local-dir /root/models/{MODEL_NAME}")
-    # Download datasets as needed ...
-
-def execute():
-    # Build argument strings and call U.execute_train(...)
+start_ray
+run_train "
+    --num-rollout 200
+    --rollout-batch-size 32
     ...
-
-if __name__ == "__main__":
-    prepare()
-    for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        os.environ.pop(proxy_var, None)
-    execute()
+    --hf-checkpoint $MODEL_DIR
+    $(wandb_args your-test-name)
+"
 ```
 
-2. **For quick validation**: Just push your test file and add `run-ci-changed` to the PR. It will be auto-detected.
+2. Make it executable: `chmod +x tests/test_<your_test_name>.sh`
 
-3. **To register in a permanent label group**: Edit `.github/workflows/pr-test.yml.j2`, add an entry to the desired job's `tests` list, then regenerate:
+3. **For quick validation**: Just push your test file and add `run-ci-changed` to the PR.
+
+4. **To register in a permanent label group**: Edit `.github/workflows/pr-test.yml.j2`, add an entry to the desired job's `tests` list, then regenerate:
 
 ```bash
 cd .github/workflows && python generate_github_workflows.py
@@ -110,5 +82,3 @@ python -m pytest \
   tests/plugin_contracts/test_plugin_path_loading_contracts.py \
   tests/plugin_contracts/test_plugin_runtime_hook_contracts.py
 ```
-
-These files also support direct execution as `python tests/plugin_contracts/<file>.py`. They declare `NUM_GPUS = 0`, so `run-ci-changed` can pick them up without treating them as GPU-heavy end-to-end tests.

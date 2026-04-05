@@ -1,16 +1,16 @@
 # Profiling
 
-In minislime, we can perform detailed performance analysis of the rollout process using the profiling interface provided by SGLang.
+In slim, we can perform detailed performance analysis of the rollout process using the profiling interface provided by SGLang.
 
 ## 1. Sleeping the Rollout Process
 
-For more flexible stress testing and profiling, it is often useful to make the minislime rollout process enter a waiting state after initialization, instead of starting generation immediately.
+For more flexible stress testing and profiling, it is often useful to make the slim rollout process enter a waiting state after initialization, instead of starting generation immediately.
 
 You can achieve this by replacing the `rollout_function_path` in your startup arguments without modifying the source code:
 
 ```bash
 python train.py \
-    --rollout-function-path slime.rollout.sleep_rollout.sleep \
+    --rollout-function-path slim.rollout.sleep_rollout.sleep \
     ... (other arguments)
 ```
 

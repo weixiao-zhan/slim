@@ -24,8 +24,8 @@ install_stubs()
 
 NUM_GPUS = 0
 
-from slime.utils.misc import load_function
-from slime.utils.types import Episode, Sample
+from slim.utils.misc import load_function
+from slim.utils.types import Episode, Sample
 
 
 def run_contract_test_file() -> None:
@@ -115,7 +115,7 @@ HOOK_CASES = [
         "custom_rollout_log",
         "CUSTOM_ROLLOUT_LOG_FUNCTION_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_custom_rollout_log",
-        "slime/ray/rollout.py",
+        "slim/ray/rollout.py",
         "custom_log_func(rollout_id, args, episodes, rollout_extra_metrics, rollout_time)",
         ("rollout_id", "args", "episodes", "rollout_extra_metrics", "rollout_time"),
         invoke_custom_rollout_log,
@@ -124,7 +124,7 @@ HOOK_CASES = [
         "custom_eval_rollout_log",
         "CUSTOM_EVAL_ROLLOUT_LOG_FUNCTION_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_custom_eval_rollout_log",
-        "slime/ray/rollout.py",
+        "slim/ray/rollout.py",
         "custom_log_func(rollout_id, args, data, extra_metrics)",
         ("rollout_id", "args", "data", "extra_metrics"),
         invoke_custom_eval_rollout_log,
@@ -133,7 +133,7 @@ HOOK_CASES = [
         "custom_reward_post_process",
         "CUSTOM_REWARD_POST_PROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_reward_post_process",
-        "slime/ray/rollout.py",
+        "slim/ray/rollout.py",
         "self.custom_reward_post_process_func(self.args, episodes)",
         ("args", "episodes"),
         invoke_reward_post_process,
@@ -142,7 +142,7 @@ HOOK_CASES = [
         "rollout_data_postprocess",
         "ROLLOUT_DATA_POSTPROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
-        "slime/backends/fsdp_utils/actor.py",
+        "slim/backends/fsdp_utils/actor.py",
         "self.rollout_data_postprocess(self.args)",
         ("args",),
         invoke_rollout_data_postprocess,

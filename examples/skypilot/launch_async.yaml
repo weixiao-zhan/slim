@@ -1,7 +1,7 @@
 # Async GRPO on mixed math+VLM — 1 node, separate rollout/actor, FlashInfer + FA2
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
-#   sky launch launch_async.yaml --env-file ../../.env -c miniSlime
-#   sky exec miniSlime launch_async.yaml --env-file ../../.env
+#   sky launch launch_async.yaml --env-file ../../.env -c slim
+#   sky exec slim launch_async.yaml --env-file ../../.env
 
 name: grpo-async-mixed-math-vlm
 
@@ -63,7 +63,7 @@ run: | # shell
   lsof -ti :${RAY_PORT} | xargs -r kill -9 2>/dev/null || true
   pkill -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
   pkill -9 sglang 2>/dev/null || true
-  pkill -9 slime 2>/dev/null || true
+  pkill -9 slim 2>/dev/null || true
   sleep 10
 
   # =========================================================================
@@ -98,7 +98,7 @@ run: | # shell
   if [ -n "${WANDB_API_KEY}" ]; then
     WANDB_ARGS=(
       --use-wandb
-      --wandb-project minislime
+      --wandb-project slim
       --wandb-group "grpo-async-mixed-math-vlm-${MODEL_NAME,,}"
       --wandb-key "${WANDB_API_KEY}"
       --disable-wandb-random-suffix
@@ -122,7 +122,7 @@ run: | # shell
     --rollout-max-context-len 8192 \
     --rollout-temperature 1 \
     --num-steps-per-rollout 1 \
-    --dynamic-sampling-filter-path slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
     --over-sampling-batch-size 96 \
     \
     --prompt-data ${DATASET_DIR}/train.parquet \
@@ -136,7 +136,7 @@ run: | # shell
     \
     --rollout-num-gpus 7 \
     --rollout-num-gpus-per-engine 1 \
-    --sglang-mem-fraction-static 0.8 \
+    --sglang-mem-fraction-static 0.6 \
     --sglang-attention-backend flashinfer \
     --sglang-mm-enable-dp-encoder \
     --use-fault-tolerance \
@@ -169,6 +169,7 @@ run: | # shell
     --adam-beta2 0.98 \
     \
     --hf-checkpoint ${MODEL_DIR} \
+    --load ${OUTPUT_DIR} \
     --save ${OUTPUT_DIR} \
     --save-interval 20 \
     \

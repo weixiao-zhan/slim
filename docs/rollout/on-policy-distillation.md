@@ -32,8 +32,8 @@ The teacher runs on an external SGLang server. Teacher log-probs are obtained du
 
 **How it works**:
 1. An external SGLang server runs the teacher model.
-2. During rollout, the custom reward function (`slime.rollout.on_policy_distillation.reward_func`) sends each sample to the teacher server to obtain token-level log-probs.
-3. The custom post-processing function (`slime.rollout.on_policy_distillation.post_process_rewards`) trims the teacher log-probs to the response span and stores them in `sample.teacher_log_probs`.
+2. During rollout, the custom reward function (`slim.rollout.on_policy_distillation.reward_func`) sends each sample to the teacher server to obtain token-level log-probs.
+3. The custom post-processing function (`slim.rollout.on_policy_distillation.post_process_rewards`) trims the teacher log-probs to the response span and stores them in `sample.teacher_log_probs`.
 4. During training, the KL penalty is computed from the stored teacher log-probs and applied to advantages.
 
 **Configuration**:
@@ -41,8 +41,8 @@ The teacher runs on an external SGLang server. Teacher log-probs are obtained du
 --use-opd
 --opd-type sglang
 --opd-kl-coef 1.0
---custom-rm-path slime.rollout.on_policy_distillation.reward_func
---custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
+--custom-rm-path slim.rollout.on_policy_distillation.reward_func
+--custom-reward-post-process-path slim.rollout.on_policy_distillation.post_process_rewards
 --rm-url http://<TEACHER_IP>:<TEACHER_PORT>/generate
 ```
 

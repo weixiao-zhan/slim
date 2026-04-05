@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# PPO on math (GSM8K). 4 actor + 4 critic GPUs colocated with 8 rollout.
+source "$(dirname "$0")/common.sh"
+
+MODEL_DIR="${LLM_MODEL_DIR:-/home/ubuntu/models/Qwen3-1.7B-Base}"
+DATASET_DIR="${LLM_DATASET_DIR:-/home/ubuntu/datasets}"
+SAVE_DIR="${SAVE_DIR:-/home/ubuntu/outputs/ppo-gsm8k-qwen3-1.7b}"
+
+start_ray
+run_train "
+    --num-rollout 200
+    --rollout-batch-size 32
+    --n-samples-per-prompt 16
+    --rollout-max-context-len 2048
+    --rollout-temperature 1
+    --num-steps-per-rollout 1
+
+    --prompt-data $DATASET_DIR/gsm8k/train.parquet
+    --rm-type math
+    --rollout-shuffle
+    --log-passrate
+    --eval-interval 20
+    --eval-prompt-data gsm8k_test $DATASET_DIR/gsm8k/test.parquet
+    --n-samples-per-eval-prompt 1
+    --eval-max-context-len 2048
+
+    --rollout-num-gpus-per-engine 1
+    --sglang-mem-fraction-static 0.6
+    --sglang-attention-backend fa3
+    --sglang-mm-enable-dp-encoder
+    --use-fault-tolerance
+
+    --actor-num-nodes 1
+    --actor-num-gpus-per-node 4
+    --critic-num-nodes 1
+    --critic-num-gpus-per-node 4
+    --attn-implementation flash_attention_3
+    --gradient-checkpointing
+    --update-weight-buffer-size 536870912
+    --colocate
+    --use-dynamic-batch-size
+    --max-tokens-per-gpu 8192
+    --train-env-vars '{\"PYTORCH_CUDA_ALLOC_CONF\":\"expandable_segments:True\"}'
+
+    --advantage-estimator ppo
+    --gamma 1.0
+    --lambd 0.95
+    --value-clip 0.2
+    --kl-coef 0.0
+    --entropy-coef 0.0
+    --eps-clip 0.2
+    --eps-clip-high 0.28
+
+    --optimizer adam
+    --lr 1e-5
+    --critic-lr 5e-5
+    --lr-warmup-iters 10
+    --lr-decay-style constant
+    --weight-decay 0.1
+    --adam-beta1 0.9
+    --adam-beta2 0.98
+
+    --hf-checkpoint $MODEL_DIR
+    --save $SAVE_DIR
+    --save-interval 20
+
+    $(wandb_args ppo-gsm8k-qwen3-1.7b)
+"

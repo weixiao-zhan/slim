@@ -1,8 +1,8 @@
-# minislime Documentation
+# slim Documentation
 
 ## Core Data Type: `Episode`
 
-The `Episode` class (`slime.utils.types.Episode`) is the single data record that flows through the entire pipeline -- rollout generates it, reward scoring annotates it, and training consumes it.
+The `Episode` class (`slim.utils.types.Episode`) is the single data record that flows through the entire pipeline -- rollout generates it, reward scoring annotates it, and training consumes it.
 
 ### Lifecycle
 
@@ -31,7 +31,6 @@ Sequence-level fields (`loss_mask`, `rollout_log_probs`) are **edge-aligned**: t
 ## [Rollout](rollout/README.md)
 SGLang setup, parameter pass-through, rollout args, dynamic sampling, partial rollout, evaluation.
 - [SGLang Config](rollout/sglang-config.md) -- Multi-model serving, PD disaggregation, YAML deployment
-- [Slime Router](rollout/slime-router.md) -- Training-oriented HTTP router
 - [Speculative Decoding](rollout/speculative-decoding.md) -- MTP draft model acceleration
 - [On-Policy Distillation](rollout/on-policy-distillation.md) -- Teacher-student distillation
 - [Fault Tolerance](rollout/fault-tolerance.md) -- Heartbeat-based recovery
@@ -47,10 +46,3 @@ Installation, GPU allocation, checkpoints, data format, RL algorithms (GRPO/PPO)
 
 ## [Customization](customization/README.md)
 All extension points: rollout functions, reward models, filters, loss functions, logging, multi-turn/agentic adaptation.
-
-## [Examples](examples/README.md)
-- [Qwen3-30B-A3B (MoE)](examples/qwen3-30B-A3B.md)
-- [GLM-4.7-Flash (MoE + MTP)](examples/glm4.7-30B-A3B.md)
-- [Qwen3-4B SFT](examples/qwen3-4b-base-openhermes.md)
-
-Also see runnable [examples/](../examples/) for VLM, search, and tool-use workflows.

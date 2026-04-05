@@ -1,0 +1,124 @@
+import asyncio
+import logging
+import random
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+from slim.utils.misc import load_function
+from slim.utils.processing_utils import load_tokenizer
+from slim.utils.types import Episode
+
+from .deepscaler import get_deepscaler_rule_based_reward
+from .f1 import f1_score
+from .gpqa import compute_gpqa_reward
+from .math_dapo_utils import compute_score as compute_score_dapo
+from .math_utils import extract_answer as extract_boxed_answer
+from .math_utils import grade_answer_verl
+
+_shared_session: aiohttp.ClientSession | None = None
+_tokenizer = None
+_tokenizer_path: str | None = None
+
+
+def _get_shared_session() -> aiohttp.ClientSession:
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        connector = aiohttp.TCPConnector(
+            limit=64,
+            enable_cleanup_closed=True,
+        )
+        timeout = aiohttp.ClientTimeout(total=120)
+        _shared_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    return _shared_session
+
+
+def _get_tokenizer(args):
+    global _tokenizer, _tokenizer_path
+    if _tokenizer is None or _tokenizer_path != args.hf_checkpoint:
+        _tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+        _tokenizer_path = args.hf_checkpoint
+    return _tokenizer
+
+
+def _decode_generated_text(args, episode: Episode) -> str:
+    gen_ids = episode.get_generated_token_ids()
+    if not gen_ids:
+        return ""
+    return _get_tokenizer(args).decode(gen_ids, skip_special_tokens=args.rollout_skip_special_tokens)
+
+
+async def remote_rm(args, episode: Episode, max_retries: int = 10):
+    payload = {
+        "prompt": episode.prompt,
+        "response": _decode_generated_text(args, episode),
+        "label": episode.label,
+    }
+    session = _get_shared_session()
+    for attempt in range(max_retries):
+        try:
+            async with session.post(args.rm_url, json=payload) as resp:
+                resp.raise_for_status()
+                return await resp.json()
+        except Exception as e:
+            if attempt + 1 >= max_retries:
+                logger.warning(f"remote_rm failed after {attempt + 1} attempts: {e}")
+                raise
+            backoff = min(2**attempt, 30) + random.random()
+            logger.info(f"remote_rm: {type(e).__name__}, retrying in {backoff:.1f}s ({attempt + 1}/{max_retries})")
+            await asyncio.sleep(backoff)
+
+
+async def async_rm(args, episode: Episode, **kwargs):
+    if args.custom_rm_path is not None:
+        rm_function = load_function(args.custom_rm_path)
+        return await rm_function(args, episode, **kwargs)
+
+    metadata = episode.metadata if isinstance(episode.metadata, dict) else {}
+    rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
+    response = _decode_generated_text(args, episode)
+    episode.generated_text = response
+    label = episode.label
+    if rm_type.startswith("boxed_"):
+        response = extract_boxed_answer(response) or ""
+        rm_type = rm_type[len("boxed_") :]
+
+    # This function is intended for remote or time-consuming reward model evaluation.
+    # Implement the actual logic as needed.
+    if rm_type == "remote_rm":
+        return await remote_rm(args, episode)
+    elif rm_type == "deepscaler":
+        return get_deepscaler_rule_based_reward(response, label)
+    elif rm_type == "dapo":
+        return compute_score_dapo(response, label)
+    elif rm_type == "math":
+        return 1 if grade_answer_verl(response, label) else 0
+    elif rm_type == "f1":
+        return f1_score(response, label)[0]
+    elif rm_type == "gpqa":
+        return compute_gpqa_reward(response, label, metadata=metadata)
+    elif rm_type == "ifbench":
+        from .ifbench import compute_ifbench_reward
+
+        return compute_ifbench_reward(response, label, metadata=metadata)
+    elif rm_type == "random":
+        return random.randint(0, 1)
+    elif rm_type:
+        raise NotImplementedError(f"Rule-based RM for {rm_type} is not implemented.")
+    else:
+        raise NotImplementedError("Rule-based RM type is not specified.")
+
+
+async def batched_async_rm(
+    args,
+    episodes: list[Episode],
+    **kwargs,
+) -> list[int | float]:
+    if args.custom_rm_path is not None:
+        # Ensure the custom reward function is implemented in batch mode
+        rm_function = load_function(args.custom_rm_path)
+        return await rm_function(args, episodes, **kwargs)
+    tasks = [async_rm(args, episode, **kwargs) for episode in episodes]
+    rewards = await asyncio.gather(*tasks)
+    return rewards

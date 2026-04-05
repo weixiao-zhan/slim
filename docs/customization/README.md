@@ -1,6 +1,6 @@
 # Customization Guide
 
-minislime provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
+slim provides extensive customization capabilities through function path arguments. These allow you to inject custom logic at various stages of the training and rollout pipeline without modifying the core codebase.
 
 ## Overview of Customization Interfaces
 
@@ -23,13 +23,12 @@ Below is a summary of all available customization interfaces and their purposes.
 | [`--custom-eval-rollout-log-function-path`](#12-logging-functions) | Custom logging for evaluation rollouts. |
 | [`--data-source-path`](#13-data-source---data-source-path) | Override the data source for rollout prompts. |
 | [`--eval-function-path`](#14-evaluation-function---eval-function-path) | Override the rollout function specifically for evaluation. |
-| [`--slime-router-middleware-paths`](#15-slime-router-middleware---slime-router-middleware-paths) | Add custom middleware to the slime router. |
 
 ## Detailed Interface Reference
 
 ### 1. Rollout Function (`--rollout-function-path`)
 
-**Default**: `slime.rollout.sglang_rollout.generate_rollout`
+**Default**: `slim.rollout.sglang_rollout.generate_rollout`
 
 **Purpose**: Override the entire rollout generation logic.
 
@@ -43,7 +42,6 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 - Adding custom sampling strategies
 - Integrating external tools or APIs during generation
 
-**Example**: See [examples/search-r1/generate_with_search.py](../../examples/search-r1/generate_with_search.py)
 
 ---
 
@@ -68,7 +66,6 @@ async def custom_generate(args, episode: Episode, sampling_params: dict, evaluat
 - Adding retrieval-augmented generation (RAG)
 - Multi-turn conversation handling
 
-**Example**: See [examples/search-r1/generate_with_search.py](../../examples/search-r1/generate_with_search.py)
 
 ---
 
@@ -130,7 +127,7 @@ class DynamicFilterOutput:
 - Implementing curriculum learning strategies
 - Quality-based group selection
 
-**Example**: `slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
+**Example**: `slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std`
 
 ---
 
@@ -283,11 +280,11 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool
 
 ### 13. Data Source (`--data-source-path`)
 
-**Default**: `slime.rollout.data_source.RolloutDataSource`
+**Default**: `slim.rollout.data_source.RolloutDataSource`
 
 **Purpose**: Override the data source for rollout prompts.
 
-**Base Class**: `slime.rollout.data_source.DataSource`
+**Base Class**: `slim.rollout.data_source.DataSource`
 
 **Required Methods**:
 ```python
@@ -322,33 +319,9 @@ class CustomDataSource(DataSource):
 
 ---
 
-### 15. Slime Router Middleware (`--slime-router-middleware-paths`)
-
-**Purpose**: Add custom middleware to the minislime router for request processing.
-
-**Use Cases**:
-- Request/response transformation
-- Custom routing logic
-- Caching and optimization
-
----
-
-### 16. MoE Routing Replay
-
-> **Note**: R2 (Routing Replay) and R3 (Rollout Routing Replay) were implemented for the Megatron actor only and are **not functional** in minislime's FSDP backend. The CLI flags exist but have no effect.
-
-Stabilize MoE RL training by recording and replaying expert routing decisions to ensure consistency.
-
-| Argument | Description |
-| --- | --- |
-| `--use-routing-replay` | Forward-backward routing consistency in training. ([arXiv:2507.18071](https://arxiv.org/abs/2507.18071)) |
-| `--use-rollout-routing-replay` | R3: Replay routing from rollout during training. **Requires `--use-slime-router`**. ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)) |
-
-For detailed explanation of R3 and SlimeRouter, see [Slime Router](../rollout/slime-router.md).
-
 ## Testing Custom Function Paths
 
-minislime also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
+slim also provides CPU-only contract tests for customization interfaces. These tests resolve components through import-path strings, so they can validate both built-in hooks and user-defined implementations passed through the same CLI arguments used by training.
 
 The tests live under `tests/plugin_contracts/` and are grouped by hook shape:
 
@@ -388,7 +361,7 @@ To validate your own custom implementation, replace the plugin paths used in the
 
 ## Multi-Turn / Agentic Adaptation Guide
 
-minislime supports complex agent scenarios (multi-turn interaction, tool calling) by overriding the default rollout and reward logic through custom functions.
+slim supports complex agent scenarios (multi-turn interaction, tool calling) by overriding the default rollout and reward logic through custom functions.
 
 ### Three Steps
 
@@ -443,4 +416,3 @@ CUSTOM_ARGS=(
 )
 ```
 
-See [examples/search-r1/](../../examples/search-r1/) and [examples/tau-bench/](../../examples/tau-bench/) for complete implementations.
