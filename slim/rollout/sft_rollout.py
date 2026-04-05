@@ -97,13 +97,16 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
     episodes = []
     for i, example in enumerate(examples):
         ep = Episode.from_example(example)
+        prompt = ep.example.get("prompt", "")
+        tools = ep.example.get("tools")
+        multimodal_inputs = ep.example.get("multimodal_inputs")
 
-        if isinstance(ep.prompt, list) and PROCESSOR is not None:
+        if isinstance(prompt, list) and PROCESSOR is not None:
             token_ids, loss_mask, ep.multimodal_train_inputs = _get_assistant_mask_multimodal(
-                PROCESSOR, ep.prompt, ep.multimodal_inputs, tools=ep.tools
+                PROCESSOR, prompt, multimodal_inputs, tools=tools
             )
         else:
-            token_ids, loss_mask = _get_assistant_mask(TOKENIZER, ep.prompt, tools=ep.tools)
+            token_ids, loss_mask = _get_assistant_mask(TOKENIZER, prompt, tools=tools)
 
         ep.tokens = token_ids
         ep.loss_mask = loss_mask[1:] if len(token_ids) > 1 else []

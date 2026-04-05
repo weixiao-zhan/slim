@@ -1,4 +1,3 @@
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,12 +30,8 @@ class Episode:
     - ``rollout_log_probs[i]``: log-prob of ``tokens[i+1]`` under the rollout policy.
     """
 
-    # Prompt / input fields
-    prompt: str | list[dict[str, str]] = ""
-    label: str | None = None
-    tools: list[dict] | None = None
-    multimodal_inputs: dict[str, Any] | None = None
-    metadata: dict = field(default_factory=dict)
+    # Raw dataset row — rollout/RM functions read whatever columns they need
+    example: dict = field(default_factory=dict)
     generate_function_path: str | None = None
     session_id: str | None = None
 
@@ -64,34 +59,12 @@ class Episode:
 
     @classmethod
     def from_example(cls, example: dict) -> "Episode":
-        if "prompt" not in example:
-            raise KeyError("Dataset example must contain a `prompt` field.")
-
-        tools = example.get("tools")
-        if isinstance(tools, str):
-            tools = json.loads(tools)
-        elif hasattr(tools, "tolist"):
-            tools = tools.tolist()
-
-        metadata = example.get("metadata") or {}
-        if isinstance(metadata, str):
-            metadata = json.loads(metadata)
-
-        multimodal_inputs = example.get("multimodal_inputs")
-        if multimodal_inputs is None and "images" in example:
-            multimodal_inputs = {"images": example.get("images")}
-
-        return cls(
-            prompt=example["prompt"],
-            label=example.get("label"),
-            tools=tools,
-            multimodal_inputs=multimodal_inputs,
-            metadata=dict(metadata),
-        )
+        return cls(example=dict(example))
 
     @property
     def has_multimodal(self) -> bool:
-        return bool(self.multimodal_inputs and any(v is not None for v in self.multimodal_inputs.values()))
+        mm = self.example.get("multimodal_inputs")
+        return bool(mm and any(v is not None for v in mm.values()))
 
     # --- Pre-freeze helpers (list phase) ---
 
@@ -184,3 +157,5 @@ class MultimodalTypes:
     @classmethod
     def get(cls, name: str) -> MultimodalType | None:
         return next((m for m in cls.all() if m.name == name), None)
+
+

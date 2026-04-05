@@ -51,9 +51,9 @@ def _decode_generated_text(args, episode: Episode) -> str:
 
 async def remote_rm(args, episode: Episode, max_retries: int = 10):
     payload = {
-        "prompt": episode.prompt,
+        "prompt": episode.example.get("prompt", ""),
         "response": _decode_generated_text(args, episode),
-        "label": episode.label,
+        "label": episode.example.get("label"),
     }
     session = _get_shared_session()
     for attempt in range(max_retries):
@@ -75,11 +75,14 @@ async def async_rm(args, episode: Episode, **kwargs):
         rm_function = load_function(args.custom_rm_path)
         return await rm_function(args, episode, **kwargs)
 
-    metadata = episode.metadata if isinstance(episode.metadata, dict) else {}
+    metadata = episode.example.get("metadata") or {}
+    if isinstance(metadata, str):
+        import json
+        metadata = json.loads(metadata)
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
     response = _decode_generated_text(args, episode)
     episode.generated_text = response
-    label = episode.label
+    label = episode.example.get("label")
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""
         rm_type = rm_type[len("boxed_") :]
