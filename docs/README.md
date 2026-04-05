@@ -15,14 +15,27 @@ The `Episode` class (`slim.utils.types.Episode`) is the single data record that 
 
 | Field | Pre-freeze type | Post-freeze type | Description |
 |-------|----------------|-----------------|-------------|
+| `example` | `dict` | -- | Raw dataset row. Generate and reward functions read whatever columns they need from this dict. |
 | `tokens` | `list[int]` | `LongTensor` | Full token sequence (prompt + generation). |
 | `loss_mask` | `list[int]` | `IntTensor` | **Edge-aligned** (length = `len(tokens) - 1`). `loss_mask[i]` indicates whether predicting `tokens[i+1]` contributes to loss. Prompt edges are `0`, generated edges are `1`. |
 | `rollout_log_probs` | `list[float]` | `FloatTensor` | **Edge-aligned**. `rollout_log_probs[i]` is the log-probability of `tokens[i+1]` under the rollout policy. |
 | `reward` | `float \| None` | `float \| None` | Scalar reward assigned by the reward model. |
 | `generated_text` | `str \| None` | `str \| None` | Decoded text of loss_mask==1 tokens, cached during RM scoring. |
-| `prompt` | `str \| list[dict]` | -- | Original prompt (string or chat messages). |
-| `label` | `str \| None` | -- | Optional ground-truth label for reward functions. |
 | `status` | `str` | -- | One of `PENDING`, `COMPLETED`, `TRUNCATED`, `ABORTED`, `FAILED`. |
+
+### Dataset Columns and `episode.example`
+
+`Episode.from_example(row)` stores the entire dataset row as-is in `episode.example`. The default rollout and reward paths (sglang_rollout, sft_rollout, rm_hub) expect these columns by convention:
+
+| Column | Type | Required | Description |
+|--------|------|----------|-------------|
+| `prompt` | `str \| list[dict]` | yes | Raw string or chat-format messages. |
+| `label` | `str \| None` | no | Ground-truth label for built-in reward functions. |
+| `tools` | `list[dict] \| None` | no | Tool/function definitions for chat template. |
+| `multimodal_inputs` | `dict \| None` | no | e.g. `{"images": [...]}`. |
+| `metadata` | `dict \| None` | no | Passed through to reward functions (e.g. `rm_type`). |
+
+Custom generate/reward functions can read any column from `episode.example` — there is no fixed schema. For example, a BAP reward function reads `episode.example["ground_truth"]` instead of `"label"`.
 
 ### Edge Alignment
 

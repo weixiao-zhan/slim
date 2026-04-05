@@ -31,7 +31,7 @@ REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH = (
 
 from slim.rollout.sglang_rollout import generate_and_rm
 from slim.utils.misc import load_function
-from slim.utils.types import Sample
+from slim.utils.types import Episode
 
 
 def run_contract_test_file() -> None:
@@ -68,36 +68,38 @@ class FakeGenerateState:
         yield 0
 
 
-async def custom_generate(args, sample: Sample, sampling_params: dict):
-    sample.tokens = [11, 12, 13]
-    sample.response = "generated"
-    sample.response_length = len(sample.tokens)
-    sample.reward = 0.25
-    sample.status = Sample.Status.COMPLETED
-    return sample
+def _make_episode(**example_fields) -> Episode:
+    ep = Episode.from_example(example_fields)
+    return ep
 
 
-async def custom_generate_with_evaluation(args, sample: Sample, sampling_params: dict, evaluation: bool = False):
-    sample.tokens = [21, 22]
-    sample.response = "eval-generated" if evaluation else "train-generated"
-    sample.response_length = len(sample.tokens)
-    sample.reward = 0.5 if evaluation else 0.75
-    sample.status = Sample.Status.COMPLETED
-    sample.metadata["evaluation"] = evaluation
-    return sample
+async def custom_generate(args, episode: Episode, sampling_params: dict):
+    episode.tokens = [11, 12, 13]
+    episode.generated_text = "generated"
+    episode.reward = 0.25
+    episode.status = Episode.Status.COMPLETED
+    return episode
 
 
-def assert_sample_contract(sample: Sample) -> None:
-    assert isinstance(sample, Sample)
-    assert isinstance(sample.tokens, list)
-    assert isinstance(sample.response, str)
-    assert isinstance(sample.response_length, int)
-    assert sample.reward is not None
+async def custom_generate_with_evaluation(args, episode: Episode, sampling_params: dict, evaluation: bool = False):
+    episode.tokens = [21, 22]
+    episode.generated_text = "eval-generated" if evaluation else "train-generated"
+    episode.reward = 0.5 if evaluation else 0.75
+    episode.status = Episode.Status.COMPLETED
+    episode.example["evaluation"] = evaluation
+    return episode
+
+
+def assert_episode_contract(episode: Episode) -> None:
+    assert isinstance(episode, Episode)
+    assert isinstance(episode.tokens, list)
+    assert isinstance(episode.generated_text, str)
+    assert episode.reward is not None
 
 
 def assert_custom_generate_signature_matches_expected(fn) -> None:
     params = tuple(inspect.signature(fn).parameters)
-    assert params[:3] == ("args", "sample", "sampling_params")
+    assert params[:3] == ("args", "episode", "sampling_params") or params[:3] == ("args", "sample", "sampling_params")
 
 
 class _DummySemaphore:
@@ -126,34 +128,34 @@ def patch_generate_state(monkeypatch):
 def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state, monkeypatch):
     sglang_rollout = patch_generate_state
 
-    async def official_default_generate(args, sample: Sample, sampling_params: dict):
-        sample.tokens = [31, 32]
-        sample.response = "default-generate"
-        sample.response_length = 2
-        sample.reward = 1.0
-        sample.status = Sample.Status.COMPLETED
-        return sample
+    async def official_default_generate(args, episode: Episode, sampling_params: dict):
+        episode.tokens = [31, 32]
+        episode.generated_text = "default-generate"
+        episode.reward = 1.0
+        episode.status = Episode.Status.COMPLETED
+        return episode
 
     monkeypatch.setattr(sglang_rollout, "generate", official_default_generate)
 
     result = asyncio.run(
         generate_and_rm(
             make_args(custom_generate_function_path=None),
-            Sample(index=0, prompt="prompt"),
+            _make_episode(prompt="prompt"),
             sampling_params={"temperature": 0.3},
             evaluation=False,
         )
     )
-    assert_sample_contract(result)
-    assert result.response == "default-generate"
+    assert_episode_contract(result)
+    assert result.generated_text == "default-generate"
 
 
-def test_generate_and_rm_prefers_per_sample_generate_function(patch_generate_state):
+def test_generate_and_rm_prefers_per_episode_generate_function(patch_generate_state):
     args = make_args(custom_generate_function_path=REFERENCE_CUSTOM_GENERATE_PATH)
-    sample = Sample(index=0, prompt="prompt", generate_function_path=REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH)
-    result = asyncio.run(generate_and_rm(args, sample, sampling_params={"temperature": 0.3}, evaluation=True))
-    assert_sample_contract(result)
-    assert result.metadata["evaluation"] is True
+    ep = _make_episode(prompt="prompt")
+    ep.generate_function_path = REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH
+    result = asyncio.run(generate_and_rm(args, ep, sampling_params={"temperature": 0.3}, evaluation=True))
+    assert_episode_contract(result)
+    assert result.example["evaluation"] is True
 
 
 def test_custom_generate_function_path_supports_user_override(patch_generate_state):
@@ -165,12 +167,12 @@ def test_custom_generate_function_path_supports_user_override(patch_generate_sta
     result = asyncio.run(
         generate_and_rm(
             make_args(custom_generate_function_path=custom_generate_path),
-            Sample(index=0, prompt="prompt"),
+            _make_episode(prompt="prompt"),
             sampling_params={"temperature": 0.3},
             evaluation=False,
         )
     )
-    assert_sample_contract(result)
+    assert_episode_contract(result)
 
 
 if __name__ == "__main__":

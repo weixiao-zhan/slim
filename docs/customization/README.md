@@ -61,6 +61,8 @@ An optional `evaluation` keyword argument is also supported:
 async def custom_generate(args, episode: Episode, sampling_params: dict, evaluation: bool = False) -> Episode
 ```
 
+The function receives an `Episode` whose `episode.example` dict contains the raw dataset row. Read prompt, tools, images, or any task-specific columns directly from `episode.example`.
+
 **Use Cases**:
 - Implementing tool-calling or function-calling capabilities
 - Adding retrieval-augmented generation (RAG)
@@ -84,6 +86,8 @@ async def custom_rm(args, episode: Episode, **kwargs) -> float
 ```python
 async def batched_custom_rm(args, episodes: list[Episode], **kwargs) -> list[float]
 ```
+
+The function receives an `Episode` whose `episode.example` dict contains the raw dataset row. Read ground-truth labels or any task-specific columns directly from `episode.example` (e.g. `episode.example["ground_truth"]`).
 
 **Use Cases**:
 - Custom rule-based rewards
@@ -365,7 +369,7 @@ slim supports complex agent scenarios (multi-turn interaction, tool calling) by 
 
 ### Three Steps
 
-1. **Data Preparation**: Map conversation history, labels, and metadata to the supported `Episode` fields (`prompt`, `label`, `metadata`, `tools`). Keep dataset top-level columns within the standard finite schema and store extra task-specific fields inside `metadata`.
+1. **Data Preparation**: `Episode.from_example(row)` stores the entire dataset row in `episode.example`. The default rollout/reward paths expect columns named `prompt`, `label`, `metadata`, `tools`, and `multimodal_inputs` (see [Episode docs](../README.md#dataset-columns-and-episodeexample)). Custom generate/reward functions can read any column from `episode.example` — there is no fixed schema, so you can use whatever column names your task needs (e.g. `ground_truth` instead of `label`).
 
 2. **Custom Generation Function** (`--custom-generate-function-path`):
    ```python

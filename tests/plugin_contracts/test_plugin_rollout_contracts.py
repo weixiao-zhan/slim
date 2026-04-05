@@ -36,12 +36,11 @@ def run_contract_test_file() -> None:
 
 def make_episode(index: int, reward: float = 1.0) -> Episode:
     tokens = [1000 + index, 2000 + index]
-    return Episode(
-        tokens=tokens,
-        response_length=len(tokens),
-        reward=reward,
-        response=f"response-{index}",
-    )
+    ep = Episode.from_example({"index": index})
+    ep.tokens = tokens
+    ep.reward = reward
+    ep.generated_text = f"response-{index}"
+    return ep
 
 
 class ContractDataSource:
@@ -72,12 +71,10 @@ def valid_rollout_function(args, rollout_id, data_source, evaluation=False):
     examples = data_source.get_examples(2)
     for group_index, example in enumerate(examples):
         for sample_index in range(2):
-            ep = Episode(
-                tokens=[group_index, sample_index, rollout_id],
-                response=f"group-{group_index}-sample-{sample_index}",
-                response_length=3,
-                reward=float(group_index + sample_index),
-            )
+            ep = Episode.from_example({"index": group_index})
+            ep.tokens = [group_index, sample_index, rollout_id]
+            ep.generated_text = f"group-{group_index}-sample-{sample_index}"
+            ep.reward = float(group_index + sample_index)
             episodes.append(ep)
     return RolloutFnTrainOutput(episodes=episodes, metrics={"source": "contract"})
 
@@ -92,8 +89,7 @@ def assert_episode_contract(ep: Episode) -> None:
     assert isinstance(ep, Episode)
     assert isinstance(ep.tokens, list)
     assert all(isinstance(token, int) for token in ep.tokens)
-    assert isinstance(ep.response, str)
-    assert isinstance(ep.response_length, int)
+    assert isinstance(ep.generated_text, str)
     assert ep.reward is not None
 
 

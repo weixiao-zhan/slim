@@ -125,7 +125,7 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
+def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
     """Tokenize prompt into episode.tokens if not already set.
 
     Sets episode._max_tokens (total context budget) on first call.
@@ -135,19 +135,23 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
     if episode.tokens:
         return
 
+    prompt = episode.example.get("prompt", "")
+    tools = episode.example.get("tools")
+    multimodal_inputs = episode.example.get("multimodal_inputs")
+
     if episode.has_multimodal and state.processor is None:
         raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
 
-    if isinstance(episode.prompt, list) and state.processor:
+    if isinstance(prompt, list) and state.processor:
         # VLM processor + conversation
         prompt_text = state.processor.apply_chat_template(
-            episode.prompt,
-            tools=episode.tools,
+            prompt,
+            tools=tools,
             tokenize=False,
             add_generation_prompt=True,
             **state.chat_template_kwargs,
         )
-        mm = {k: v for k, v in (episode.multimodal_inputs or {}).items() if v}
+        mm = {k: v for k, v in (multimodal_inputs or {}).items() if v}
         processor_output = state.processor(text=prompt_text, **mm, return_tensors="pt")
         prompt_ids = processor_output["input_ids"][0].tolist()
         episode.multimodal_train_inputs = {
@@ -155,18 +159,18 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
-    elif isinstance(episode.prompt, list):
+    elif isinstance(prompt, list):
         # LLM tokenizer + conversation
         prompt_ids = state.tokenizer.apply_chat_template(
-            episode.prompt,
-            tools=episode.tools,
+            prompt,
+            tools=tools,
             tokenize=True,
             add_generation_prompt=True,
             **state.chat_template_kwargs,
         )
     else:
         # Raw string prompt
-        prompt_ids = state.tokenizer.encode(episode.prompt, add_special_tokens=False)
+        prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
     episode.tokens = prompt_ids
     edge_len = max(len(episode.tokens) - 1, 0)
@@ -183,7 +187,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
-    await _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
+    _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
 
     assert episode.rollout_log_probs is not None
     max_new_tokens = episode._max_tokens - len(episode.tokens)
@@ -200,7 +204,8 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         "sampling_params": sglang_params,
         "return_logprob": True,
     }
-    image_inputs = episode.multimodal_inputs.get("images") if episode.multimodal_inputs else None
+    mm = episode.example.get("multimodal_inputs")
+    image_inputs = mm.get("images") if mm else None
     if episode.has_multimodal and image_inputs:
         image_data = image_inputs
         payload["image_data"] = [encode_image_for_rollout_engine(img) for img in image_data]
@@ -358,7 +363,7 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[_episode_full_text(args, ep)]}, label: {ep.label}, reward: {ep.reward}",
+                    f"First rollout sample: {[_episode_full_text(args, ep)]}, label: {ep.example.get('label')}, reward: {ep.reward}",
                 )
                 do_print = False
 
@@ -378,7 +383,7 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[_episode_full_text(args, ep)]}, label: {ep.label}, reward: {ep.reward}",
+        f"Finish rollout: {[_episode_full_text(args, ep)]}, label: {ep.example.get('label')}, reward: {ep.reward}",
     )
 
     aborted_examples = await abort(args)
@@ -448,7 +453,7 @@ async def eval_rollout_single_dataset(
     for raw_row in dataset:
         for j in range(dataset_cfg.n_samples_per_eval_prompt):
             episode = Episode.from_example(raw_row)
-            episode.metadata = dataset_cfg.inject_metadata(episode.metadata)
+            episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             sampling_params = base_sampling_params
             if getattr(args, "sglang_enable_deterministic_inference", False):
