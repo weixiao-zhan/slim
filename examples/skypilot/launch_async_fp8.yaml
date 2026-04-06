@@ -1,9 +1,11 @@
-# Async GRPO on mixed math+VLM — 1 node, separate rollout/actor, FlashInfer + FA2
+# Async GRPO on mixed math+VLM — FP8 inference + BF16 training
+# Uses official Qwen FP8 variant for rollout, BF16 weights for training.
+#
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
-#   sky launch launch_async.yaml --env-file ../../.env -c slim
-#   sky exec slim launch_async.yaml --env-file ../../.env
+#   sky launch launch_async_fp8.yaml --env-file ../../.env -c slim
+#   sky exec slim launch_async_fp8.yaml --env-file ../../.env
 
-name: grpo-async-mixed-math-vlm
+name: grpo-async-mixed-math-vlm-fp8
 
 workdir: ../..
 
@@ -13,7 +15,6 @@ resources:
   infra: aws/us-west-2
   instance_type: p4de.24xlarge
   disk_size: 500
-  # network_tier: best  # Enables EFA
   image_id:
     us-east-1: ami-0174b3ccd6205fa2c
     us-east-2: ami-09ff047017f875dd1
@@ -22,6 +23,7 @@ resources:
 
 envs:
   MODEL_NAME: Qwen3-VL-4B-Instruct
+  MODEL_NAME_FP8: Qwen3-VL-4B-Instruct-FP8
 
 setup: | # shell
   set -ex
@@ -34,8 +36,12 @@ run: | # shell
   uv run bash patch-sglang.sh
   # Download model and prepare dataset
   mkdir -p /home/ubuntu/models /home/ubuntu/datasets
+  # Download BF16 model (for training) and FP8 model (for rollout inference)
   if [ ! -d "/home/ubuntu/models/${MODEL_NAME}" ]; then
     uv run hf download "Qwen/${MODEL_NAME}" --local-dir "/home/ubuntu/models/${MODEL_NAME}"
+  fi
+  if [ ! -d "/home/ubuntu/models/${MODEL_NAME_FP8}" ]; then
+    uv run hf download "Qwen/${MODEL_NAME_FP8}" --local-dir "/home/ubuntu/models/${MODEL_NAME_FP8}"
   fi
   if [ ! -f "/home/ubuntu/datasets/mixed_math_vlm/train.parquet" ]; then
     uv run python tests/prepare_mixed_math_vlm.py
@@ -89,9 +95,10 @@ run: | # shell
   # =========================================================================
   # Head node: submit async training job
   # =========================================================================
-  MODEL_DIR="/home/ubuntu/models/${MODEL_NAME}"
+  BF16_MODEL_DIR="/home/ubuntu/models/${MODEL_NAME}"
+  FP8_MODEL_DIR="/home/ubuntu/models/${MODEL_NAME_FP8}"
   DATASET_DIR="/home/ubuntu/datasets/mixed_math_vlm"
-  OUTPUT_DIR="/home/ubuntu/outputs/grpo-async-mixed-math-vlm-${MODEL_NAME,,}"
+  OUTPUT_DIR="/home/ubuntu/outputs/grpo-async-mixed-math-vlm-fp8-${MODEL_NAME,,}"
 
   # Wandb args (only if WANDB_API_KEY is set)
   WANDB_ARGS=()
@@ -99,7 +106,7 @@ run: | # shell
     WANDB_ARGS=(
       --use-wandb
       --wandb-project slim
-      --wandb-group "grpo-async-mixed-math-vlm-${MODEL_NAME,,}"
+      --wandb-group "grpo-async-mixed-math-vlm-fp8-${MODEL_NAME,,}"
       --wandb-key "${WANDB_API_KEY}"
       --disable-wandb-random-suffix
     )
@@ -168,8 +175,8 @@ run: | # shell
     --adam-beta1 0.9 \
     --adam-beta2 0.98 \
     \
-    --hf-checkpoint ${MODEL_DIR} \
-    --load ${OUTPUT_DIR} \
+    --hf-checkpoint ${FP8_MODEL_DIR} \
+    --load ${BF16_MODEL_DIR} \
     --save ${OUTPUT_DIR} \
     --save-interval 20 \
     \

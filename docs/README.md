@@ -45,7 +45,6 @@ Sequence-level fields (`loss_mask`, `rollout_log_probs`) are **edge-aligned**: t
 SGLang setup, parameter pass-through, rollout args, dynamic sampling, partial rollout, evaluation.
 - [SGLang Config](rollout/sglang-config.md) -- Multi-model serving, PD disaggregation, YAML deployment
 - [Speculative Decoding](rollout/speculative-decoding.md) -- MTP draft model acceleration
-- [On-Policy Distillation](rollout/on-policy-distillation.md) -- Teacher-student distillation
 - [Fault Tolerance](rollout/fault-tolerance.md) -- Heartbeat-based recovery
 - [PD Disaggregation](rollout/pd-disaggregation.md) -- Prefill-decode separation
 

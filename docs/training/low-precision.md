@@ -5,7 +5,19 @@
 
 ## FP8 rollout and BF16 training
 
-You can run FP8 rollout simply by setting `--hf-checkpoint` with a blockwise quantized HuggingFace checkpoint, which can be converted by:
+Use `--hf-checkpoint` for the FP8 model (rollout inference) and `--load` for the BF16 model (training init):
+
+```bash
+python3 train_async.py \
+    --hf-checkpoint /path/to/Model-FP8 \
+    --load /path/to/Model \
+    --save /path/to/output \
+    ...
+```
+
+`--load` auto-detects whether the path is a HuggingFace checkpoint (BF16 init) or a slim DCP checkpoint (training resume). When it detects an HF checkpoint, the actor uses it for `from_pretrained` weight initialization while `--hf-checkpoint` is used only for the sglang rollout engine and tokenizer.
+
+Many models have official FP8 variants on HuggingFace (e.g. `Qwen/Qwen3-VL-4B-Instruct-FP8`). You can also convert a BF16 model to FP8:
 
 ```bash
 python tools/convert_hf_to_fp8.py \
@@ -15,7 +27,9 @@ python tools/convert_hf_to_fp8.py \
     --max-workers 4
 ```
 
-Please ensure that the converted checkpoint points to a directory where the `config.json` contains the correct `quantization_config` so that slim can automatically use FP8 quantization during weight updates.
+Ensure the FP8 checkpoint's `config.json` contains the correct `quantization_config` so that sglang can automatically re-quantize BF16 weight updates to FP8.
+
+See `examples/skypilot/launch_async_fp8.yaml` for a complete example.
 
 ## INT4 QAT Training
 

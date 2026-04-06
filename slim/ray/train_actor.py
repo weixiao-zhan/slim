@@ -47,11 +47,10 @@ class TrainRayActor(RayActor):
         # os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
         os.environ["LOCAL_RANK"] = str(get_local_gpu_id())
 
-    def init(self, args, role, with_ref=False, with_opd_teacher=False):
+    def init(self, args, role, with_ref=False):
         self.args = args
         self.role = role
         self.with_ref = with_ref
-        self.with_opd_teacher = with_opd_teacher
 
         torch.serialization.add_safe_globals([slim.utils.eval_config.EvalDatasetConfig])
 

@@ -647,7 +647,19 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
             )
-            reset_arg(parser, "--load", type=str, default=None)
+            reset_arg(
+                parser,
+                "--load",
+                type=str,
+                default=None,
+                help=(
+                    "Path to load training weights from. Accepts either: "
+                    "(1) a slim DCP checkpoint directory (with latest_checkpointed_iteration.txt) for resuming training, or "
+                    "(2) a HuggingFace checkpoint directory (with config.json) for BF16 weight initialization. "
+                    "When an HF checkpoint is given, it overrides --hf-checkpoint for training init only, "
+                    "allowing --hf-checkpoint to point to a quantized model (e.g. FP8) for the rollout engine."
+                ),
+            )
             parser.add_argument(
                 "--ckpt-step",
                 type=int,
@@ -748,10 +760,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "ppo",
                 ],
                 default="grpo",
-                help=(
-                    "Advantage estimator to use. Note: on-policy distillation (OPD) is now orthogonal "
-                    "to the advantage estimator. Use --opd-kl-coef > 0 to enable OPD on top of any estimator."
-                ),
+                help="Advantage estimator to use.",
             )
             parser.add_argument(
                 "--disable-compute-advantages-and-returns",
@@ -876,45 +885,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=float,
                 default=1e-4,
                 help="The threshold for Off-Policy Sequence Masking (OPSM).",
-            )
-            return parser
-
-        def add_on_policy_distillation_arguments(parser):
-            """Add on-policy distillation (OPD) related arguments.
-
-            OPD is orthogonal to advantage estimators and can be applied on top of
-            any estimator (GRPO, PPO, etc.) by adding a KL penalty to advantages.
-            """
-            parser.add_argument(
-                "--use-opd",
-                action="store_true",
-                default=False,
-                help="Enable on-policy distillation (OPD). Must specify --opd-type when enabled.",
-            )
-            parser.add_argument(
-                "--opd-type",
-                type=str,
-                choices=["sglang"],
-                default=None,
-                help=(
-                    "Type of on-policy distillation. "
-                    "'sglang': Teacher log-probs are obtained from external SGLang server during rollout."
-                ),
-            )
-            parser.add_argument(
-                "--opd-kl-coef",
-                type=float,
-                default=1.0,
-                help="On-policy distillation KL penalty coefficient. Default is 1.0.",
-            )
-            parser.add_argument(
-                "--opd-teacher-load",
-                type=str,
-                default=None,
-                help="The checkpoint for OPD teacher model.",
-            )
-            parser.add_argument(
-                "--opd-teacher-ckpt-step", type=int, default=None, help="The checkpoint step for OPD teacher model."
             )
             return parser
 
@@ -1206,7 +1176,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
         parser = add_data_arguments(parser)
         parser = add_eval_arguments(parser)
         parser = add_algo_arguments(parser)
-        parser = add_on_policy_distillation_arguments(parser)
         parser = add_wandb_arguments(parser)
         parser = add_tensorboard_arguments(parser)
         parser = add_router_arguments(parser)
@@ -1331,22 +1300,6 @@ def slim_validate_args(args):
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
-
-    # Validate on-policy distillation (OPD) arguments
-    if args.use_opd:
-        if args.opd_type is None:
-            raise ValueError("--opd-type must be specified when --use-opd is enabled. Choose 'sglang'.")
-
-        if args.opd_type == "sglang":
-            if args.opd_teacher_load is not None:
-                raise ValueError(
-                    "--opd-teacher-load should not be set when --opd-type=sglang. "
-                    "In sglang mode, teacher log-probs are obtained from external server during rollout."
-                )
-    else:
-        # If OPD is not enabled, opd_teacher_load should not be set
-        if args.opd_teacher_load is not None:
-            raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
 
     if args.eval_interval is not None:
         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
