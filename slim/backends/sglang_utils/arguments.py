@@ -36,7 +36,7 @@ def add_sglang_arguments(parser):
     """
     parser = add_sglang_router_arguments(parser)
     parser.set_defaults(router_balance_abs_threshold=10, router_balance_rel_threshold=1.2)
-    parser.add_argument("--sglang-server-concurrency", type=int, default=512)
+    parser.add_argument("--sglang-server-concurrency", type=int, default=128)
 
     old_add_argument = parser.add_argument
 

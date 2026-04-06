@@ -1,4 +1,3 @@
-# Async GRPO on mixed math+VLM
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
 #   sky launch launch_async.yaml --env-file ../../.env -c slim
 #   sky exec slim launch_async.yaml --env-file ../../.env
@@ -17,7 +16,7 @@ resources:
   image_id:
     us-east-1: ami-0174b3ccd6205fa2c
     us-east-2: ami-09ff047017f875dd1
-    us-west-1: ami-06db04dfe605fa44c
+    us-west-1: ami-06db04dfe605fb44c
     us-west-2: ami-002d8d829a188f605
 
 envs:

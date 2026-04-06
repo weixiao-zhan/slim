@@ -1,8 +1,11 @@
 import argparse
 import dataclasses
+import logging
 from dataclasses import dataclass
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,4 +105,12 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
     # Hybrid sharding fall back to full shard on single node.
     if args.fsdp_strategy == "hybrid" and args.actor_num_nodes <= 1:
         args.fsdp_strategy = "full"
+
+    if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "use_peft", False):
+        logger.warning(
+            "--fsdp-cpu-offload and --use-peft would cause "
+            "extremely slow weight sync due to merge/unmerge "
+            "adaptor in CPU DTensors."
+        )
+
     return args
