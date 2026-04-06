@@ -99,6 +99,5 @@ EVAL_ARGS=(
 
 - [SGLang Config](sglang-config.md) -- Multi-model serving, PD disaggregation, YAML deployment
 - [Speculative Decoding](speculative-decoding.md) -- MTP-based draft model acceleration
-- [On-Policy Distillation](on-policy-distillation.md) -- Teacher-student distillation via SGLang
 - [Fault Tolerance](fault-tolerance.md) -- Heartbeat-based rollout recovery
 - [PD Disaggregation](pd-disaggregation.md) -- Prefill-decode separation

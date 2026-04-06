@@ -52,13 +52,8 @@ class FSDPTrainRayActor(TrainRayActor):
     """
 
     @with_defer(lambda: Timer().start("train_wait"))
-    def init(self, args: Namespace, role: str, with_ref: bool = False, with_opd_teacher: bool = False) -> int:  # type: ignore[override]
-        if with_opd_teacher:
-            raise NotImplementedError(
-                "On-policy distillation (OPD) with a local teacher model is not supported. "
-                "Please use --opd-type=sglang with an external teacher server."
-            )
-        super().init(args, role, with_ref, with_opd_teacher)
+    def init(self, args: Namespace, role: str, with_ref: bool = False) -> int:  # type: ignore[override]
+        super().init(args, role, with_ref)
 
         # Setup device mesh for data parallelism
         self._setup_device_mesh()
@@ -87,6 +82,8 @@ class FSDPTrainRayActor(TrainRayActor):
         self.prof = TrainProfiler(args)
 
         # Determine checkpoint paths based on role
+        from .checkpoint import is_hf_checkpoint
+
         self._is_critic = role == "critic"
         if self._is_critic:
             self._checkpoint_load_dir = args.critic_save  # resume from critic checkpoints
@@ -96,7 +93,17 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             self._checkpoint_load_dir = args.load
             self._checkpoint_save_dir = args.save
-            hf_checkpoint = args.hf_checkpoint
+            # When --load points to an HF checkpoint (e.g. BF16 model), use it
+            # for training weight init so that --hf-checkpoint can independently
+            # point to a quantized model (e.g. FP8) for the rollout engine.
+            if args.load and is_hf_checkpoint(args.load):
+                hf_checkpoint = args.load
+                logger.info(
+                    f"Detected HF checkpoint at --load={args.load}; "
+                    f"using it for training init (--hf-checkpoint={args.hf_checkpoint} used for rollout/tokenizer)."
+                )
+            else:
+                hf_checkpoint = args.hf_checkpoint
             lr = args.lr
 
         for i in range(dist.get_world_size()):

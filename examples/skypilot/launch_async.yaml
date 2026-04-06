@@ -21,7 +21,7 @@ resources:
     us-west-2: ami-002d8d829a188f605
 
 envs:
-  MODEL_NAME: Qwen3-VL-2B-Instruct
+  MODEL_NAME: Qwen3-VL-4B-Instruct
 
 setup: | # shell
   set -ex
@@ -117,13 +117,13 @@ run: | # shell
     -- python3 train_async.py \
     \
     --num-rollout 200 \
-    --rollout-batch-size 64 \
-    --n-samples-per-prompt 8 \
+    --rollout-batch-size 32 \
+    --n-samples-per-prompt 16 \
     --rollout-max-context-len 8192 \
     --rollout-temperature 1 \
     --num-steps-per-rollout 1 \
     --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
-    --over-sampling-batch-size 96 \
+    --over-sampling-batch-size 64 \
     \
     --prompt-data ${DATASET_DIR}/train.parquet \
     --rm-type math \
@@ -134,14 +134,14 @@ run: | # shell
     --n-samples-per-eval-prompt 1 \
     --eval-max-context-len 8192 \
     \
-    --rollout-num-gpus 7 \
+    --rollout-num-gpus 6 \
     --rollout-num-gpus-per-engine 1 \
     --sglang-mem-fraction-static 0.6 \
     --sglang-attention-backend flashinfer \
     --sglang-mm-enable-dp-encoder \
     --use-fault-tolerance \
     \
-    --actor-num-nodes 1 \
+    --actor-num-nodes 2 \
     --actor-num-gpus-per-node 1 \
     --attn-implementation flash_attention_2 \
     --gradient-checkpointing \

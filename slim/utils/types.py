@@ -42,7 +42,6 @@ class Episode:
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     multimodal_train_inputs: dict[str, Any] | None = None
     generated_text: str | None = None                  # cached decode of loss_mask==1 tokens, set by RM
-    teacher_log_probs: list[float] | None = None
     weight_versions: list[str] = field(default_factory=list)
     non_generation_time: float = 0.0
     train_metadata: dict | None = None

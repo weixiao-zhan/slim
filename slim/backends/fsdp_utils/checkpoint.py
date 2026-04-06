@@ -78,15 +78,29 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+def is_hf_checkpoint(path: str | Path) -> bool:
+    """Return True if *path* looks like a HuggingFace checkpoint directory.
+
+    A HuggingFace checkpoint has ``config.json`` at its root but no
+    ``latest_checkpointed_iteration.txt`` (which marks a slim DCP checkpoint).
+    """
+    p = Path(path).expanduser()
+    return p.is_dir() and (p / "config.json").exists() and not (p / "latest_checkpointed_iteration.txt").exists()
+
+
 def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
     """Resolve the latest checkpoint directory from a load root and args.
 
     Returns the ``iter_NNNNNNN`` directory Path, or None if not found.
+    Skips HF checkpoint directories (handled separately by the actor).
     """
     if load_root is None:
         return None
     root_path = Path(load_root).expanduser()
     if not root_path.exists():
+        return None
+    # HF checkpoints are not DCP — the actor handles them via from_pretrained.
+    if is_hf_checkpoint(root_path):
         return None
     direct_match = _ITERATION_DIR_PATTERN.fullmatch(root_path.name)
     if direct_match is not None:
