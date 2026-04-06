@@ -1,19 +1,19 @@
 # GRPO on mixed math+VLM — 2 nodes, colocated rollout, HSDP (hybrid sharding)
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
 #   sky launch launch.yaml --env-file ../../.env -c slim
-#   sky exec slim launch.yaml --env-file ../../.env
+#   c
 
 name: grpo-mixed-math-vlm
 
 workdir: ../..
 
-num_nodes: 2
+num_nodes: 1
 
 resources:
   infra: aws/us-west-2
   instance_type: p5.48xlarge
   disk_size: 500
-  network_tier: best  # Enables EFA
+  # network_tier: best  # Enables EFA
   image_id:
     us-east-1: ami-0174b3ccd6205fa2c
     us-east-2: ami-09ff047017f875dd1
@@ -21,7 +21,7 @@ resources:
     us-west-2: ami-002d8d829a188f605
 
 envs:
-  MODEL_NAME: Qwen3-VL-8B-Instruct
+  MODEL_NAME: Qwen3-VL-32B-Instruct
 
 setup: | # shell
   set -ex
@@ -66,7 +66,9 @@ run: | # shell
   pkill -9 slim 2>/dev/null || true
   sleep 10
 
+  # =========================================================================
   # Worker nodes: connect to Ray head and block
+  # =========================================================================
   if [ "${SKYPILOT_NODE_RANK}" != "0" ]; then
     echo "=== Starting Ray worker node (rank ${SKYPILOT_NODE_RANK}) ==="
     WORKER_IP=$(echo $SKYPILOT_NODE_IPS | awk -v idx=$((SKYPILOT_NODE_RANK + 1)) '{print $idx}')
@@ -168,12 +170,13 @@ run: | # shell
     --actor-num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
-    --update-weight-buffer-size 536870912 \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 8192 \
+    --update-weight-buffer-size 536870912 \
     --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' \
+    --fsdp-cpu-offload \
     \
-    --advantage-estimator grpo \
+    --advantage-estimator gspo \
     --disable-grpo-std-normalization \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \

@@ -1,4 +1,4 @@
-# Async GRPO on mixed math+VLM — 1 node, separate rollout/actor, FlashInfer + FA2
+# Async GRPO on mixed math+VLM
 # USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
 #   sky launch launch_async.yaml --env-file ../../.env -c slim
 #   sky exec slim launch_async.yaml --env-file ../../.env
@@ -11,7 +11,7 @@ num_nodes: 1
 
 resources:
   infra: aws/us-west-2
-  instance_type: p4de.24xlarge
+  instance_type: p5.48xlarge
   disk_size: 500
   # network_tier: best  # Enables EFA
   image_id:
@@ -67,7 +67,32 @@ run: | # shell
   sleep 10
 
   # =========================================================================
-  # Head node: start Ray head (single node)
+  # Worker nodes: connect to Ray head and block
+  # =========================================================================
+  if [ "${SKYPILOT_NODE_RANK}" != "0" ]; then
+    echo "=== Starting Ray worker node (rank ${SKYPILOT_NODE_RANK}) ==="
+    WORKER_IP=$(echo $SKYPILOT_NODE_IPS | awk -v idx=$((SKYPILOT_NODE_RANK + 1)) '{print $idx}')
+
+    uv run ray start \
+      --address=${MASTER_ADDR}:${RAY_PORT} \
+      --num-gpus ${SKYPILOT_NUM_GPUS_PER_NODE} \
+      --node-ip-address ${WORKER_IP} \
+      --disable-usage-stats \
+      --dashboard-agent-listen-port=${RAY_DASHBOARD_AGENT_LISTEN_PORT} \
+      --dashboard-agent-grpc-port=${RAY_DASHBOARD_AGENT_GRPC_PORT} \
+      --object-manager-port=${RAY_OBJECT_MANAGER_PORT} \
+      --node-manager-port=${RAY_NODE_MANAGER_PORT} \
+      --min-worker-port=${RAY_MIN_WORKER_PORT} \
+      --max-worker-port=${RAY_MAX_WORKER_PORT} \
+      --metrics-export-port=${RAY_METRICS_EXPORT_PORT} \
+      --block
+
+    echo "=== Worker node exiting ==="
+    exit 0
+  fi
+
+  # =========================================================================
+  # Head node: start Ray head
   # =========================================================================
   echo "=== Starting Ray head node ==="
   uv run ray start --head \
@@ -108,7 +133,7 @@ run: | # shell
   RUNTIME_ENV_JSON="{
     \"env_vars\": {
       \"RAY_DEDUP_LOGS\": \"1\",
-      \"NCCL_NVLS_ENABLE\": \"0\"
+      \"NCCL_NVLS_ENABLE\": \"1\"
     }
   }"
 
@@ -137,13 +162,13 @@ run: | # shell
     --rollout-num-gpus 6 \
     --rollout-num-gpus-per-engine 1 \
     --sglang-mem-fraction-static 0.6 \
-    --sglang-attention-backend flashinfer \
+    --sglang-attention-backend fa3 \
     --sglang-mm-enable-dp-encoder \
     --use-fault-tolerance \
     \
     --actor-num-nodes 2 \
     --actor-num-gpus-per-node 1 \
-    --attn-implementation flash_attention_2 \
+    --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 16384 \
