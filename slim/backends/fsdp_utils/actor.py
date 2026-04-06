@@ -379,6 +379,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
         print_memory("before offload model")
 
+        if hasattr(self.model, "peft_config"):
+            self.model.merge_adapter()
+
         self.model.cpu()
         move_torch_optimizer(self.optimizer, "cpu")
         clear_memory()
@@ -393,6 +396,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.model.cuda()
         move_torch_optimizer(self.optimizer, "cuda")
+
+        if hasattr(self.model, "peft_config"):
+            self.model.unmerge_adapter()
+
         dist.barrier(group=get_gloo_group())
         print_memory("after wake_up model")
 
@@ -1042,21 +1049,20 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
-        # PEFT: merge adapters into base weights so state_dict() returns merged weights
-        # that sglang can use directly. Unmerge after sync to restore training state.
-        # When model is on CPU (after offload_train/sleep), wake up for merge then sleep after.
+        # PEFT weight sync: state_dict() must return merged (base + adapter) weights
+        # colocate (offload_train): sleep() already merged before moving to CPU, wake_up() will unmerge.
+        # separate : model is on GPU, merge/sync/unmerge in place.
         is_peft = hasattr(self.model, "peft_config")
         if is_peft:
-            was_cpu = next(self.model.parameters()).is_cpu
-            if was_cpu:
-                self.wake_up()
-            self.model.merge_adapter()
-            try:
+            if self.args.offload_train:
+                # Already merged by sleep(), just sync.
                 self.weight_updater.update_weights(peft_remap=True)
-            finally:
-                self.model.unmerge_adapter()
-                if was_cpu:
-                    self.sleep()
+            else:
+                self.model.merge_adapter()
+                try:
+                    self.weight_updater.update_weights(peft_remap=True)
+                finally:
+                    self.model.unmerge_adapter()
         else:
             self.weight_updater.update_weights()
 

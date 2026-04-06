@@ -17,7 +17,7 @@ except ImportError:
 
 from sglang.srt.utils import MultiprocessingSerializer
 
-from slim.utils.distributed_utils import init_process_group
+from slim.utils.distributed_utils import get_gloo_group, init_process_group
 
 try:
     from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
@@ -93,6 +93,7 @@ class UpdateWeight(abc.ABC):
             for name, param in bucket
         ]
         self.update_bucket_weights(bucket, weight_version=self.weight_version)
+        dist.barrier(group=get_gloo_group())
 
     @abc.abstractmethod
     def update_bucket_weights(self, named_tensors, weight_version=None) -> None:
