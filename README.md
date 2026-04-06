@@ -20,11 +20,6 @@ Thus we forked `slim` — keeping Slime's customizability and efficient RL orche
 - [x] Improve dataset loading: datasets now use a finite set of supported columns (`prompt`, `label`, and optional multimodal / control columns) and defer `apply_chat_template` to rollout time. ([upstream discussion](https://github.com/THUDM/slime/issues/1231))
 - [x] Remove megatron dependency. No more mbridge converter and docker. It's `uv` friendly now.
 
-### 🚧 Known Broken Features
-
-- **sglang v0.5.9** release won't load Qwen3-VL vision weight correctly. [fix](https://github.com/sgl-project/sglang/commit/d566816d838ce92d3ae044209f7d67eaa58ce74a)
-- **rollout engine TP==1** weight sync not supported to TP > 1 sgl
-
 ## What Changed from Upstream slime
 
 | | slime (v0.2.3+) | slim |
