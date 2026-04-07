@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 try:
@@ -26,12 +27,31 @@ def load_hf_dataset(path: str):
     import datasets as hf_datasets
 
     real_path, row_slice = _parse_generalized_path(path)
-    if real_path.endswith(".jsonl"):
+
+    # Directory-based HF dataset: require explicit split via "path:split" syntax
+    split_name = None
+    if ":" in real_path:
+        real_path, split_name = real_path.rsplit(":", 1)
+
+    if os.path.isdir(real_path):
+        loaded = hf_datasets.load_from_disk(real_path)
+        if isinstance(loaded, hf_datasets.DatasetDict):
+            if split_name is None:
+                raise ValueError(
+                    f"Path {real_path} is a DatasetDict with splits {list(loaded.keys())}. "
+                    f"Specify a split with 'path:split_name' syntax (e.g., '{real_path}:train')."
+                )
+            if split_name not in loaded:
+                raise ValueError(f"Split '{split_name}' not found in {real_path}. Available: {list(loaded.keys())}")
+            dataset = loaded[split_name]
+        else:
+            dataset = loaded
+    elif real_path.endswith(".jsonl"):
         dataset = hf_datasets.load_dataset("json", data_files=real_path, split="train")
     elif real_path.endswith(".parquet"):
         dataset = hf_datasets.load_dataset("parquet", data_files=real_path, split="train")
     else:
-        raise ValueError(f"Unsupported file format: {real_path}. Supported formats are .jsonl and .parquet.")
+        raise ValueError(f"Unsupported file format: {real_path}. Supported formats are .jsonl, .parquet, or a directory.")
 
     if row_slice is not None:
         logger.info("load_hf_dataset path=%s applying slice row_slice=%s", real_path, row_slice)
