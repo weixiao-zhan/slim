@@ -1035,8 +1035,17 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
+        # Two-phase recovery (matches upstream slime pattern):
+        # Phase 1: only rank 0 triggers recovery so start_engines() sets
+        #          num_new_engines exactly once (subsequent calls would reset it to 0).
+        if self.args.use_fault_tolerance:
+            if dist.get_rank() == 0:
+                ray.get(self.rollout_manager.recover_and_get_updatable_engines.remote())
+            dist.barrier(group=get_gloo_group())
+
+        # Phase 2: all ranks read the now-stable engine handles.
         rollout_engines, rollout_engine_lock, num_new_engines, engine_gpu_counts, engine_gpu_offsets = ray.get(
-            self.rollout_manager.recover_and_get_updatable_engines.remote()
+            self.rollout_manager.get_updatable_engines_and_lock.remote()
         )
         if num_new_engines > 0:
             self.weight_updater.connect_rollout_engines(

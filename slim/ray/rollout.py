@@ -509,6 +509,19 @@ class RolloutManager:
         for srv in self.servers.values():
             srv.onload_kv()
 
+    def get_updatable_engines_and_lock(self):
+        """Return engines eligible for weight updates (read-only, no recovery).
+
+        All ranks call this after rank-0 has already called
+        ``recover_and_get_updatable_engines``, so ``num_new_engines`` is stable.
+        """
+        srv = self._get_updatable_server()
+        engines = srv.engines if srv else []
+        gpu_counts = srv.engine_gpu_counts if srv else []
+        gpu_offsets = srv.engine_gpu_offsets if srv else []
+        num_new = srv.num_new_engines if srv else 0
+        return engines, self.rollout_engine_lock, num_new, gpu_counts, gpu_offsets
+
     def clear_updatable_num_new_engines(self):
         srv = self._get_updatable_server()
         if srv:
