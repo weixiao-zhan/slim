@@ -171,8 +171,6 @@ run: | # shell
     --gradient-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 16384 \
-    --update-weight-buffer-size 536870912 \
-    --train-env-vars '{"PYTORCH_CUDA_ALLOC_CONF":"expandable_segments:True"}' \
     \
     --advantage-estimator gspo \
     --disable-grpo-std-normalization \

@@ -36,11 +36,9 @@ run_train "
     --critic-num-gpus-per-node 4
     --attn-implementation flash_attention_3
     --gradient-checkpointing
-    --update-weight-buffer-size 536870912
     --colocate
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
-    --train-env-vars '{\"PYTORCH_CUDA_ALLOC_CONF\":\"expandable_segments:True\"}'
 
     --advantage-estimator ppo
     --gamma 1.0
