@@ -320,10 +320,9 @@ async def abort(args: Namespace) -> list[dict]:
     while state.pendings:
         done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
 
-        if not args.partial_rollout:
-            continue
-
-        # for partial rollout, collect the partial examples into the data buffer
+        # Recycle aborted/incomplete groups back to the data buffer so they
+        # can be retried in a later rollout.  Only groups explicitly rejected
+        # by the dynamic filter (e.g. zero-std) are truly discarded.
         for task in done:
             group = task.result()
             if not group.completed:

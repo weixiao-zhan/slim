@@ -13,6 +13,7 @@ Thus we forked `slim` — keeping Slime's customizability and efficient RL orche
 2. DP ONLY: with most open-source dense model cap at 30B (Qwen3, Qwen3.5, Gemma4), data parallel is sufficient. Single H200 can easily support them.
 
 ### 🏗️ Features
+- [x] Oversampled groups that are partial complete or never generated are not discarded and save to next step
 - [x] Support multi-modal mixed dataset
 - [x] Add PEFT (Lora / Dora)
 - [x] Overlap actor forward pass for ref-log-probs and critic forward pass for values.
