@@ -12,6 +12,7 @@ import sglang_router
 import torch
 from packaging.version import parse
 from tqdm import tqdm
+from tqdm.asyncio import tqdm as atqdm
 
 from slim.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slim.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
@@ -460,19 +461,14 @@ async def eval_rollout_single_dataset(
                 sampling_params["sampling_seed"] = args.rollout_seed + j
             tasks.append(asyncio.create_task(generate_and_rm(args, episode, sampling_params=sampling_params, evaluation=True)))
 
+    raw_episodes = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
     episodes = []
-    do_print = True
-    pbar = tqdm(total=len(tasks), desc=f"Eval {dataset_cfg.name}", disable=not do_print)
-    for coro in asyncio.as_completed(tasks):
-        episode = await coro
-        if do_print:
+    for i, episode in enumerate(raw_episodes):
+        if i == 0:
             logger.info(f"eval_rollout_single_dataset example data: {[_episode_full_text(args, episode)]} reward={episode.reward}")
-            do_print = False
         episode.ensure_edge_alignment()
         episode.freeze()
         episodes.append(episode)
-        pbar.update(1)
-    pbar.close()
 
     return {dataset_cfg.name: episodes}
 
