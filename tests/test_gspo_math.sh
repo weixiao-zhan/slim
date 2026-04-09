@@ -20,10 +20,10 @@ run_train "
     --prompt-data $DATASET_DIR/gsm8k/train.parquet
     --rm-type math
     --rollout-shuffle
-    --log-passrate
+    --eval-log-passrate
     --eval-interval 20
     --eval-prompt-data gsm8k_test $DATASET_DIR/gsm8k/test.parquet
-    --n-samples-per-eval-prompt 1
+    --eval-n-samples-per-prompt 1
     --eval-max-context-len 2048
 
     --rollout-num-gpus-per-engine 1

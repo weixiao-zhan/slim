@@ -619,7 +619,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
 
             parser.add_argument(
-                "--n-samples-per-eval-prompt",
+                "--eval-n-samples-per-prompt",
                 type=int,
                 default=1,
                 help="number of responses for each prompt in generation",
@@ -941,7 +941,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Whether to log information for multi-turn rollout.",
             )
             parser.add_argument(
-                "--log-passrate",
+                "--eval-log-passrate",
                 action="store_true",
                 default=False,
                 help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
@@ -960,6 +960,16 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
+            )
+            parser.add_argument(
+                "--eval-save-rollout",
+                type=str,
+                default=None,
+                help=(
+                    "Save eval rollout tokens and rewards to this path template. "
+                    "Use {rollout_id} as placeholder. Saved as .pt with per-dataset "
+                    "flat rewards and tokens, ordered same as dataset * eval_n_samples_per_prompt."
+                ),
             )
             parser.add_argument("--wandb-run-id", type=str, default=None)
             return parser

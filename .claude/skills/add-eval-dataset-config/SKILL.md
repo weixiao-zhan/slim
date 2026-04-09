@@ -38,7 +38,7 @@ Example:
 ```yaml
 eval:
   defaults:
-    n_samples_per_eval_prompt: 1
+    eval_n_samples_per_prompt: 1
     temperature: 0.7
     top_p: 1.0
   datasets:
@@ -61,7 +61,7 @@ eval:
 
 Common overridable fields include:
 
-- Runtime: `n_samples_per_eval_prompt`, `temperature`, `top_p`, `top_k`, `max_response_len`
+- Runtime: `eval_n_samples_per_prompt`, `temperature`, `top_p`, `top_k`, `max_response_len`
 - Sample keys: `input_key`, `label_key`, `tool_key`, `metadata_key`
 - Extra: `rm_type`, `custom_generate_function_path`, `metadata_overrides`
 

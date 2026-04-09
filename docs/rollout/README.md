@@ -89,7 +89,7 @@ Samples 64 prompts, filters groups with zero reward variance, and re-samples whe
 EVAL_ARGS=(
    --eval-interval 5
    --eval-prompt-data aime /root/aime-2024/aime-2024.parquet
-   --n-samples-per-eval-prompt 16
+   --eval-n-samples-per-prompt 16
    --eval-max-context-len 16384
    --eval-top-p 1
 )

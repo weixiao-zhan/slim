@@ -20,7 +20,14 @@ from slim.utils.env_utils import get_nvidia_ld_library_path
 from slim.utils.health_monitor import RolloutHealthMonitor
 from slim.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
 from slim.utils.logging_utils import configure_logger, init_tracking
-from slim.utils.metric_utils import compute_pass_rate, compute_rollout_step, compute_statistics, dict_add_prefix
+from slim.utils.metric_utils import (
+    compute_consensus,
+    compute_majority_vote,
+    compute_pass_rate,
+    compute_rollout_step,
+    compute_statistics,
+    dict_add_prefix,
+)
 from slim.utils.misc import group_by, load_function
 from slim.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slim.utils.types import Episode
@@ -998,10 +1005,18 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
         rewards = [ep.reward for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
-        if args.log_passrate:
+        if args.eval_log_passrate:
             log_dict |= dict_add_prefix(
-                compute_pass_rate(flat_rewards=rewards, group_size=args.n_samples_per_eval_prompt),
-                f"eval/{key}-",
+                compute_pass_rate(flat_rewards=rewards, group_size=args.eval_n_samples_per_prompt),
+                f"eval/{key}/sampling/",
+            )
+            log_dict |= dict_add_prefix(
+                compute_majority_vote(flat_rewards=rewards, group_size=args.eval_n_samples_per_prompt),
+                f"eval/{key}/sampling/",
+            )
+            log_dict |= dict_add_prefix(
+                compute_consensus(flat_rewards=rewards, group_size=args.eval_n_samples_per_prompt),
+                f"eval/{key}/sampling/",
             )
 
     logger.info(f"eval {rollout_id}: {log_dict}")
@@ -1010,7 +1025,24 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
     log_dict["eval/step"] = step
     logging_utils.log(args, log_dict, step_key="eval/step")
 
+    _save_eval_rollout(rollout_id, args, data)
+
     return log_dict
+
+
+def _save_eval_rollout(rollout_id, args, data: dict[str, list[Episode]]):
+    if (path_template := args.eval_save_rollout) is None:
+        return
+    path = Path(path_template.format(rollout_id=rollout_id))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_dict = {}
+    for key, episodes in data.items():
+        save_dict[key] = {
+            "tokens": [ep.tokens for ep in episodes],
+            "rewards": torch.tensor([ep.reward for ep in episodes]),
+        }
+    torch.save(save_dict, path)
+    logger.info(f"Saved eval rollout to {path}")
 
 
 def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_metrics, rollout_time):

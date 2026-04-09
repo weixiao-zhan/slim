@@ -56,6 +56,79 @@ def _estimate_pass_at_k(num_samples, num_correct, k):
     return np.array([estimator(int(n), int(c), k) for n, c in zip(num_samples, num_correct, strict=False)])
 
 
+def compute_majority_vote(
+    flat_rewards: list[float],
+    group_size: int,
+    num_groups: int | None = None,
+):
+    if num_groups is None:
+        num_groups = len(flat_rewards) // group_size
+
+    # k = 2^i - 1, starting from k=3, up to group_size
+    maj_k_list = [2**i - 1 for i in range(2, group_size.bit_length() + 1) if 2**i - 1 <= group_size]
+    if not maj_k_list:
+        return {}
+
+    assert len(flat_rewards) == num_groups * group_size, f"{len(flat_rewards)=} {num_groups=} {group_size=}"
+    rewards_of_group = np.array(flat_rewards).reshape(num_groups, group_size)
+    num_correct = np.sum(rewards_of_group == 1, axis=1).astype(int)
+
+    log_dict = {}
+    for k in maj_k_list:
+        threshold = (k + 1) // 2  # k is always odd
+        estimates = np.array([
+            _hypergeometric_tail(group_size, int(c), k, threshold) for c in num_correct
+        ])
+        log_dict[f"maj@{k}"] = np.mean(estimates).item()
+
+    return log_dict
+
+
+def compute_consensus(
+    flat_rewards: list[float],
+    group_size: int,
+    num_groups: int | None = None,
+):
+    if group_size == 1:
+        return {}
+
+    if num_groups is None:
+        num_groups = len(flat_rewards) // group_size
+
+    cons_k_list = [2**i for i in range(int(math.log2(group_size)) + 1)]
+
+    assert len(flat_rewards) == num_groups * group_size, f"{len(flat_rewards)=} {num_groups=} {group_size=}"
+    rewards_of_group = np.array(flat_rewards).reshape(num_groups, group_size)
+    num_correct = np.sum(rewards_of_group == 1, axis=1).astype(int)
+
+    log_dict = {}
+    for k in cons_k_list:
+        total_comb = math.comb(group_size, k)
+        all_correct = np.array([math.comb(int(c), k) for c in num_correct], dtype=float)
+        all_wrong = np.array([math.comb(group_size - int(c), k) for c in num_correct], dtype=float)
+
+        consensus_probs = (all_correct + all_wrong) / total_comb
+        correct_probs = all_correct / total_comb
+
+        log_dict[f"cons@{k}-rate"] = np.mean(consensus_probs).item()
+        total_consensus = np.sum(consensus_probs)
+        log_dict[f"cons@{k}-acc"] = (np.sum(correct_probs) / total_consensus).item() if total_consensus > 0 else 0.0
+
+    return log_dict
+
+
+def _hypergeometric_tail(n: int, c: int, k: int, threshold: int) -> float:
+    """P(X >= threshold) where X ~ Hypergeometric(N=n, K=c, n=k)."""
+    total = math.comb(n, k)
+    if total == 0:
+        return 0.0
+    favorable = sum(
+        math.comb(c, j) * math.comb(n - c, k - j)
+        for j in range(threshold, min(c, k) + 1)
+    )
+    return favorable / total
+
+
 def compute_statistics(values: list[float]) -> dict[str, float]:
     values = np.array(values)
     return {

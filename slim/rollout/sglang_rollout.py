@@ -450,7 +450,7 @@ async def eval_rollout_single_dataset(
 
     tasks = []
     for raw_row in dataset:
-        for j in range(dataset_cfg.n_samples_per_eval_prompt):
+        for j in range(dataset_cfg.eval_n_samples_per_prompt):
             episode = Episode.from_example(raw_row)
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)

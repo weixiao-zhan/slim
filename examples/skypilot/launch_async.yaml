@@ -152,10 +152,10 @@ run: | # shell
     --prompt-data ${DATASET_DIR}/train.parquet \
     --rm-type math \
     --rollout-shuffle \
-    --log-passrate \
+    --eval-log-passrate \
     --eval-interval 20 \
     --eval-prompt-data math ${DATASET_DIR}/test_math.parquet geo3k ${DATASET_DIR}/test_geo3k.parquet \
-    --n-samples-per-eval-prompt 1 \
+    --eval-n-samples-per-prompt 1 \
     --eval-max-context-len 8192 \
     \
     --rollout-num-gpus 6 \
