@@ -1033,16 +1033,11 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
 def _save_eval_rollout(rollout_id, args, data: dict[str, list[Episode]]):
     if (path_template := args.eval_save_rollout) is None:
         return
-    path = Path(path_template.format(rollout_id=rollout_id))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    save_dict = {}
     for key, episodes in data.items():
-        save_dict[key] = {
-            "tokens": [ep.tokens for ep in episodes],
-            "rewards": torch.tensor([ep.reward for ep in episodes]),
-        }
-    torch.save(save_dict, path)
-    logger.info(f"Saved eval rollout to {path}")
+        path = Path(path_template.format(rollout_id=rollout_id, dataset_key=key))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save([ep.tokens for ep in episodes], path)
+        logger.info(f"Saved eval rollout to {path}")
 
 
 def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_metrics, rollout_time):
