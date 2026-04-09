@@ -8,10 +8,10 @@ _MISSING = object()
 
 # TODO: This is ugly, temporarily leave this. We should unify all the config name for dataset, default, and args. (advice from Tom.)
 DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
-    "n_samples_per_eval_prompt": {
-        "dataset_keys": ("n_samples_per_eval_prompt",),
-        "default_keys": ("n_samples_per_eval_prompt",),
-        "arg_attrs": ("n_samples_per_eval_prompt", "n_samples_per_prompt"),
+    "eval_n_samples_per_prompt": {
+        "dataset_keys": ("eval_n_samples_per_prompt",),
+        "default_keys": ("eval_n_samples_per_prompt",),
+        "arg_attrs": ("eval_n_samples_per_prompt", "n_samples_per_prompt"),
     },
     "temperature": {
         "dataset_keys": ("temperature",),
@@ -76,7 +76,7 @@ class EvalDatasetConfig:
     path: str
     rm_type: str | None = None
 
-    n_samples_per_eval_prompt: int | None = None
+    eval_n_samples_per_prompt: int | None = None
 
     temperature: float | None = None
     top_p: float | None = None
