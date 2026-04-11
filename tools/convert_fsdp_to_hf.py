@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import pickle
 import shutil
@@ -72,8 +73,10 @@ def _load_fsdp_state_dict(input_dir: str) -> dict[str, torch.Tensor]:
 
 def _get_candidate_prefixes(keys: list[str]) -> list[str]:
     predefined = [
+        "model_state.model.base_model.model.",  # FSDP + PEFT
         "model_state.model.",
         "model_state.",
+        "base_model.model.",  # PEFT only
         "model.",
         "module.",
         "",
@@ -105,6 +108,64 @@ def _strip_best_prefix(keys: list[str], target_keys: set[str]) -> tuple[str, int
     return best_prefix, best_match
 
 
+def _is_lora_checkpoint(keys: list[str]) -> bool:
+    return any(".lora_A." in k for k in keys)
+
+
+def _merge_lora_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    lora_alpha: float,
+    lora_r: int,
+    device: torch.device | str = "cpu",
+) -> dict[str, torch.Tensor]:
+    """Merge LoRA adapter weights into base weights and return a clean HF state dict."""
+    scaling = lora_alpha / lora_r
+
+    lora_a_suffix = ".lora_A.default.weight"
+    lora_modules = {k.removesuffix(lora_a_suffix) for k in state_dict if k.endswith(lora_a_suffix)}
+
+    merged: dict[str, torch.Tensor] = {}
+    handled: set[str] = set()
+
+    for module in sorted(lora_modules):
+        a_key = f"{module}.lora_A.default.weight"
+        b_key = f"{module}.lora_B.default.weight"
+        base_key = f"{module}.base_layer.weight"
+
+        lora_a = state_dict[a_key].to(device)
+        lora_b = state_dict[b_key].to(device)
+        base_w = state_dict[base_key].to(device)
+
+        merged[f"{module}.weight"] = (base_w + (lora_b @ lora_a) * scaling).cpu()
+        handled.update([a_key, b_key, base_key])
+
+        # Bias (not affected by LoRA, just rename)
+        bias_key = f"{module}.base_layer.bias"
+        if bias_key in state_dict:
+            merged[f"{module}.bias"] = state_dict[bias_key]
+            handled.add(bias_key)
+
+    # Pass through remaining keys (layernorm, embeddings, etc.)
+    for key, value in state_dict.items():
+        if key not in handled:
+            merged[key] = value
+
+    print(f"Merged {len(lora_modules)} LoRA modules (scaling={scaling}).")
+    return merged
+
+
+def _infer_dtype(origin_hf_dir: str) -> torch.dtype:
+    """Infer dtype from the base model's safetensors files."""
+    from safetensors import safe_open
+
+    for f in os.listdir(origin_hf_dir):
+        if f.endswith(".safetensors"):
+            with safe_open(os.path.join(origin_hf_dir, f), framework="pt") as sf:
+                key = list(sf.keys())[0]
+                return sf.get_tensor(key).dtype
+    return torch.bfloat16
+
+
 def _build_hf_model(config: AutoConfig) -> torch.nn.Module:
     print(f"Detected model type: {config.model_type}")
     model_cls = AutoModelForImageTextToText if hasattr(config, "vision_config") else AutoModelForCausalLM
@@ -116,6 +177,8 @@ def _convert_fsdp_to_hf(
     origin_hf_dir: str,
     input_dir: str,
     output_dir: str,
+    peft_config: dict | None = None,
+    device: str = "cpu",
 ) -> None:
     print(f"loading FSDP model from {input_dir}")
     t = time.time()
@@ -123,9 +186,12 @@ def _convert_fsdp_to_hf(
     print(f"FSDP model loaded in {time.time()-t:.2f} sec.")
 
     tensor_items = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
+    del state_dict
 
+    # Use meta device to get target keys without allocating real memory
     config = AutoConfig.from_pretrained(origin_hf_dir, trust_remote_code=True)
-    hf_model = _build_hf_model(config)
+    with torch.device("meta"):
+        hf_model = _build_hf_model(config)
     target_keys = set(hf_model.state_dict().keys())
 
     best_prefix, best_match = _strip_best_prefix(list(tensor_items.keys()), target_keys)
@@ -134,6 +200,7 @@ def _convert_fsdp_to_hf(
     print(f"Using prefix '{best_prefix}' for key mapping. " f"Matched {best_match}/{total_keys} parameter keys.")
 
     model_state = {k.removeprefix(best_prefix): v for k, v in tensor_items.items()}
+    del tensor_items
 
     if not model_state:
         raise ValueError(
@@ -141,8 +208,33 @@ def _convert_fsdp_to_hf(
             "Please pass the checkpoint directory (e.g. iter_xxx or iter_xxx/model)."
         )
 
-    missing, unexpected = hf_model.load_state_dict(model_state, strict=False)
-    print(f"Missing keys: {missing}\nUnexpected keys: {unexpected}")
+    # Merge LoRA adapters if this is a PEFT checkpoint
+    if _is_lora_checkpoint(list(model_state.keys())):
+        if peft_config is None:
+            raise ValueError(
+                "Detected LoRA checkpoint but --peft-config not provided. "
+                "Pass the same --peft-config used during training, e.g. "
+                """--peft-config '{"r": 64, "lora_alpha": 128}'"""
+            )
+        lora_r = peft_config["r"]
+        lora_alpha = peft_config.get("lora_alpha", lora_r * 2)
+        model_state = _merge_lora_state_dict(model_state, lora_alpha, lora_r, device=device)
+
+    # Cast to match the base model dtype (FSDP checkpoints store float32 master weights)
+    dtype = _infer_dtype(origin_hf_dir)
+    print(f"Casting to {dtype} (inferred from base model)")
+    model_state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in model_state.items()}
+
+    # Validate keys
+    merged_keys = set(model_state.keys())
+    missing = sorted(target_keys - merged_keys)
+    unexpected = sorted(merged_keys - target_keys)
+    print(f"Missing keys ({len(missing)}): {missing}")
+    print(f"Unexpected keys ({len(unexpected)}): {unexpected}")
+
+    # Load into meta model (assign=True replaces meta tensors, no extra copy)
+    hf_model.load_state_dict(model_state, strict=False, assign=True)
+    del model_state
 
     os.makedirs(output_dir, exist_ok=True)
     hf_model.save_pretrained(output_dir, safe_serialization=True)
@@ -153,13 +245,14 @@ def copy_assets(origin_hf_dir: str, output_dir: str) -> None:
     for filename in os.listdir(origin_hf_dir):
         if filename == "model.safetensors.index.json" or filename.endswith(".safetensors"):
             continue
-        origin_filename = os.path.join(origin_hf_dir, filename)
-        if not os.path.isfile(origin_filename):
-            print(f"Skip {filename}, not a file.")
-            continue
-        src, dst = origin_filename, os.path.join(output_dir, filename)
-        print(f"copy from {src} to {dst}")
-        shutil.copy(src, dst)
+        src = os.path.join(origin_hf_dir, filename)
+        dst = os.path.join(output_dir, filename)
+        if os.path.isdir(src):
+            print(f"copy tree {src} -> {dst}")
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        elif os.path.isfile(src):
+            print(f"copy {src} -> {dst}")
+            shutil.copy(src, dst)
 
 
 if __name__ == "__main__":
@@ -175,11 +268,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "-f", "--force", action="store_true", help="Force overwrite the output directory if it exists."
     )
+    parser.add_argument(
+        "--peft-config",
+        type=str,
+        default=None,
+        help='JSON string of PEFT/LoRA config used during training, e.g. \'{"r": 64, "lora_alpha": 128}\'',
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device for LoRA merge matmul (default: cuda if available).",
+    )
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and not args.force:
         raise ValueError(f"Output directory {args.output_dir} already exists. Use --force to overwrite it.")
 
+    peft_config = json.loads(args.peft_config) if args.peft_config else None
+
     model_dir = _detect_model_dir(args.input_dir)
-    _convert_fsdp_to_hf(args.origin_hf_dir, model_dir, args.output_dir)
+    _convert_fsdp_to_hf(
+        args.origin_hf_dir, model_dir, args.output_dir,
+        peft_config=peft_config, device=args.device,
+    )
     copy_assets(args.origin_hf_dir, args.output_dir)
