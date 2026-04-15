@@ -11,7 +11,7 @@ if [[ -f "$REPO_DIR/.env" ]]; then
     set -a; source "$REPO_DIR/.env"; set +a
 fi
 
-NUM_GPUS="${NUM_GPUS:-8}"
+NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 
 cleanup() {
@@ -23,9 +23,9 @@ cleanup() {
 
 start_ray() {
     cleanup
-    ray stop --force 2>/dev/null || true
+    uv run ray stop --force 2>/dev/null || true
     sleep 2
-    ray start --head --node-ip-address "$MASTER_ADDR" --num-gpus "$NUM_GPUS" --disable-usage-stats
+    uv run ray start --head --node-ip-address "$MASTER_ADDR" --num-gpus "$NUM_GPUS" --disable-usage-stats
 }
 
 run_train() {
@@ -50,7 +50,7 @@ print(json.dumps({'env_vars': {
 ")
 
     export no_proxy="127.0.0.1"
-    ray job submit \
+    uv run ray job submit \
         --address="http://127.0.0.1:${ray_port}" \
         --runtime-env-json="$runtime_env" \
         -- python "$train_script" $train_args

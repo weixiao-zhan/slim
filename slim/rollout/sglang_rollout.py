@@ -126,7 +126,7 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
+async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
     """Tokenize prompt into episode.tokens if not already set.
 
     Sets episode._max_tokens (total context budget) on first call.
@@ -153,7 +153,7 @@ def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_token
             **state.chat_template_kwargs,
         )
         mm = {k: v for k, v in (multimodal_inputs or {}).items() if v}
-        processor_output = state.processor(text=prompt_text, **mm, return_tensors="pt")
+        processor_output = await asyncio.to_thread(state.processor, text=prompt_text, **mm, return_tensors="pt")
         prompt_ids = processor_output["input_ids"][0].tolist()
         episode.multimodal_train_inputs = {
             k: v
@@ -188,7 +188,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
-    _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
+    await _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
 
     assert episode.rollout_log_probs is not None
     max_new_tokens = episode._max_tokens - len(episode.tokens)

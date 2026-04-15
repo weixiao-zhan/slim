@@ -41,6 +41,12 @@ class Episode:
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     multimodal_train_inputs: dict[str, Any] | None = None
+    # Multimodal inputs from processor (transformers 5.x convention):
+    #   mm_token_type_ids: [1, num_tokens] - per-token type marker (concat dim=1)
+    #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
+    #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)
+    #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
+    #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
     generated_text: str | None = None                  # cached decode of loss_mask==1 tokens, set by RM
     weight_versions: list[str] = field(default_factory=list)
     non_generation_time: float = 0.0

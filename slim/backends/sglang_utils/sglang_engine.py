@@ -182,7 +182,7 @@ class SGLangEngine(RayActor):
         logger.info(f"Use external SGLang engine (rank={self.rank}, expect_server_args={expect_server_args})")
 
         def _get_actual_server_args():
-            response = requests.get(f"http://{self.server_host}:{self.server_port}/get_server_info")
+            response = requests.get(f"http://{self.server_host}:{self.server_port}/server_info")
             response.raise_for_status()
             return response.json()
 
@@ -548,6 +548,8 @@ def _compute_server_args(
         "dp_size": args.sglang_dp_size,
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
+        # cuda graph must cover the max concurrent batch size to avoid eager fallback.
+        "cuda_graph_max_bs": args.sglang_server_concurrency,
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.

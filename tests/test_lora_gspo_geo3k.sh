@@ -2,9 +2,9 @@
 # LoRA (PEFT) + GSPO on Geo3K VLM with Qwen3-VL-2B-Instruct. 8xH100 colocated.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-/home/ubuntu/models/Qwen3-VL-2B-Instruct}"
-DATASET_DIR="${VLM_DATASET_DIR:-/home/ubuntu/datasets/geo3k}"
-SAVE_DIR="${SAVE_DIR:-/home/ubuntu/outputs/lora-gspo-geo3k-qwen3vl2b}"
+MODEL_DIR="${VLM_MODEL_DIR:-$REPO_DIR/models/Qwen3-VL-2B-Instruct}"
+DATASET_DIR="${VLM_DATASET_DIR:-$REPO_DIR/datasets/geo3k}"
+SAVE_DIR="${SAVE_DIR:-$REPO_DIR/outputs/lora-gspo-geo3k-qwen3vl2b}"
 
 start_ray
 run_train "

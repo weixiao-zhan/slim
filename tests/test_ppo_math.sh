@@ -2,9 +2,9 @@
 # PPO on math (GSM8K). 4 actor + 4 critic GPUs colocated with 8 rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${LLM_MODEL_DIR:-/home/ubuntu/models/Qwen3-1.7B-Base}"
-DATASET_DIR="${LLM_DATASET_DIR:-/home/ubuntu/datasets}"
-SAVE_DIR="${SAVE_DIR:-/home/ubuntu/outputs/ppo-gsm8k-qwen3-1.7b}"
+MODEL_DIR="${LLM_MODEL_DIR:-$REPO_DIR/models/Qwen3-1.7B-Base}"
+DATASET_DIR="${LLM_DATASET_DIR:-$REPO_DIR/datasets}"
+SAVE_DIR="${SAVE_DIR:-$REPO_DIR/outputs/ppo-gsm8k-qwen3-1.7b}"
 
 start_ray
 run_train "
