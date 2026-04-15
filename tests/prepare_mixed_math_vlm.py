@@ -21,7 +21,7 @@ from pathlib import Path
 
 from datasets import Features, Image, Sequence, Value, concatenate_datasets, load_dataset
 
-OUT_DIR = Path("/home/ubuntu/datasets/mixed_math_vlm")
+OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "mixed_math_vlm"
 
 
 def transform_dapo(row):

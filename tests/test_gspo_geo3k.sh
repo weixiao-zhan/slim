@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# GSPO on Geo3K VLM. 8 actor GPUs with 8 rollout engines.
+# GSPO on Geo3K VLM
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-/home/ubuntu/models/Qwen3-VL-2B-Instruct}"
-DATASET_DIR="${VLM_DATASET_DIR:-/home/ubuntu/datasets/geo3k}"
-SAVE_DIR="${SAVE_DIR:-/home/ubuntu/outputs/gspo-geo3k-qwen3vl2b}"
+MODEL_DIR="${VLM_MODEL_DIR:-$REPO_DIR/models/Qwen3.5-2B}"
+DATASET_DIR="${VLM_DATASET_DIR:-$REPO_DIR/datasets/geo3k}"
+SAVE_DIR="${SAVE_DIR:-$REPO_DIR/outputs/gspo-geo3k-qwen35-2b}"
 
 start_ray
 run_train "
-    --num-rollout 200
-    --rollout-batch-size 32
+    --num-rollout 50
+    --rollout-batch-size 16
     --n-samples-per-prompt 16
-    --rollout-max-context-len 2048
+    --rollout-max-context-len 4096
     --rollout-temperature 1
     --num-steps-per-rollout 1
     --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-    --over-sampling-batch-size 48
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
@@ -24,21 +23,24 @@ run_train "
     --eval-interval 20
     --eval-prompt-data geo3k $DATASET_DIR/test.parquet
     --eval-n-samples-per-prompt 1
-    --eval-max-context-len 2048
+    --eval-max-context-len 4096
+    --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.6
-    --sglang-attention-backend fa3
+    --sglang-attention-backend flashinfer
     --sglang-mm-enable-dp-encoder
+    --sglang-mamba-scheduler-strategy extra_buffer 
+    --sglang-page-size 64
     --use-fault-tolerance
 
     --actor-num-nodes 1
-    --actor-num-gpus-per-node 8
-    --attn-implementation flash_attention_3
+    --actor-num-gpus-per-node 1
+    --attn-implementation sdpa
     --gradient-checkpointing
     --colocate
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 16384
+    --max-tokens-per-gpu 6144
 
     --advantage-estimator gspo
     --disable-grpo-std-normalization
@@ -59,7 +61,6 @@ run_train "
 
     --hf-checkpoint $MODEL_DIR
     --save $SAVE_DIR
-    --save-interval 20
 
-    $(wandb_args gspo-geo3k-qwen3vl2b)
+    $(wandb_args gspo-geo3k-qwen35-2b)
 "

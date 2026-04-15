@@ -8,7 +8,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-OUT_DIR = Path("/home/ubuntu/datasets/dapo17k")
+OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "dapo17k"
 
 
 def transform(row):
