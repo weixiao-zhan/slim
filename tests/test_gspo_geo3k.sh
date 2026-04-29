@@ -2,9 +2,9 @@
 # GSPO on Geo3K VLM
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-$REPO_DIR/models/Qwen3.5-2B}"
-DATASET_DIR="${VLM_DATASET_DIR:-$REPO_DIR/datasets/geo3k}"
-SAVE_DIR="${SAVE_DIR:-$REPO_DIR/outputs/gspo-geo3k-qwen35-2b}"
+MODEL_DIR="${VLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
+DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/geo3k}"
+SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-geo3k-qwen35-2b}"
 
 start_ray
 run_train "

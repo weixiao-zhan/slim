@@ -2,9 +2,9 @@
 # GSPO on math (GSM8K). 8 actor GPUs colocated with rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${LLM_MODEL_DIR:-$REPO_DIR/models/Qwen3-1.7B-Base}"
-DATASET_DIR="${LLM_DATASET_DIR:-$REPO_DIR/datasets}"
-SAVE_DIR="${SAVE_DIR:-$REPO_DIR/outputs/gspo-gsm8k-qwen3-1.7b}"
+MODEL_DIR="${LLM_MODEL_DIR:-$HOME/models/Qwen3-1.7B-Base}"
+DATASET_DIR="${LLM_DATASET_DIR:-$HOME/datasets}"
+SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-gsm8k-qwen3-1.7b}"
 
 start_ray
 run_train "

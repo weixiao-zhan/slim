@@ -18,15 +18,15 @@ EOF
 
 ```bash
 huggingface-cli download Qwen/Qwen3-1.7B-Base \
-    --local-dir /home/ubuntu/models/Qwen3-1.7B-Base
-# Ensure /home/ubuntu/datasets/gsm8k/{train,test}.parquet exist
+    --local-dir $HOME/models/Qwen3-1.7B-Base
+# Ensure $HOME/datasets/gsm8k/{train,test}.parquet exist
 ```
 
 ### Geo3K (VLM tests)
 
 ```bash
 huggingface-cli download Qwen/Qwen3-VL-2B-Instruct \
-    --local-dir /home/ubuntu/models/Qwen3-VL-2B-Instruct
+    --local-dir $HOME/models/Qwen3-VL-2B-Instruct
 python tests/prepare_geo3k_processor_ready.py
 ```
 
@@ -55,10 +55,10 @@ bash tests/test_lora_gspo_geo3k.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VLM_MODEL_DIR` | `/home/ubuntu/models/Qwen3-VL-2B-Instruct` | VLM model path (geo3k tests) |
-| `VLM_DATASET_DIR` | `/home/ubuntu/datasets/geo3k` | Geo3K dataset path |
-| `LLM_MODEL_DIR` | `/home/ubuntu/models/Qwen3-1.7B-Base` | LLM model path (math tests) |
-| `LLM_DATASET_DIR` | `/home/ubuntu/datasets` | LLM dataset path |
-| `SAVE_DIR` | `/home/ubuntu/outputs/<test>` | Checkpoint save path |
+| `VLM_MODEL_DIR` | `$HOME/models/Qwen3-VL-2B-Instruct` | VLM model path (geo3k tests) |
+| `VLM_DATASET_DIR` | `$HOME/datasets/geo3k` | Geo3K dataset path |
+| `LLM_MODEL_DIR` | `$HOME/models/Qwen3-1.7B-Base` | LLM model path (math tests) |
+| `LLM_DATASET_DIR` | `$HOME/datasets` | LLM dataset path |
+| `SAVE_DIR` | `$HOME/outputs/<test>` | Checkpoint save path |
 | `WANDB_API_KEY` | (from `.env`) | Weights & Biases API key |
 | `NUM_GPUS` | `8` | Number of GPUs for ray |

@@ -38,8 +38,8 @@ All labels also run when triggered via `workflow_dispatch` (manual run from the 
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${MODEL_DIR:-/home/ubuntu/models/YourModel}"
-DATASET_DIR="${DATASET_DIR:-/home/ubuntu/datasets/your_data}"
+MODEL_DIR="${MODEL_DIR:-$HOME/models/YourModel}"
+DATASET_DIR="${DATASET_DIR:-$HOME/datasets/your_data}"
 
 start_ray
 run_train "
