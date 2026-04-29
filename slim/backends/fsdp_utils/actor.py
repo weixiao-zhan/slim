@@ -72,7 +72,6 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.offload_train and self.fsdp_cpu_offload:
             self.args.offload_train = False
 
-        self._apply_moe_patch()
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
 
@@ -240,11 +239,6 @@ class FSDPTrainRayActor(TrainRayActor):
             from transformers import AutoModelForCausalLM
 
             return AutoModelForCausalLM
-
-    def _apply_moe_patch(self):
-        from .models.qwen3_moe_hf import apply_fsdp_moe_patch
-
-        apply_fsdp_moe_patch()
 
     def _setup_device_mesh(self) -> None:
         """Setup device mesh for data parallelism."""
