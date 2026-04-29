@@ -32,11 +32,11 @@ run: | # shell
   uv sync
   uv run bash patch-sglang.sh
   # Download model and prepare dataset
-  mkdir -p /home/ubuntu/models /home/ubuntu/datasets
-  if [ ! -d "/home/ubuntu/models/${MODEL_NAME}" ]; then
-    uv run hf download "Qwen/${MODEL_NAME}" --local-dir "/home/ubuntu/models/${MODEL_NAME}"
+  mkdir -p ${HOME}/models
+  if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
+    uv run hf download "Qwen/${MODEL_NAME}" --local-dir "${HOME}/models/${MODEL_NAME}"
   fi
-  if [ ! -f "/home/ubuntu/datasets/mixed_math_vlm/train.parquet" ]; then
+  if [ ! -f "${HOME}/datasets/mixed_math_vlm/train.parquet" ]; then
     uv run python tests/prepare_mixed_math_vlm.py
   fi
 
@@ -113,9 +113,9 @@ run: | # shell
   # =========================================================================
   # Head node: submit async training job
   # =========================================================================
-  MODEL_DIR="/home/ubuntu/models/${MODEL_NAME}"
-  DATASET_DIR="/home/ubuntu/datasets/mixed_math_vlm"
-  OUTPUT_DIR="/home/ubuntu/outputs/grpo-async-mixed-math-vlm-${MODEL_NAME,,}"
+  MODEL_DIR="${HOME}/models/${MODEL_NAME}"
+  DATASET_DIR="${HOME}/datasets/mixed_math_vlm"
+  OUTPUT_DIR="${HOME}/outputs/grpo-async-mixed-math-vlm-${MODEL_NAME,,}"
 
   # Wandb args (only if WANDB_API_KEY is set)
   WANDB_ARGS=()

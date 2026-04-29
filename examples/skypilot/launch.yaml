@@ -9,7 +9,7 @@ workdir: ../..
 num_nodes: 1
 
 resources:
-  infra: aws/us-west-2
+  infra: aws/us-east-2
   instance_type: p5.48xlarge
   disk_size: 500
   # network_tier: best  # Enables EFA
@@ -20,23 +20,21 @@ resources:
     us-west-2: ami-002d8d829a188f605
 
 envs:
-  MODEL_NAME: Qwen3-VL-4B-Instruct
+  MODEL_NAME: Qwen3.5-2B
 
 setup: | # shell
   set -ex
-  uv sync
+  uv sync --prerelease=allow
   uv run bash patch-sglang.sh
 
 run: | # shell
   set -ex
-  uv sync
-  uv run bash patch-sglang.sh
   # Download model and prepare dataset
-  mkdir -p /home/ubuntu/models /home/ubuntu/datasets
-  if [ ! -d "/home/ubuntu/models/${MODEL_NAME}" ]; then
-    uv run hf download "Qwen/${MODEL_NAME}" --local-dir "/home/ubuntu/models/${MODEL_NAME}"
+  mkdir -p ${HOME}/models
+  if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
+    uv run hf download "Qwen/${MODEL_NAME}" --local-dir "${HOME}/models/${MODEL_NAME}"
   fi
-  if [ ! -f "/home/ubuntu/datasets/mixed_math_vlm/train.parquet" ]; then
+  if [ ! -f "${HOME}/datasets/mixed_math_vlm/train.parquet" ]; then
     uv run python tests/prepare_mixed_math_vlm.py
   fi
 
@@ -113,9 +111,9 @@ run: | # shell
   # =========================================================================
   # Head node: submit training job
   # =========================================================================
-  MODEL_DIR="/home/ubuntu/models/${MODEL_NAME}"
-  DATASET_DIR="/home/ubuntu/datasets/mixed_math_vlm"
-  OUTPUT_DIR="/home/ubuntu/outputs/grpo-mixed-math-vlm-${MODEL_NAME,,}"
+  MODEL_DIR="${HOME}/models/${MODEL_NAME}"
+  DATASET_DIR="${HOME}/datasets/mixed_math_vlm"
+  OUTPUT_DIR="${HOME}/outputs/grpo-mixed-math-vlm-${MODEL_NAME,,}"
 
   # Wandb args (only if WANDB_API_KEY is set)
   WANDB_ARGS=()
@@ -171,8 +169,6 @@ run: | # shell
     --gradient-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 16384 \
-    --use-peft \
-    --peft-config '{"r": 64, "lora_alpha": 128, "target_modules": "all-linear"}' \
     \
     --advantage-estimator gspo \
     --disable-grpo-std-normalization \
@@ -185,7 +181,7 @@ run: | # shell
     --kl-coef 0.00 \
     \
     --optimizer adam \
-    --lr 1e-5 \
+    --lr 1e-6 \
     --lr-warmup-iters 10 \
     --lr-decay-style constant \
     --weight-decay 0.1 \
@@ -195,6 +191,9 @@ run: | # shell
     --hf-checkpoint ${MODEL_DIR} \
     --load ${OUTPUT_DIR} \
     --save ${OUTPUT_DIR} \
-    --save-interval 20 \
     \
     ${WANDB_ARGS[@]}
+
+    # --save-interval 20 \
+    # --use-peft \
+    # --peft-config '{"r": 64, "lora_alpha": 128, "target_modules": "all-linear"}' \
