@@ -138,7 +138,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
 
     prompt = episode.example.get("prompt", "")
     tools = episode.example.get("tools")
-    multimodal_inputs = episode.example.get("multimodal_inputs")
 
     if episode.has_multimodal and state.processor is None:
         raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
@@ -152,7 +151,7 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
             add_generation_prompt=True,
             **state.chat_template_kwargs,
         )
-        mm = {k: v for k, v in (multimodal_inputs or {}).items() if v}
+        mm = {k: episode.example[k] for k in ("images", "videos", "audios") if episode.example.get(k)}
         processor_output = await asyncio.to_thread(state.processor, text=prompt_text, **mm, return_tensors="pt")
         prompt_ids = processor_output["input_ids"][0].tolist()
         episode.multimodal_train_inputs = {
@@ -205,11 +204,16 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         "sampling_params": sglang_params,
         "return_logprob": True,
     }
-    mm = episode.example.get("multimodal_inputs")
-    image_inputs = mm.get("images") if mm else None
-    if episode.has_multimodal and image_inputs:
-        image_data = image_inputs
-        payload["image_data"] = [encode_image_for_rollout_engine(img) for img in image_data]
+    if episode.has_multimodal:
+        images = episode.example.get("images")
+        if images:
+            payload["image_data"] = [encode_image_for_rollout_engine(img) for img in images]
+        videos = episode.example.get("videos")
+        if videos:
+            payload["video_data"] = videos
+        audios = episode.example.get("audios")
+        if audios:
+            payload["audio_data"] = audios
 
     headers = None
     if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:

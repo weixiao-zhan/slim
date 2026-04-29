@@ -15,6 +15,15 @@ else
     echo "  Skipped: qwen_vl.py (already patched or not found)"
 fi
 
+# # Patch: disable GPU-side JPEG decoding globally.
+# BP="$SITE/srt/multimodal/processors/base_processor.py"
+# if [ -f "$BP" ] && grep -q '^    gpu_image_decode = True' "$BP"; then
+#     sed -i 's/^    gpu_image_decode = True.*/    gpu_image_decode = False  # disabled to avoid duplicate CUDA context on GPU0/' "$BP"
+#     echo "  Applied: base_processor.py gpu_image_decode=False (fixes GPU0 duplicate CUDA context)"
+# else
+#     echo "  Skipped: base_processor.py gpu_image_decode (already patched or not found)"
+# fi
+
 sudo sysctl -w kernel.yama.ptrace_scope=0
 
 echo "Done."
