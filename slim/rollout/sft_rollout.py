@@ -34,7 +34,10 @@ def _get_assistant_mask_multimodal(processor, messages, example, tools=None):
     """For VLMs: use processor for tokenization, tokenizer for assistant mask, then align."""
     prompt_text = processor.apply_chat_template(messages, tokenize=False, tools=tools)
     mm = {k: example[k] for k in ("images", "videos", "audios") if example.get(k)}
-    processor_output = processor(text=prompt_text, **mm, return_tensors="pt")
+    # Disable mm_token_type_ids — synthesized at training time from input_ids.
+    processor_output = processor(
+        text=prompt_text, **mm, return_tensors="pt", return_mm_token_type_ids=False
+    )
     token_ids = processor_output["input_ids"][0].tolist()
 
     multimodal_train_inputs = {
