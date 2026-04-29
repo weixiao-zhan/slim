@@ -106,20 +106,13 @@ def pack_sequences(
                     if mm_tensor is None:
                         counts.append(0)
                         continue
-
-                    # Multimodal concat rule: mm_token_type_ids uses dim=1, all others use dim=0
-                    if key == "mm_token_type_ids":
-                        concat_dim = 1
-                        count = mm_tensor.size(1)
-                    else:
-                        concat_dim = 0
-                        count = mm_tensor.size(0)
-
+                    # All remaining mm fields (pixel_values, image_grid_thw, etc.)
+                    # are non-token-aligned and concat along dim=0.
                     if key not in multimodal_data:
                         multimodal_data[key] = mm_tensor
                     else:
-                        multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=concat_dim)
-                    counts.append(count)
+                        multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
+                    counts.append(mm_tensor.size(0))
             packed_batch["multimodal_train_inputs"] = multimodal_data
             packed_batch["multimodal_num_items"] = multimodal_num_items
 
@@ -165,11 +158,7 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                     if mm_key in mm_offsets:
                         s, e = mm_offsets[mm_key][i], mm_offsets[mm_key][i + 1]
                         if e > s:
-                            # Multimodal slice rule: mm_token_type_ids uses dim=1, all others use dim=0
-                            if mm_key == "mm_token_type_ids":
-                                instance[key][mm_key] = mm_tensor[:, s:e]
-                            else:
-                                instance[key][mm_key] = mm_tensor[s:e]
+                            instance[key][mm_key] = mm_tensor[s:e]
             elif key in _EDGE_KEYS:
                 instance[key] = value[edge_start:edge_end]
             elif key in _TOKEN_KEYS:

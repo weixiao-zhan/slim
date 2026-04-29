@@ -152,7 +152,14 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
             **state.chat_template_kwargs,
         )
         mm = {k: episode.example[k] for k in ("images", "videos", "audios") if episode.example.get(k)}
-        processor_output = await asyncio.to_thread(state.processor, text=prompt_text, **mm, return_tensors="pt")
+        # Disable mm_token_type_ids — we synthesize it at training time from input_ids.
+        processor_output = await asyncio.to_thread(
+            state.processor,
+            text=prompt_text,
+            **mm,
+            return_tensors="pt",
+            return_mm_token_type_ids=False,
+        )
         prompt_ids = processor_output["input_ids"][0].tolist()
         episode.multimodal_train_inputs = {
             k: v

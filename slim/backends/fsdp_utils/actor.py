@@ -1121,16 +1121,99 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _get_model_inputs_args(self, packed_sequence: dict) -> dict:
         input_ids = packed_sequence["tokens"].unsqueeze(0)
-        position_ids = packed_sequence["position_ids"].unsqueeze(0)
+        mm_inputs = packed_sequence.get("multimodal_train_inputs") or {}
 
         model_args = {
             "input_ids": input_ids,
-            "position_ids": position_ids,
             "attention_mask": None,
         }
-        if packed_sequence.get("multimodal_train_inputs"):
-            model_args.update(packed_sequence["multimodal_train_inputs"])
+
+        if mm_inputs:
+            # VLM path: build [4, 1, N] position_ids per episode. Axis 0 is the
+            # text axis (episode-local arange); axes 1-3 are 3D MRope positions
+            # from Qwen3_5Model.get_rope_index. Qwen3_5 strips axis 0 for the
+            # causal mask and forwards [3, 1, N] to the attention kernel, which
+            # trips HF's _is_packed_sequence (ndim>2 misread as varlen) and
+            # crashes flash-attn — ref Dao-AILab/flash-attention#2381. Passing
+            # cu_seq_lens_q/k + max_length_q/k forces the safe varlen-kwargs
+            # branch and skips the buggy posids inference path.
+            model_args["position_ids"] = self._build_vlm_position_ids(packed_sequence, mm_inputs)
+            cu_seqlens = packed_sequence["cu_seqlens"]
+            max_len = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+            model_args["cu_seq_lens_q"] = cu_seqlens
+            model_args["cu_seq_lens_k"] = cu_seqlens
+            model_args["max_length_q"] = max_len
+            model_args["max_length_k"] = max_len
+            model_args.update(mm_inputs)
+        else:
+            model_args["position_ids"] = packed_sequence["position_ids"].unsqueeze(0)
+
         return model_args
+
+    def _build_vlm_position_ids(self, packed_sequence: dict, mm_inputs: dict) -> torch.Tensor:
+        """Build [4, 1, N] position_ids for a packed VLM batch.
+
+        Walks cu_seqlens to slice each episode's tokens, synthesizes
+        mm_token_type_ids from input_ids (0=text, 1=image, 2=video), and calls
+        the HF model's get_rope_index to get 3D MRope positions. Prepends an
+        episode-local arange as the text axis so HF's varlen detection works.
+        """
+        tokens = packed_sequence["tokens"]
+        cu_seqlens = packed_sequence["cu_seqlens"]
+        device = tokens.device
+
+        image_token_id = getattr(self.hf_config, "image_token_id", None)
+        video_token_id = getattr(self.hf_config, "video_token_id", None)
+
+        image_grid_thw = mm_inputs.get("image_grid_thw")
+        video_grid_thw = mm_inputs.get("video_grid_thw")
+        num_items = packed_sequence.get("multimodal_num_items") or {}
+        image_counts = num_items.get("image_grid_thw", [])
+        video_counts = num_items.get("video_grid_thw", [])
+
+        # HF's get_rope_index lives on the inner Qwen3_5Model (self.model.model
+        # for ForConditionalGeneration-style wrappers). Unwrap peft/fsdp/meta
+        # layers that may sit between.
+        inner = self.model
+        while hasattr(inner, "module"):
+            inner = inner.module
+        if hasattr(inner, "model"):
+            inner = inner.model
+        get_rope_index = inner.get_rope_index
+
+        pieces = []
+        img_cursor = 0
+        vid_cursor = 0
+        num_episodes = len(cu_seqlens) - 1
+        for i in range(num_episodes):
+            s = int(cu_seqlens[i].item())
+            e = int(cu_seqlens[i + 1].item())
+            n = e - s
+            ids = tokens[s:e].unsqueeze(0)  # [1, n]
+
+            mm_tti = torch.zeros_like(ids, dtype=torch.int)
+            if image_token_id is not None:
+                mm_tti = mm_tti + (ids == image_token_id).int()
+            if video_token_id is not None:
+                mm_tti = mm_tti + 2 * (ids == video_token_id).int()
+
+            n_img = image_counts[i] if i < len(image_counts) else 0
+            n_vid = video_counts[i] if i < len(video_counts) else 0
+            img_slice = image_grid_thw[img_cursor : img_cursor + n_img] if n_img else None
+            vid_slice = video_grid_thw[vid_cursor : vid_cursor + n_vid] if n_vid else None
+            img_cursor += n_img
+            vid_cursor += n_vid
+
+            rope_axes, _ = get_rope_index(
+                input_ids=ids,
+                mm_token_type_ids=mm_tti,
+                image_grid_thw=img_slice,
+                video_grid_thw=vid_slice,
+            )  # [3, 1, n]
+            text_axis = torch.arange(n, device=device).view(1, 1, n).expand(1, 1, n)
+            pieces.append(torch.cat([text_axis, rope_axes], dim=0))  # [4, 1, n]
+
+        return torch.cat(pieces, dim=-1)  # [4, 1, N]
 
 
 def _init_dummy_advantages(episodes: list[Episode]) -> None:

@@ -41,8 +41,7 @@ class Episode:
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     multimodal_train_inputs: dict[str, Any] | None = None
-    # Multimodal inputs from processor (transformers 5.x convention):
-    #   mm_token_type_ids: [1, num_tokens] - per-token type marker (concat dim=1)
+    # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
     #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)
     #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
