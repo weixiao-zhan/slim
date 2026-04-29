@@ -68,8 +68,7 @@ class Episode:
 
     @property
     def has_multimodal(self) -> bool:
-        mm = self.example.get("multimodal_inputs")
-        return bool(mm and any(v is not None for v in mm.values()))
+        return any(self.example.get(k) for k in ("images", "videos", "audios"))
 
     # --- Pre-freeze helpers (list phase) ---
 

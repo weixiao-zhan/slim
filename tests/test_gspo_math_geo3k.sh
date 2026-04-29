@@ -6,6 +6,9 @@ MODEL_DIR="${VLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
 DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/mixed_math_vlm}"
 SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-mixed-math-geo3k-qwen35-2b}"
 
+# --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+# --over-sampling-batch-size 64
+
 start_ray
 run_train "
     --num-rollout 200
@@ -14,13 +17,13 @@ run_train "
     --rollout-max-context-len 8192
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-    --over-sampling-batch-size 64
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
+    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --eval-log-passrate
+    --skip-eval-before-train
     --eval-interval 20
     --eval-prompt-data math $DATASET_DIR/test_math.parquet geo3k $DATASET_DIR/test_geo3k.parquet
     --eval-n-samples-per-prompt 1
@@ -42,7 +45,6 @@ run_train "
 
     --advantage-estimator gspo
     --disable-grpo-std-normalization
-    --use-rollout-logprobs
     --eps-clip 0.2
     --eps-clip-high 0.28
     --entropy-coef 0.00

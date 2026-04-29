@@ -30,10 +30,10 @@ def _get_assistant_mask(tokenizer, messages, tools=None):
     return token_ids, loss_mask
 
 
-def _get_assistant_mask_multimodal(processor, messages, multimodal_inputs, tools=None):
+def _get_assistant_mask_multimodal(processor, messages, example, tools=None):
     """For VLMs: use processor for tokenization, tokenizer for assistant mask, then align."""
     prompt_text = processor.apply_chat_template(messages, tokenize=False, tools=tools)
-    mm = {k: v for k, v in (multimodal_inputs or {}).items() if v}
+    mm = {k: example[k] for k in ("images", "videos", "audios") if example.get(k)}
     processor_output = processor(text=prompt_text, **mm, return_tensors="pt")
     token_ids = processor_output["input_ids"][0].tolist()
 
@@ -99,11 +99,10 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
         ep = Episode.from_example(example)
         prompt = ep.example.get("prompt", "")
         tools = ep.example.get("tools")
-        multimodal_inputs = ep.example.get("multimodal_inputs")
 
         if isinstance(prompt, list) and PROCESSOR is not None:
             token_ids, loss_mask, ep.multimodal_train_inputs = _get_assistant_mask_multimodal(
-                PROCESSOR, prompt, multimodal_inputs, tools=tools
+                PROCESSOR, prompt, ep.example, tools=tools
             )
         else:
             token_ids, loss_mask = _get_assistant_mask(TOKENIZER, prompt, tools=tools)
