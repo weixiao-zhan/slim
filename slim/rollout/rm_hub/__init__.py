@@ -13,7 +13,6 @@ from slim.utils.types import Episode
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score
 from .gpqa import compute_gpqa_reward
-from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
@@ -93,8 +92,6 @@ async def async_rm(args, episode: Episode, **kwargs):
         return await remote_rm(args, episode)
     elif rm_type == "deepscaler":
         return get_deepscaler_rule_based_reward(response, label)
-    elif rm_type == "dapo":
-        return compute_score_dapo(response, label)
     elif rm_type == "math":
         return 1 if grade_answer_verl(response, label) else 0
     elif rm_type == "f1":
