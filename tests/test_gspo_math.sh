@@ -1,30 +1,24 @@
 #!/usr/bin/env bash
-# GSPO on math (GSM8K). 8 actor GPUs colocated with rollout.
+# GSPO on math (DAPO-17k). 8 actor GPUs colocated with rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${LLM_MODEL_DIR:-$HOME/models/Qwen3-1.7B-Base}"
-DATASET_DIR="${LLM_DATASET_DIR:-$HOME/datasets}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-gsm8k-qwen3-1.7b}"
+MODEL_DIR="${LLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
+DATASET_DIR="${LLM_DATASET_DIR:-$HOME/datasets/dapo17k}"
+SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-dapo17k-qwen35-2b}"
 
 start_ray
 run_train "
     --num-rollout 200
-    --rollout-batch-size 32
+    --rollout-batch-size 16
     --n-samples-per-prompt 16
     --rollout-max-context-len 2048
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-    --over-sampling-batch-size 48
 
-    --prompt-data $DATASET_DIR/gsm8k/train.parquet
+    --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
-    --eval-log-passrate
-    --eval-interval 20
-    --eval-prompt-data gsm8k_test $DATASET_DIR/gsm8k/test.parquet
-    --eval-n-samples-per-prompt 1
-    --eval-max-context-len 2048
+    --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.6
@@ -61,5 +55,5 @@ run_train "
     --save $SAVE_DIR
     --save-interval 20
 
-    $(wandb_args gspo-gsm8k-qwen3-1.7b)
+    $(wandb_args gspo-dapo17k-qwen35-2b)
 "

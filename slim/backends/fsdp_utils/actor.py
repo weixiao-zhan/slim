@@ -114,6 +114,8 @@ class FSDPTrainRayActor(TrainRayActor):
                     self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
+        self._apply_transformers_model_patches()
+
         init_context = self._get_init_weight_context_manager()
 
         # Downcast to bf16 if model config doesn't specify a dtype and flash attention is requested,
@@ -1119,31 +1121,45 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             raise NotImplementedError(f"Loading from checkpoint file {ref_load_path} not yet implemented")
 
+    def _apply_transformers_model_patches(self) -> None:
+        """Apply repo-owned HF model patches needed by packed training."""
+        # Qwen3.5 and Qwen3.6-27B share HF's `qwen3_5` architecture. The
+        # Mamba-style linear_attention/Gated DeltaNet layers in stock HF don't
+        # honor packed-sequence boundaries, so patch the classes before
+        # from_pretrained creates module instances.
+        if getattr(self.hf_config, "model_type", None) == "qwen3_5":
+            from .qwen_deltanet_patch import apply_qwen_deltanet_varlen_patch
+
+            apply_qwen_deltanet_varlen_patch()
+
     def _get_model_inputs_args(self, packed_sequence: dict) -> dict:
         input_ids = packed_sequence["tokens"].unsqueeze(0)
         mm_inputs = packed_sequence.get("multimodal_train_inputs") or {}
 
+        # Pass cu_seq_lens_q/k + max_length_q/k to the model so that HF's
+        # attention layers use the safe varlen-kwargs branch (sidesteps
+        # flash-attn #2381's _is_packed_sequence misinference) and patched
+        # Qwen DeltaNet layers reset recurrent state at episode boundaries.
+        cu_seqlens = packed_sequence["cu_seqlens"].to(
+            device=input_ids.device, dtype=torch.int32, non_blocking=True
+        )
+        max_len = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+
         model_args = {
             "input_ids": input_ids,
             "attention_mask": None,
+            "cu_seq_lens_q": cu_seqlens,
+            "cu_seq_lens_k": cu_seqlens,
+            "max_length_q": max_len,
+            "max_length_k": max_len,
         }
 
         if mm_inputs:
             # VLM path: build [4, 1, N] position_ids per episode. Axis 0 is the
             # text axis (episode-local arange); axes 1-3 are 3D MRope positions
-            # from Qwen3_5Model.get_rope_index. Qwen3_5 strips axis 0 for the
-            # causal mask and forwards [3, 1, N] to the attention kernel, which
-            # trips HF's _is_packed_sequence (ndim>2 misread as varlen) and
-            # crashes flash-attn — ref Dao-AILab/flash-attention#2381. Passing
-            # cu_seq_lens_q/k + max_length_q/k forces the safe varlen-kwargs
-            # branch and skips the buggy posids inference path.
+            # from Qwen3_5Model.get_rope_index. HF strips axis 0 for the
+            # causal mask and forwards [3, 1, N] to the attention kernel.
             model_args["position_ids"] = self._build_vlm_position_ids(packed_sequence, mm_inputs)
-            cu_seqlens = packed_sequence["cu_seqlens"]
-            max_len = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
-            model_args["cu_seq_lens_q"] = cu_seqlens
-            model_args["cu_seq_lens_k"] = cu_seqlens
-            model_args["max_length_q"] = max_len
-            model_args["max_length_k"] = max_len
             model_args.update(mm_inputs)
         else:
             model_args["position_ids"] = packed_sequence["position_ids"].unsqueeze(0)
