@@ -42,11 +42,16 @@ def has_nvlink():
         return int(out.strip()) > 0
     except Exception:
         return False
-print(json.dumps({'env_vars': {
+env_vars = {
     'NCCL_NVLS_ENABLE': str(int(has_nvlink())),
     'no_proxy': '127.0.0.1,$MASTER_ADDR',
     'MASTER_ADDR': '$MASTER_ADDR',
-}}))
+}
+import os
+for k in ('CUDA_LAUNCH_BLOCKING', 'TORCH_USE_CUDA_DSA', 'TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS'):
+    if k in os.environ:
+        env_vars[k] = os.environ[k]
+print(json.dumps({'env_vars': env_vars}))
 ")
 
     export no_proxy="127.0.0.1"

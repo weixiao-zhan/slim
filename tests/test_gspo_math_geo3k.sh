@@ -12,7 +12,7 @@ SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-mixed-math-geo3k-qwen35-2b}"
 start_ray
 run_train "
     --num-rollout 200
-    --rollout-batch-size 32
+    --rollout-batch-size 16
     --n-samples-per-prompt 16
     --rollout-max-context-len 8192
     --rollout-temperature 1

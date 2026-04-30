@@ -14,7 +14,6 @@ run_train "
     --rollout-max-context-len 4096
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math

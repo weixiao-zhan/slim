@@ -143,10 +143,10 @@ run: | # shell
     --n-samples-per-prompt 16 \
     --rollout-max-context-len 8192 \
     --rollout-temperature 1 \
-    --apply-chat-template-kwargs '{"enable_thinking":true}' \
+    --apply-chat-template-kwargs '{"enable_thinking":false}' \
     --num-steps-per-rollout 1 \
     --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
-    --over-sampling-batch-size 64 \
+    --over-sampling-batch-size 512 \
     \
     --prompt-data ${DATASET_DIR}/train.parquet \
     --rm-type math \
@@ -170,7 +170,7 @@ run: | # shell
     --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
     --use-dynamic-batch-size \
-    --max-tokens-per-gpu 16384 \
+    --max-tokens-per-gpu 12288 \
     \
     --advantage-estimator gspo \
     --disable-grpo-std-normalization \
