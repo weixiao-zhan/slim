@@ -49,7 +49,7 @@ class Episode:
     generated_text: str | None = None                  # cached decode of loss_mask==1 tokens, set by RM
     weight_versions: list[str] = field(default_factory=list)
     non_generation_time: float = 0.0
-    train_metadata: dict | None = None
+    train_metadata: dict = field(default_factory=dict)
 
     # Status tracking
     class Status:
