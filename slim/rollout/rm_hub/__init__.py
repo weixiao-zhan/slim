@@ -45,7 +45,7 @@ def _decode_generated_text(args, episode: Episode) -> str:
     gen_ids = episode.get_generated_token_ids()
     if not gen_ids:
         return ""
-    return _get_tokenizer(args).decode(gen_ids, skip_special_tokens=args.rollout_skip_special_tokens)
+    return _get_tokenizer(args).decode(gen_ids)
 
 
 async def remote_rm(args, episode: Episode, max_retries: int = 10):

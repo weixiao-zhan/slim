@@ -17,7 +17,7 @@ async def generate_with_random_osl(args: Namespace, episode: Episode, sampling_p
 
     modified_sampling_params = deepcopy(sampling_params)
     modified_sampling_params["ignore_eos"] = True
-    modified_sampling_params["max_tokens"] = random.randrange(min_osl, max_osl)
+    modified_sampling_params["max_new_tokens"] = random.randrange(min_osl, max_osl)
 
     ans = await _generate_base(args, episode, modified_sampling_params)
 

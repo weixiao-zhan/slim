@@ -11,7 +11,7 @@ run_train "
     --num-rollout 200
     --rollout-batch-size 32
     --n-samples-per-prompt 16
-    --rollout-max-context-len 2048
+    --max-context-len 2048
     --rollout-temperature 1
     --num-steps-per-rollout 1
 
@@ -22,7 +22,6 @@ run_train "
     --eval-interval 20
     --eval-prompt-data geo3k $DATASET_DIR/test.parquet
     --eval-n-samples-per-prompt 1
-    --eval-max-context-len 2048
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.6

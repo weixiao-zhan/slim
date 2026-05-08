@@ -83,7 +83,6 @@ def make_args(**overrides):
         rm_type = None
         reward_key = None
         hf_checkpoint = "gpt2"
-        rollout_skip_special_tokens = True
 
     args = Args()
     for key, value in overrides.items():

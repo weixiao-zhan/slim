@@ -585,6 +585,10 @@ def _compute_server_args(
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
         unused_keys.discard(attr.name)
 
+    # Default context_length from the single source of truth if not set via --sglang-context-length.
+    if kwargs.get("context_length") is None:
+        kwargs["context_length"] = args.max_context_len
+
     # Per-server-group overrides from --sglang-config YAML.
     # Applied after base args so they take highest priority.
     if sglang_overrides:
