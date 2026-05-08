@@ -213,28 +213,26 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="the temperature for the inference engine during rollout.",
             )
             parser.add_argument(
-                "--rollout-top-p", type=float, default=1.0, help="the top-p for the inference engine during rollout."
-            )
-            parser.add_argument(
-                "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
-            )
-            parser.add_argument(
-                "--rollout-max-context-len",
-                type=int,
-                default=None,
+                "--rollout-sampling-params",
+                type=json.loads,
+                default={},
                 help=(
-                    "The maximum context size for the inference engine during rollout."
-                    "It should no exceed the `max_position_embeddinds` in Huggingface model's `config.json`"
+                    "Extra SGLang sampling params as a JSON dict, e.g. "
+                    "'{\"top_p\":0.95,\"top_k\":50,\"stop\":[\"<|im_end|>\"]}'. "
+                    "Merged on top of {temperature, no_stop_trim=True, "
+                    "spaces_between_special_tokens=False}. Use this for top_p, "
+                    "top_k, stop, stop_token_ids, skip_special_tokens, "
+                    "min_new_tokens, repetition_penalty, ignore_eos, etc."
                 ),
             )
             parser.add_argument(
-                "--rollout-max-prompt-len",
+                "--max-context-len",
                 type=int,
                 default=None,
                 help=(
-                    "The maximum length of the prompt for the inference engine during rollout. "
-                    "If set, we will filter out the long prompts during initialization of the global dataset. "
-                    "This is not recommended if the dataset is large."
+                    "Single source of truth for max context length. Drives train rollout budget, "
+                    "eval rollout budget (per-dataset YAML override allowed), and SGLang server "
+                    "context_length. Must not exceed `max_position_embeddings` in the HF model config."
                 ),
             )
             parser.add_argument(
@@ -244,36 +242,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "The maximum length of the response for the inference engine during rollout. "
                     "It is basically `max_tokens` in sglang."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-skip-special-tokens",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to skip special tokens in the response during rollout. "
-                    "This is useful when you want to use the response as a prompt for the next rollout."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-stop",
-                type=str,
-                nargs="+",
-                default=None,
-                help=(
-                    "The stop words for the inference engine during rollout. "
-                    "It can be a list of strings or a single string. "
-                    "It may be hard to pass special tokens in command line, in that case rollout_stop_token_ids can be used."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-stop-token-ids",
-                type=int,
-                nargs="+",
-                default=None,
-                help=(
-                    "The stop token ids for the inference engine during rollout. "
-                    "It can be a list of integers or a single integer."
                 ),
             )
             parser.add_argument(
@@ -625,12 +593,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="number of responses for each prompt in generation",
             )
             parser.add_argument("--eval-temperature", type=float, default=None)
-            parser.add_argument("--eval-top-p", type=float, default=None)
-            parser.add_argument("--eval-top-k", type=int, default=None)
             parser.add_argument("--eval-max-response-len", type=int, default=None)
-            parser.add_argument("--eval-max-prompt-len", type=int, default=None)
-            parser.add_argument("--eval-min-new-tokens", type=int, default=None)
-            parser.add_argument("--eval-max-context-len", type=int, default=None)
 
             return parser
 
@@ -1468,22 +1431,6 @@ def slim_validate_args(args):
             if hasattr(args, k):
                 logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
             setattr(args, k, v)
-
-    if args.eval_max_context_len is None:
-        logger.info(
-            f"args.eval_max_context_len is not set. Use args.rollout_max_context_len {args.rollout_max_context_len} as default value."
-        )
-        args.eval_max_context_len = args.rollout_max_context_len
-
-    if args.rollout_max_context_len is not None:
-        if args.rollout_max_prompt_len is None:
-            args.rollout_max_prompt_len = args.rollout_max_context_len - 1
-            logger.info(
-                f"args.rollout_max_prompt_len is not set. Use args.rollout_max_context_len - 1 ({args.rollout_max_context_len} - 1) as default value so that there is at least one generated token to compute loss."
-            )
-        assert (
-            args.rollout_max_prompt_len <= args.rollout_max_context_len - 1
-        ), f"args.rollout_max_prompt_len ({args.rollout_max_prompt_len}) must be smaller than args.rollout_max_context_len ({args.rollout_max_context_len}) so that there is at least one generated token to compute loss."
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")

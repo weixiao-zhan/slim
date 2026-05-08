@@ -11,7 +11,7 @@ run_train "
     --num-rollout 200
     --rollout-batch-size 16
     --n-samples-per-prompt 16
-    --rollout-max-context-len 2048
+    --max-context-len 2048
     --rollout-temperature 1
     --num-steps-per-rollout 1
 

@@ -54,17 +54,12 @@ class GenerateState(metaclass=SingletonMeta):
         concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
-        self.sampling_params: dict[str, Any] = dict(
-            temperature=args.rollout_temperature,
-            top_p=args.rollout_top_p,
-            top_k=args.rollout_top_k,
-            max_tokens=args.rollout_max_context_len,  # total context budget
-            stop=args.rollout_stop,
-            stop_token_ids=args.rollout_stop_token_ids,
-            skip_special_tokens=args.rollout_skip_special_tokens,
-            no_stop_trim=True,
-            spaces_between_special_tokens=False,
-        )
+        self.sampling_params: dict[str, Any] = {
+            "temperature": args.rollout_temperature,
+            "no_stop_trim": True,
+            "spaces_between_special_tokens": False,
+            **args.rollout_sampling_params,
+        }
         if getattr(args, "sglang_enable_deterministic_inference", False):
             sampling_seed_base = args.rollout_seed
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
@@ -110,27 +105,23 @@ def _episode_full_text(args: Namespace, episode: Episode) -> str:
     if not len(tokens):
         return ""
     ids = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
-    return GenerateState(args).tokenizer.decode(ids, skip_special_tokens=args.rollout_skip_special_tokens)
+    return GenerateState(args).tokenizer.decode(ids)
 
 
 def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup]:
     groups = []
     for index, example in enumerate(examples):
-        groups.append(
-            RolloutGroup(
-                index=index,
-                example=example,
-                episodes=[Episode.from_example(example) for _ in range(args.n_samples_per_prompt)],
-            )
-        )
+        episodes = []
+        for _ in range(args.n_samples_per_prompt):
+            ep = Episode.from_example(example)
+            ep._max_tokens = args.max_context_len
+            episodes.append(ep)
+        groups.append(RolloutGroup(index=index, example=example, episodes=episodes))
     return groups
 
 
-async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context_tokens: int) -> None:
-    """Tokenize prompt into episode.tokens if not already set.
-
-    Sets episode._max_tokens (total context budget) on first call.
-    """
+async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
+    """Tokenize prompt into episode.tokens if not already set."""
     state = GenerateState(args)
 
     if episode.tokens:
@@ -183,8 +174,6 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode, max_context
     edge_len = max(len(episode.tokens) - 1, 0)
     episode.loss_mask = [0] * edge_len
     episode.rollout_log_probs = [0.0] * edge_len
-    episode._max_tokens = max_context_tokens
-
 
 
 async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
@@ -194,21 +183,21 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
-    await _prepare_episode_tokens(args, episode, sampling_params["max_tokens"])
+    await _prepare_episode_tokens(args, episode)
 
     assert episode.rollout_log_probs is not None
-    max_new_tokens = episode._max_tokens - len(episode.tokens)
+    # Reserve one position: SGLang requires prompt + max_new_tokens < context_length (strict).
+    max_new_tokens = episode._max_tokens - len(episode.tokens) - 1
 
     if max_new_tokens <= 0:
         episode.status = Episode.Status.TRUNCATED
         return episode
 
-    sglang_params = {k: v for k, v in sampling_params.items() if k != "max_tokens"}
-    sglang_params["max_new_tokens"] = max_new_tokens
+    sampling_params["max_new_tokens"] = max_new_tokens
 
     payload = {
         "input_ids": episode.tokens,
-        "sampling_params": sglang_params,
+        "sampling_params": sampling_params,
         "return_logprob": True,
     }
     if episode.has_multimodal:
@@ -448,17 +437,13 @@ async def eval_rollout_single_dataset(
         EVAL_PROMPT_DATASET[cache_key] = load_hf_dataset(dataset_cfg.path)
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
-    base_sampling_params = dict(
-        temperature=dataset_cfg.temperature,
-        top_p=dataset_cfg.top_p,
-        top_k=dataset_cfg.top_k,
-        max_tokens=dataset_cfg.max_context_len,
-        stop=args.rollout_stop,
-        stop_token_ids=args.rollout_stop_token_ids,
-        skip_special_tokens=args.rollout_skip_special_tokens,
-        no_stop_trim=True,
-        spaces_between_special_tokens=False,
-    )
+    base_sampling_params = {
+        "temperature": dataset_cfg.temperature,
+        "no_stop_trim": True,
+        "spaces_between_special_tokens": False,
+        **args.rollout_sampling_params,
+        **dataset_cfg.sampling_params,
+    }
 
     tasks = []
     for raw_row in dataset:
@@ -466,6 +451,7 @@ async def eval_rollout_single_dataset(
             episode = Episode.from_example(raw_row)
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
+            episode._max_tokens = dataset_cfg.max_context_len
             sampling_params = base_sampling_params
             if getattr(args, "sglang_enable_deterministic_inference", False):
                 sampling_params = base_sampling_params.copy()

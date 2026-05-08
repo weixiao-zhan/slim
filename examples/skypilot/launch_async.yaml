@@ -143,7 +143,7 @@ run: | # shell
     --num-rollout 200 \
     --rollout-batch-size 32 \
     --n-samples-per-prompt 16 \
-    --rollout-max-context-len 8192 \
+    --max-context-len 8192 \
     --rollout-temperature 1 \
     --num-steps-per-rollout 1 \
     --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
@@ -156,7 +156,6 @@ run: | # shell
     --eval-interval 20 \
     --eval-prompt-data math ${DATASET_DIR}/test_math.parquet geo3k ${DATASET_DIR}/test_geo3k.parquet \
     --eval-n-samples-per-prompt 1 \
-    --eval-max-context-len 8192 \
     \
     --rollout-num-gpus 6 \
     --rollout-num-gpus-per-engine 1 \
