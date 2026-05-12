@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 from transformers import AutoConfig
+from liger_kernel.transformers.cross_entropy import LigerCrossEntropyLoss
 
 from slim.ray.train_actor import TrainRayActor
 from slim.utils import logging_utils, train_dump_utils, train_metric_utils
@@ -536,7 +537,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     tqdm(packed_batches, desc=f"{store_prefix}log_probs", disable=dist.get_rank() != 0)
                 ):
                     model_args = self._get_model_inputs_args(batch)
-                    logits = active_model(**model_args).logits.squeeze(0).float()
+                    logits = active_model(**model_args).logits.squeeze(0)
                     log_probs_result, entropy_result = get_logprob_and_entropy(
                         logits=logits,
                         target_tokens=batch["tokens"],
@@ -884,7 +885,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
         model_args = self._get_model_inputs_args(packed_batch)
-        logits = self.model(**model_args).logits.squeeze(0).float()
+        logits = self.model(**model_args).logits.squeeze(0)
 
         # Compute log probs and entropy
         need_full_log_probs = self.args.entropy_coef != 0.0
@@ -1301,6 +1302,18 @@ def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> 
 selective_log_softmax_compiled = torch.compile(dynamic=True)(selective_log_softmax_raw)
 
 
+# Liger-kernel path: log p(target|ctx) = -CE(logits, target). Skips the [T, V] log_softmax
+# intermediate and does FP32 reductions per-tile internally, so BF16 logits are safe even
+# at vocab=248K.
+_LIGER_CE = LigerCrossEntropyLoss(ignore_index=-100, reduction="none")
+def selective_log_softmax_liger(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    """Liger-fused equivalent of selective_log_softmax, without log_softmax materialization."""
+    shape = input_ids.shape
+    flat_logits = logits.reshape(-1, logits.size(-1))
+    flat_ids = input_ids.reshape(-1).to(torch.long)
+    return (-_LIGER_CE(flat_logits, flat_ids)).reshape(shape)
+
+
 def gather_log_probs_packed(
     shifted_logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -1331,8 +1344,8 @@ def gather_log_probs_packed(
     targets = input_ids[1:].to(device=shifted_logits.device)
 
     # Gather log probs for targets
-    selective_log_softmax = selective_log_softmax_compiled if allow_compile else selective_log_softmax_raw
-    return selective_log_softmax(shifted_logits, targets)
+    # selective_log_softmax = selective_log_softmax_compiled if allow_compile else selective_log_softmax_raw
+    return selective_log_softmax_liger(shifted_logits, targets)
 
 
 def get_logprob_and_entropy(
@@ -1365,8 +1378,9 @@ def get_logprob_and_entropy(
     )
     entropy = None
     if need_full_log_probs:
-        log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
-        probs = torch.softmax(shifted_logits, dim=-1)
+        shifted_logits_f32 = shifted_logits.float()
+        log_probs_full = torch.log_softmax(shifted_logits_f32, dim=-1)
+        probs = torch.softmax(shifted_logits_f32, dim=-1)
         entropy = -(probs * log_probs_full).sum(dim=-1)
     if cu_seqlens is not None:
         log_probs = strip_cross_boundary(log_probs, cu_seqlens)

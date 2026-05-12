@@ -11,6 +11,7 @@ dependencies = [
     "flash-attn-3",
     "flash-linear-attention",
     "httpx[http2]",
+    "liger-kernel",
     "omegaconf",
     "packaging",
     "peft",
@@ -121,6 +122,8 @@ markers = [
 ]
 
 [tool.uv]
+prerelease = "allow"
 override-dependencies = [
     "nvidia-cudnn-cu12==9.16.0.29",
+    "torchao>=0.16.0",
 ]
