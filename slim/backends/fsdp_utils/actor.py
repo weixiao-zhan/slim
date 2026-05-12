@@ -64,6 +64,9 @@ class FSDPTrainRayActor(TrainRayActor):
             "dp_size": self.dp_size,
             "fsdp_strategy": self.args.fsdp_strategy,
         }
+        # Set before the debug_rollout_only guard so methods called from the
+        # train loop (update_weights, save_model, async_train) don't AttributeError.
+        self._is_critic = role == "critic"
 
         if self.args.debug_rollout_only:
             return 0
@@ -84,7 +87,6 @@ class FSDPTrainRayActor(TrainRayActor):
         # Determine checkpoint paths based on role
         from .checkpoint import is_hf_checkpoint
 
-        self._is_critic = role == "critic"
         if self._is_critic:
             self._checkpoint_load_dir = args.critic_save  # resume from critic checkpoints
             self._checkpoint_save_dir = args.critic_save
@@ -1188,14 +1190,12 @@ class FSDPTrainRayActor(TrainRayActor):
         image_counts = num_items.get("image_grid_thw", [])
         video_counts = num_items.get("video_grid_thw", [])
 
-        # HF's get_rope_index lives on the inner Qwen3_5Model (self.model.model
-        # for ForConditionalGeneration-style wrappers). Unwrap peft/fsdp/meta
-        # layers that may sit between.
+        # Unwrap PEFT (base_model.model) then walk HF's .model nesting to
+        # reach the base model that defines get_rope_index.
         inner = self.model
-        while hasattr(inner, "module"):
-            inner = inner.module
-        if hasattr(inner, "model"):
-            inner = inner.model
+        if getattr(self.args, "use_peft", False):
+            inner = inner.base_model.model
+        inner = inner.model
         get_rope_index = inner.get_rope_index
 
         pieces = []
