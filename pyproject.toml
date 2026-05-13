@@ -7,7 +7,6 @@ dependencies = [
     "aiohttp",
     "causal-conv1d",
     "datasets>=3.2.0",
-    "flash-attn",
     "flash-attn-3",
     "flash-linear-attention",
     "httpx[http2]",
@@ -20,13 +19,13 @@ dependencies = [
     "qwen_vl_utils",
     "ray[default]",
     "requests",
-    "sglang==0.5.10.post1",
-    "sglang-router==0.2.3",
+    "sglang==0.5.11",
+    "sglang-router==0.3.2",
     "sympy",
     "tilelang>=0.1.9",
-    "torch==2.9.1",
+    "torch==2.11.0",
     "tqdm",
-    "transformers==5.3.0",
+    "transformers==5.6.0",
     "wandb",
 ]
 classifiers = [
@@ -50,14 +49,15 @@ build-backend = "hatchling.build"
 packages = ["slim"]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
-flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.03.03-5c98620/flash_attn_3-3.0.0%2B20260303.cu128torch291cxx11abitrue.ceb109-cp39-abi3-linux_x86_64.whl" }
-causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.05.11-5e0e3b1/flash_attn_3-3.0.0%2B20260511.cu130torch2110cxx11abitrue.ab6632-cp39-abi3-linux_x86_64.whl" }
+causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1%2Bcu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.isort]
@@ -124,6 +124,5 @@ markers = [
 [tool.uv]
 prerelease = "allow"
 override-dependencies = [
-    "nvidia-cudnn-cu12==9.16.0.29",
     "torchao>=0.16.0",
 ]
