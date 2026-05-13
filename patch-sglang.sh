@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply patches to sglang v0.5.10.post1 after uv sync
+# Apply patches to sglang after uv sync
 set -euo pipefail
 
 SITE=$(uv run python -c "import sglang; print(sglang.__path__[0])")
@@ -23,6 +23,17 @@ fi
 # else
 #     echo "  Skipped: base_processor.py gpu_image_decode (already patched or not found)"
 # fi
+
+# Patch: guard s_aux against None in flash_attention_forward (transformers 5.6 regression)
+# Vision encoder attention doesn't pass s_aux, so it arrives as None and crashes.
+TRANS=$(uv run python -c "import transformers; import os; print(os.path.dirname(transformers.__file__))")
+FA="$TRANS/integrations/flash_attention.py"
+if [ -f "$FA" ] && grep -q 's_aux=s_aux\.to(query\.dtype)' "$FA"; then
+    sed -i 's/s_aux=s_aux\.to(query\.dtype),/s_aux=s_aux.to(query.dtype) if s_aux is not None else None,/' "$FA"
+    echo "  Applied: flash_attention.py s_aux None guard (transformers 5.6 vision encoder fix)"
+else
+    echo "  Skipped: flash_attention.py (already patched or not found)"
+fi
 
 sudo sysctl -w kernel.yama.ptrace_scope=0
 
