@@ -959,12 +959,35 @@ class FSDPTrainRayActor(TrainRayActor):
             else None
         )
 
+        # Off-policy correction via TIS/MIS
+        tis_loss_masks = loss_masks
+        if self.args.use_tis and has_rollout_log_probs:
+            from slim.utils.tis import compute_tis_weights
+
+            if self.args.custom_tis_function_path is not None:
+                from slim.utils.misc import load_function
+
+                tis_func = load_function(self.args.custom_tis_function_path)
+            else:
+                tis_func = compute_tis_weights
+
+            tis_weights, tis_modified_masks, tis_metrics = tis_func(
+                args=self.args,
+                train_log_probs=[batch[old_log_prob_key] for batch in unpacked_batches],
+                rollout_log_probs=[batch["rollout_log_probs"] for batch in unpacked_batches],
+                loss_masks=loss_masks,
+            )
+            if tis_weights is not None:
+                flat_weights = torch.cat(tis_weights, dim=0).to(device=pg_loss.device)
+                pg_loss = pg_loss * flat_weights
+            tis_loss_masks = tis_modified_masks
+
         if self.args.calculate_per_token_loss:
-            pg_loss = sum_of_token(pg_loss, edge_lengths, loss_masks)
+            pg_loss = sum_of_token(pg_loss, edge_lengths, tis_loss_masks)
             pg_clipfrac = sum_of_token(pg_clipfrac, edge_lengths, loss_masks)
             ppo_kl = sum_of_token(ppo_kl.abs(), edge_lengths, loss_masks)
         else:
-            pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, loss_masks)
+            pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, tis_loss_masks)
             pg_clipfrac = sum_of_sample_mean(pg_clipfrac, edge_lengths, loss_masks)
             ppo_kl = sum_of_sample_mean(ppo_kl.abs(), edge_lengths, loss_masks)
 
@@ -1009,6 +1032,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
         if train_rollout_logprob_abs_diff is not None:
             reported["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff
+
+        if self.args.use_tis and has_rollout_log_probs:
+            for key, values in tis_metrics.items():
+                flat_v = torch.cat(values, dim=0)
+                reported[f"tis/{key}"] = sum_of_sample_mean(flat_v, edge_lengths, loss_masks).detach()
 
         if self.args.use_kl_loss:
             reported["kl_loss"] = kl_loss.detach()
