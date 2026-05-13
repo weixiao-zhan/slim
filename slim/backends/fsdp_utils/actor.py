@@ -121,11 +121,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
         init_context = self._get_init_weight_context_manager()
 
+        load_dtype = getattr(self.hf_config, "torch_dtype", None)
         # Downcast to bf16 if model config doesn't specify a dtype and flash attention is requested,
         # since FA2/FA3 require float16/bfloat16 (e.g. Gemma-3's Siglip vision encoder defaults to float32).
-        load_dtype = getattr(self.hf_config, "torch_dtype", None)
-        if load_dtype is None and self.args.attn_implementation in ("flash_attention_2", "flash_attention_3"):
-            load_dtype = torch.bfloat16
+        # if load_dtype is None and self.args.attn_implementation in ("flash_attention_2", "flash_attention_3"):
+        #     load_dtype = torch.bfloat16
 
         # Shared kwargs for from_pretrained — reused by _create_ref_model
         self._load_kwargs = dict(
@@ -1464,8 +1464,8 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         elif isinstance(m, torch.nn.Embedding) and not model_config.tie_word_embeddings:
             modules.append(m)
 
-    # Determine precision policy based on args
-    param_dtype = torch.bfloat16  # Default to bf16 as before
+    # FSDP all-gather keeps each parameter's native dtype.
+    param_dtype = None
     reduce_dtype = torch.float32
 
     if args.fp16:
@@ -1481,6 +1481,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         ),
         "offload_policy": offload_policy,
         "mesh": mesh,
+        "ignored_params": ignored_params if ignored_params else None,
     }
 
     # Apply FSDP to each module (offload_policy=None is equivalent to not passing it)
