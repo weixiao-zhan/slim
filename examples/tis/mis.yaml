@@ -1,0 +1,26 @@
+# Masked Importance Sampling (MIS) config for train-inference mismatch correction.
+# Reference: https://fengyao.notion.site/off-policy-rl
+# Usage: --use-tis --custom-config-path examples/tis/mis.yaml
+use_tis: true
+use_rs: true
+
+# Aggregation level: token, sequence, or geometric
+tis_level: "token"
+rs_level: "geometric"
+
+# Handling mode: truncate, clip, or mask
+tis_mode: "truncate"
+
+# Bounds for IS weights (token-level)
+tis_lower_bound: 0.5
+tis_upper_bound: 2.0
+
+# RS bounds (geometric-level, tighter)
+rs_lower_bound: 0.99
+rs_upper_bound: 1.001
+
+# Per-token veto threshold — if any token ratio < this, zero the entire sequence
+rs_veto_threshold: 1.0e-4
+
+# Batch normalization: normalize IS weights to mean=1.0 across batch
+tis_batch_normalize: true
