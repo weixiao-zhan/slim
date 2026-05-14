@@ -1055,15 +1055,15 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 
 
 def _compute_episode_metrics(args, episodes: list[Episode]):
-    response_lengths = [ep.response_length for ep in episodes]
+    context_lengths = [len(ep.tokens) for ep in episodes]
 
     log_dict = {}
-    log_dict |= dict_add_prefix(compute_statistics(response_lengths), "response_len/")
+    log_dict |= dict_add_prefix(compute_statistics(context_lengths), "context_len/")
     log_dict |= _compute_zero_std_metrics(args, episodes)
-    log_dict["response_len/repetition_frac"] = sum(int(has_repetition(ep.generated_text or "")) for ep in episodes) / max(
+    log_dict["context_len/repetition_frac"] = sum(int(has_repetition(ep.generated_text or "")) for ep in episodes) / max(
         len(episodes), 1
     )
-    log_dict["response_len/truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
+    log_dict["context_len/truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
         len(episodes), 1
     )
     return log_dict
