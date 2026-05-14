@@ -121,11 +121,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         init_context = self._get_init_weight_context_manager()
 
-        load_dtype = getattr(self.hf_config, "torch_dtype", None)
-        # Downcast to bf16 if model config doesn't specify a dtype and flash attention is requested,
-        # since FA2/FA3 require float16/bfloat16 (e.g. Gemma-3's Siglip vision encoder defaults to float32).
-        # if load_dtype is None and self.args.attn_implementation in ("flash_attention_2", "flash_attention_3"):
-        #     load_dtype = torch.bfloat16
+        load_dtype = torch.float32 if self.args.master_weight_dtype == "fp32" else None
 
         # Shared kwargs for from_pretrained — reused by _create_ref_model
         self._load_kwargs = dict(
@@ -147,6 +143,14 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             with init_context():
                 model = self.get_model_cls().from_pretrained(hf_checkpoint, **self._load_kwargs)
+
+        # Frozen vision/audio encoders stay in bf16: FA3 only accepts fp16/bf16/fp8,
+        # and they're not trained so fp32 master weights aren't needed. Must run before
+        # state_dict() capture so the bf16 cast survives _fsdp2_load_full_state_dict.
+        # Keep keywords in sync with apply_fsdp2's _REPLICATED_PATH_KEYWORDS.
+        for name, module in model.named_modules():
+            if any(kw in name for kw in ("visual", "vision_tower", "vision_model", "audio", "speech")):
+                module.to(torch.bfloat16)
 
         # Apply PEFT adapter if --use-peft is set (after critic head swap, before FSDP)
         model = self._maybe_apply_peft(model)
@@ -1461,7 +1465,7 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         mesh: Optional DeviceMesh for FSDP. If None, uses all ranks.
         cpu_offload: If True, offload parameters, gradients, and optimizer states
             to CPU. The optimizer step will run on CPU. (Default: False)
-        args: Arguments containing precision settings (fp16/bf16)
+        args: Arguments containing precision settings (compute_dtype)
 
     Ref: https://github.com/volcengine/verl/blob/main/verl/utils/fsdp_utils.py
     """
@@ -1492,12 +1496,11 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
         elif isinstance(m, torch.nn.Embedding) and not model_config.tie_word_embeddings:
             modules.append(m)
 
-    # FSDP all-gather keeps each parameter's native dtype.
-    param_dtype = None
+    # Determine precision policy. None lets compute follow storage dtype
+    # (per-tensor; FSDP2 keeps the param dtype when param_dtype=None).
+    _COMPUTE_DTYPE_MAP = {None: None, "bf16": torch.bfloat16, "fp16": torch.float16}
+    param_dtype = _COMPUTE_DTYPE_MAP[args.compute_dtype]
     reduce_dtype = torch.float32
-
-    if args.fp16:
-        param_dtype = torch.float16
 
     mesh_desc = f"{mesh.ndim}D mesh={mesh.shape}" if mesh is not None else "default"
     logger.info(f"FSDP MixedPrecision Policy: param_dtype={param_dtype}, reduce_dtype={reduce_dtype}, {mesh_desc}")

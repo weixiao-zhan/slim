@@ -571,8 +571,6 @@ def _compute_server_args(
     elif worker_type == "encoder":
         kwargs["encoder_only"] = True
 
-    if args.fp16:
-        kwargs["dtype"] = "float16"
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 
     server_arg_fields = dataclasses.fields(ServerArgs)

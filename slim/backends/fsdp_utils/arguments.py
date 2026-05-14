@@ -37,7 +37,14 @@ class FSDPArgs:
 
     # Precision
     gradient_checkpointing: bool = False
-    fp16: bool = False
+    # Master-weight (storage) dtype passed to from_pretrained. 
+    # None preserves the checkpoint's per-tensor dtypes. 
+    # "fp32" force-promotes everything to fp32 (Mixed precision standard practice)
+    master_weight_dtype: str | None = None  # None | "fp32"
+    # FSDP2 compute dtype (MixedPrecisionPolicy.param_dtype) for forward/backward.
+    # None lets compute follow storage dtype; 
+    # "bf16"/"fp16" force a uniform compute dtype. 
+    compute_dtype: str | None = None  # None | "bf16" | "fp16"
 
     # FSDP configuration
     fsdp_strategy: str = "hybrid"  # "hybrid" (shard intra-node, replicate inter-node) or "full" (shard all GPUs)
@@ -102,6 +109,17 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
                 setattr(args, k, v)
     args.rank = 0  # Primary process rank for wandb initialization
     args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+
+    valid_master = (None, "fp32")
+    if args.master_weight_dtype not in valid_master:
+        raise ValueError(
+            f"--master-weight-dtype must be one of {valid_master}, got {args.master_weight_dtype!r}"
+        )
+    valid_compute = (None, "bf16", "fp16")
+    if args.compute_dtype not in valid_compute:
+        raise ValueError(
+            f"--compute-dtype must be one of {valid_compute}, got {args.compute_dtype!r}"
+        )
     # Hybrid sharding fall back to full shard on single node.
     if args.fsdp_strategy == "hybrid" and args.actor_num_nodes <= 1:
         args.fsdp_strategy = "full"
