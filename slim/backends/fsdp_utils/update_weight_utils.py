@@ -54,7 +54,22 @@ class UpdateWeight(abc.ABC):
         """
         self.weight_version += 1
 
+        rank = dist.get_rank()
+        if rank == 0:
+            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
+            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
+
         peft_prefix = self.model.base_model.prefix if peft_remap else ""
+
+        # TODO
+        # Qwen3-VL-MoE: transformers 5.6 stores fused expert weights as
+        # [E, 2*intermediate, hidden] / [E, hidden, intermediate], but sglang's
+        # qwen3_vl_moe loader was written against the safetensors layout
+        # [E, hidden, 2*intermediate] / [E, intermediate, hidden] and applies a
+        # transpose(-1, -2) before chunking. Pre-transpose here so update_weights
+        # delivers the same layout as a disk load.
+        is_qwen3_vl_moe = getattr(self.model.config, "model_type", "") == "qwen3_vl_moe"
 
         bucket = []
         bucket_size = 0
@@ -70,6 +85,7 @@ class UpdateWeight(abc.ABC):
             if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
                 self.wait_and_update_bucket_weights(bucket)
                 del bucket
+                torch.cuda.ipc_collect()
                 bucket = []
                 bucket_size = 0
 
@@ -79,6 +95,11 @@ class UpdateWeight(abc.ABC):
                     placements=[Replicate()] * param.device_mesh.ndim,
                     async_op=True,
                 ).to_local()
+            if is_qwen3_vl_moe and (
+                name.endswith("mlp.experts.gate_up_proj")
+                or name.endswith("mlp.experts.down_proj")
+            ):
+                param = param.transpose(-1, -2)
             bucket.append((name, param))
             bucket_size += param_size
 
@@ -86,6 +107,16 @@ class UpdateWeight(abc.ABC):
             self.wait_and_update_bucket_weights(bucket)
             del bucket
             bucket = []
+            torch.cuda.ipc_collect()
+
+        dist.barrier(group=get_gloo_group())
+        # After the barrier all engines have returned, so every rank's last-chunk
+        # IPC handles are now released by the consumers.  Clean them up.
+        torch.cuda.ipc_collect()
+
+        if rank == 0:
+            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+        dist.barrier(group=get_gloo_group())
 
     def wait_and_update_bucket_weights(self, bucket):
         bucket = [
@@ -183,6 +214,7 @@ class UpdateWeightFromTensor(UpdateWeight):
 
         # Create flattened bucket for each dtype group
         serialized_tensors = []
+        long_live_tensors = []
         for _dtype, named_tensors in named_tensors_by_dtypes.items():
             flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=named_tensors)
             metadata = flattened_tensor_bucket.get_metadata()
@@ -190,6 +222,7 @@ class UpdateWeightFromTensor(UpdateWeight):
                 "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
                 "metadata": metadata,
             }
+            long_live_tensors.append(flattened_tensor_data)
             serialized_tensors.append(MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True))
 
         if self._ipc_gather_src == dist.get_rank():
@@ -221,10 +254,6 @@ class UpdateWeightFromTensor(UpdateWeight):
                 }
                 ref = self._ipc_engine.update_weights_from_tensor.remote(**kwargs)
                 ray.get(ref)
-
-        if dist.get_rank() == self._ipc_gather_src:
-            ref = self._ipc_engine.flush_cache.remote()
-            ray.get(ref)
 
         # Update engines on non-actor GPUs via NCCL broadcast
         if self._distributed_updater is not None:
