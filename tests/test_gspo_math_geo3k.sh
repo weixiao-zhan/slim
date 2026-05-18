@@ -44,8 +44,8 @@ run_train "
 
     --advantage-estimator gspo
     --disable-grpo-std-normalization
-    --eps-clip 0.2
-    --eps-clip-high 0.28
+    --eps-clip 3e-4
+    --eps-clip-high 4e-4
     --entropy-coef 0.00
     --kl-loss-coef 0.00
     --kl-loss-type low_var_kl
