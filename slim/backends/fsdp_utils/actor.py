@@ -132,7 +132,7 @@ class FSDPTrainRayActor(TrainRayActor):
             self._load_kwargs["dtype"] = load_dtype
 
         if self._is_critic:
-            from .models.critic import create_critic_model
+            from .critic import create_critic_model
 
             model = create_critic_model(
                 hf_checkpoint,
@@ -1163,7 +1163,7 @@ class FSDPTrainRayActor(TrainRayActor):
         # honor packed-sequence boundaries, so patch the classes before
         # from_pretrained creates module instances.
         if getattr(self.hf_config, "model_type", None) == "qwen3_5":
-            from .qwen_deltanet_patch import apply_qwen_deltanet_varlen_patch
+            from .models.qwen3_5 import apply_qwen_deltanet_varlen_patch
 
             apply_qwen_deltanet_varlen_patch()
 

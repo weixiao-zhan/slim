@@ -151,8 +151,3 @@ def apply_qwen_deltanet_varlen_patch() -> None:
     Qwen3_5GatedDeltaNet.forward = _patched_gated_delta_net_forward
     Qwen3_5DecoderLayer.forward = _patched_decoder_layer_forward
     _PATCHED = True
-
-
-def apply_qwen3_5_varlen_patch() -> None:
-    """Backward-compatible alias for older imports."""
-    apply_qwen_deltanet_varlen_patch()
