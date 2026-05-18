@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import random
@@ -166,6 +167,16 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
         self.model = model
+
+        # Stamp layer indices on each MoE router so the routing-replay patch
+        # can look up the right slice of the per-token expert tensor. Safe to
+        # run unconditionally (no-op when no MoE routers are present).
+        if getattr(args, "use_rollout_routing_replay", False):
+            from .models.qwen3_5 import register_routing_replay_layer_indices
+
+            n_routers = register_routing_replay_layer_indices(self.model)
+            if dist.get_rank() == 0:
+                logger.info(f"[routing-replay] tagged {n_routers} MoE routers with layer indices")
 
         if args.gradient_checkpointing:
             # Gradient checkpointing requires inputs to have requires_grad=True
@@ -487,10 +498,15 @@ class FSDPTrainRayActor(TrainRayActor):
             if self.args.offload_train:
                 self.wake_up()
 
-            if self.ref_model is not None:
-                self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
-            if not self.args.use_rollout_logprobs:
-                self._compute_log_prob("actor", packed_batches)
+            try:
+                if self.ref_model is not None:
+                    self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+                if not self.args.use_rollout_logprobs:
+                    self._compute_log_prob("actor", packed_batches)
+            finally:
+                # Compute_log_probs is no_grad, but still clear so train()
+                # can re-activate cleanly per micro-batch.
+                self._clear_routing_replay()
 
             if self.args.offload_train:
                 self.sleep()
@@ -543,7 +559,9 @@ class FSDPTrainRayActor(TrainRayActor):
                     tqdm(packed_batches, desc=f"{store_prefix}log_probs", disable=dist.get_rank() != 0)
                 ):
                     model_args = self._get_model_inputs_args(batch)
-                    logits = active_model(**model_args).logits.squeeze(0)
+                    # Replay only on actor forward; ref model uses its own router.
+                    with self._maybe_routing_replay(batch, enabled=model_tag != "ref"):
+                        logits = active_model(**model_args).logits.squeeze(0)
                     log_probs_result, entropy_result = get_logprob_and_entropy(
                         logits=logits,
                         target_tokens=batch["tokens"],
@@ -646,13 +664,19 @@ class FSDPTrainRayActor(TrainRayActor):
                 return
 
             values = ray.get(values_refs[self.dp_rank]) if values_refs is not None else None
-            self._train_core(
-                rollout_id=rollout_id,
-                episodes=episodes,
-                values=values,
-                packed_batches=packed_batches,
-                grad_accum=grad_accum,
-            )
+            try:
+                self._train_core(
+                    rollout_id=rollout_id,
+                    episodes=episodes,
+                    values=values,
+                    packed_batches=packed_batches,
+                    grad_accum=grad_accum,
+                )
+            finally:
+                # Clear the routing-replay buffer so the next forward (e.g.,
+                # the next rollout's compute_log_probs) does not see stale
+                # indices from a different micro-batch.
+                self._clear_routing_replay()
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -891,7 +915,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
         model_args = self._get_model_inputs_args(packed_batch)
-        logits = self.model(**model_args).logits.squeeze(0)
+        with self._maybe_routing_replay(packed_batch, enabled=True):
+            logits = self.model(**model_args).logits.squeeze(0)
 
         # Compute log probs and entropy
         need_full_log_probs = self.args.entropy_coef != 0.0
@@ -1158,14 +1183,79 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _apply_transformers_model_patches(self) -> None:
         """Apply repo-owned HF model patches needed by packed training."""
-        # Qwen3.5 and Qwen3.6-27B share HF's `qwen3_5` architecture. The
-        # Mamba-style linear_attention/Gated DeltaNet layers in stock HF don't
-        # honor packed-sequence boundaries, so patch the classes before
-        # from_pretrained creates module instances.
-        if getattr(self.hf_config, "model_type", None) == "qwen3_5":
+        # Qwen3.5 / Qwen3.6 (dense + MoE) share Mamba-style linear_attention
+        # layers. Stock HF doesn't honor packed-sequence boundaries, so patch
+        # the classes before from_pretrained creates module instances. The
+        # MoE variant uses model_type == "qwen3_5_moe".
+        model_type = getattr(self.hf_config, "model_type", None)
+        if model_type in ("qwen3_5", "qwen3_5_moe"):
             from .models.qwen3_5 import apply_qwen_deltanet_varlen_patch
 
             apply_qwen_deltanet_varlen_patch()
+
+        # MoE routing replay: hook in the topk router so it gathers scores
+        # at rollout-recorded expert indices when active. Layer-index stamps
+        # are applied later in __init__ (after model is built).
+        if model_type == "qwen3_5_moe" and getattr(self.args, "use_rollout_routing_replay", False):
+            from .models.qwen3_5 import apply_qwen3_5_moe_router_replay_patch
+
+            apply_qwen3_5_moe_router_replay_patch()
+
+    @contextlib.contextmanager
+    def _maybe_routing_replay(self, packed_batch: dict, *, enabled: bool):
+        """Activate the MoE routing-replay buffer for the upcoming forward.
+
+        ``packed_batch["rollout_routed_experts"]`` is `[total_edges, L, top_k]`,
+        edge-aligned: row ``i`` is the routing applied to token ``i`` (which
+        predicts token ``i+1``). The model forward sees `[total_tokens, ...]`,
+        so we expand to a token-indexed buffer with one trailing zero row per
+        packed sequence (no rollout routing exists for the very last token of
+        each episode; loss_mask is 0 there anyway).
+
+        IMPORTANT: replay must stay active across BOTH the original forward
+        AND the gradient-checkpointing recomputation that runs during backward.
+        We deliberately do NOT deactivate when this context exits — the next
+        batch's activate() overwrites the buffer, and end-of-rollout cleanup
+        is the trainer's responsibility (see ``_clear_routing_replay``).
+        """
+        if not (enabled and getattr(self.args, "use_rollout_routing_replay", False)):
+            yield
+            return
+
+        routed = packed_batch.get("rollout_routed_experts")
+        if routed is None:
+            yield
+            return
+
+        from .routing_replay import RoutingReplay
+
+        cu = packed_batch["cu_seqlens"]
+        num_seq = cu.shape[0] - 1
+        edge_lengths = packed_batch["edge_lengths"]
+        L, k = routed.shape[1], routed.shape[2]
+        token_routed = torch.zeros((int(cu[-1].item()), L, k), dtype=routed.dtype, device=routed.device)
+        edge_off = 0
+        for i in range(num_seq):
+            tok_start = int(cu[i].item())
+            ep_edges = edge_lengths[i]
+            # routed[edge_off+j] is the routing applied to token j of episode i,
+            # which lives at packed position tok_start+j. The last token of the
+            # episode (tok_start + ep_edges) has no rollout routing.
+            token_routed[tok_start : tok_start + ep_edges] = routed[edge_off : edge_off + ep_edges]
+            edge_off += ep_edges
+        assert edge_off == routed.shape[0], (
+            f"edge accounting mismatch: filled {edge_off} edges, packed {routed.shape[0]}"
+        )
+
+        token_routed = token_routed.to(device=torch.cuda.current_device(), non_blocking=True)
+        RoutingReplay.activate(token_routed)
+        yield  # NOTE: deactivate is intentionally not called here; see docstring.
+
+    def _clear_routing_replay(self) -> None:
+        if getattr(self.args, "use_rollout_routing_replay", False):
+            from .routing_replay import RoutingReplay
+
+            RoutingReplay.deactivate()
 
     def _get_model_inputs_args(self, packed_sequence: dict) -> dict:
         input_ids = packed_sequence["tokens"].unsqueeze(0)

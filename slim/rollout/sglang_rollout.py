@@ -66,6 +66,15 @@ class GenerateState(metaclass=SingletonMeta):
 
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
+
+        self.routing_replay_shape: tuple[int, int] | None = None
+        if getattr(args, "use_rollout_routing_replay", False):
+            from transformers import AutoConfig
+
+            cfg = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            text_cfg = getattr(cfg, "text_config", cfg)
+            self.routing_replay_shape = (text_cfg.num_hidden_layers, text_cfg.num_experts_per_tok)
+
         self.reset()
 
     @contextmanager
@@ -200,6 +209,12 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+    if getattr(args, "use_rollout_routing_replay", False):
+        # The sglang_router (Rust) strips this field; the slim sglang launcher
+        # patches the server to force-enable it whenever the server-side
+        # capturer is on. Sending it here is harmless and useful for direct-
+        # to-worker setups that don't go through the router.
+        payload["return_routed_experts"] = True
     if episode.has_multimodal:
         images = episode.example.get("images")
         if images:
@@ -231,6 +246,25 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     assert episode.loss_mask is not None and episode.rollout_log_probs is not None
     episode.loss_mask.extend([1] * added_edges)
     episode.rollout_log_probs.extend(new_log_probs)
+
+    if state.routing_replay_shape is not None:
+        # sglang returns base64-encoded int32 of shape [edge_len, num_layers, top_k]
+        # flattened. edge_len == seqlen - 1, aligned with episode.num_edges.
+        # NOTE: partial-rollout (multi-turn) overwrites on each call — sglang
+        # re-captures the full sequence each time.
+        import numpy as np
+        import pybase64
+
+        b64 = output["meta_info"].get("routed_experts")
+        if b64 is not None:
+            num_layers, top_k = state.routing_replay_shape
+            arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
+            edge_len = episode.num_edges
+            arr = arr.reshape(-1, num_layers, top_k)[:edge_len]
+            assert arr.shape[0] == edge_len, (
+                f"routed_experts edge_len {arr.shape[0]} != episode.num_edges {edge_len}"
+            )
+            episode.rollout_routed_experts = arr
 
     episode.ensure_edge_alignment()
     episode.update_from_meta_info(args, output["meta_info"])
