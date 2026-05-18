@@ -46,8 +46,8 @@ run_train "
     --kl-loss-type low_var_kl
     --kl-coef 0.00
     --entropy-coef 0.00
-    --eps-clip 0.2
-    --eps-clip-high 0.28
+    --eps-clip 3e-4
+    --eps-clip-high 4e-4
 
     --optimizer adam
     --lr 1e-5
