@@ -54,9 +54,9 @@ class Episode:
     #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
     #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
     generated_text: str | None = None                  # cached decode of loss_mask==1 tokens, set by RM
-    weight_versions: list[str] = field(default_factory=list)
     non_generation_time: float = 0.0
     train_metadata: dict = field(default_factory=dict)
+    max_tokens: int = 0
 
     # Status tracking
     class Status:
@@ -125,11 +125,8 @@ class Episode:
 
     # --- Shared helpers ---
 
-    def update_from_meta_info(self, args, meta_info: dict):
-        if "weight_version" in meta_info:
-            self.weight_versions.append(meta_info["weight_version"])
-
-        match meta_info["finish_reason"]["type"]:
+    def update_status_from_finish_reason(self, finish_reason: str):
+        match finish_reason:
             case "length":
                 self.status = Episode.Status.TRUNCATED
             case "abort":

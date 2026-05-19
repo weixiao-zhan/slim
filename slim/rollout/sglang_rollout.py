@@ -123,7 +123,7 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
         episodes = []
         for _ in range(args.n_samples_per_prompt):
             ep = Episode.from_example(example)
-            ep._max_tokens = args.max_context_len
+            ep.max_tokens = args.max_context_len
             episodes.append(ep)
         groups.append(RolloutGroup(index=index, example=example, episodes=episodes))
     return groups
@@ -187,17 +187,14 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
 
 async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
     state = GenerateState(args)
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
     from slim.utils.processing_utils import encode_image_for_rollout_engine
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
     await _prepare_episode_tokens(args, episode)
-
     assert episode.rollout_log_probs is not None
-    # Reserve one position: SGLang requires prompt + max_new_tokens < context_length (strict).
-    max_new_tokens = episode._max_tokens - len(episode.tokens) - 1
 
+    max_new_tokens = episode.max_tokens - len(episode.tokens)
     if max_new_tokens <= 0:
         episode.status = Episode.Status.TRUNCATED
         return episode
@@ -209,12 +206,6 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
-    if getattr(args, "use_rollout_routing_replay", False):
-        # The sglang_router (Rust) strips this field; the slim sglang launcher
-        # patches the server to force-enable it whenever the server-side
-        # capturer is on. Sending it here is harmless and useful for direct-
-        # to-worker setups that don't go through the router.
-        payload["return_routed_experts"] = True
     if episode.has_multimodal:
         images = episode.example.get("images")
         if images:
@@ -230,21 +221,15 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:
         headers = {"X-SMG-Routing-Key": episode.session_id}
 
+    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
     output = await post(url, payload, headers=headers)
 
-    if "output_token_logprobs" in output["meta_info"]:
-        new_tokens = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-        new_log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
-    else:
-        new_tokens, new_log_probs = [], []
+    meta_info = output["meta_info"]
+    new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
+    new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
 
-    old_edge_len = episode.num_edges
     episode.tokens.extend(new_tokens)
-    new_edge_len = episode.num_edges
-    added_edges = new_edge_len - old_edge_len
-
-    assert episode.loss_mask is not None and episode.rollout_log_probs is not None
-    episode.loss_mask.extend([1] * added_edges)
+    episode.loss_mask.extend([1] * len(new_tokens))
     episode.rollout_log_probs.extend(new_log_probs)
 
     if state.routing_replay_shape is not None:
@@ -256,7 +241,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         import numpy as np
         import pybase64
 
-        b64 = output["meta_info"].get("routed_experts")
+        b64 = meta_info.get("routed_experts")
         if b64 is not None:
             num_layers, top_k = state.routing_replay_shape
             arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
@@ -270,7 +255,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
             episode.rollout_routed_experts = arr
 
     episode.ensure_edge_alignment()
-    episode.update_from_meta_info(args, output["meta_info"])
+    episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
 
 
@@ -488,7 +473,7 @@ async def eval_rollout_single_dataset(
             episode = Episode.from_example(raw_row)
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
-            episode._max_tokens = dataset_cfg.max_context_len
+            episode.max_tokens = dataset_cfg.max_context_len
             sampling_params = base_sampling_params
             if getattr(args, "sglang_enable_deterministic_inference", False):
                 sampling_params = base_sampling_params.copy()
