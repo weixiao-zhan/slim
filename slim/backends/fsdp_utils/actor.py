@@ -1198,7 +1198,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _get_model_inputs_args(self, packed_sequence: dict) -> dict:
         input_ids = packed_sequence["tokens"].unsqueeze(0)
-        mm_inputs = packed_sequence.get("multimodal_train_inputs") or {}
+        mm_inputs = packed_sequence.get("multimodal_inputs") or {}
 
         # Pass cu_seq_lens_q/k + max_length_q/k to the model so that HF's
         # attention layers use the safe varlen-kwargs branch (sidesteps

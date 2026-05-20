@@ -2,7 +2,7 @@ import base64
 import copy
 import io
 import logging
-
+import torch
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 logger = logging.getLogger(__name__)
@@ -71,3 +71,15 @@ def encode_image_for_rollout_engine(image) -> str:
     image.save(buffer, format="PNG")
     image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{image_base64}"
+
+
+def encode_tensor_to_b64_envelope(value) -> dict:
+    """Encode a CPU tensor as a JSON-safe base64 envelope."""
+    tensor = value.detach().cpu().contiguous()
+    raw = tensor.view(torch.uint8).numpy().tobytes()
+    return {
+        "__tensor__": True,
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+        "shape": list(tensor.shape),
+        "data": base64.b64encode(raw).decode("ascii"),
+    }

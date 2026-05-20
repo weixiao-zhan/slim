@@ -40,7 +40,7 @@ def _get_assistant_mask_multimodal(processor, messages, example, tools=None):
     )
     token_ids = processor_output["input_ids"][0].tolist()
 
-    multimodal_train_inputs = {
+    multimodal_inputs = {
         k: v
         for k, v in processor_output.items()
         if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
@@ -70,7 +70,7 @@ def _get_assistant_mask_multimodal(processor, messages, example, tools=None):
     )
     loss_mask = [0] * diff + text_mask
 
-    return token_ids, loss_mask, multimodal_train_inputs
+    return token_ids, loss_mask, multimodal_inputs
 
 
 def generate_rollout(args, rollout_id, data_source, evaluation=False):
@@ -104,7 +104,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
         tools = ep.example.get("tools")
 
         if isinstance(prompt, list) and PROCESSOR is not None:
-            token_ids, loss_mask, ep.multimodal_train_inputs = _get_assistant_mask_multimodal(
+            token_ids, loss_mask, ep.multimodal_inputs = _get_assistant_mask_multimodal(
                 PROCESSOR, prompt, ep.example, tools=tools
             )
         else:

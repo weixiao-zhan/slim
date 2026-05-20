@@ -161,7 +161,7 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
             return_mm_token_type_ids=False,
         )
         prompt_ids = processor_output["input_ids"][0].tolist()
-        episode.multimodal_train_inputs = {
+        episode.multimodal_inputs = {
             k: v
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
@@ -187,7 +187,7 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
 
 async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
     state = GenerateState(args)
-    from slim.utils.processing_utils import encode_image_for_rollout_engine
+    from slim.utils.processing_utils import encode_tensor_to_b64_envelope
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
@@ -207,15 +207,18 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         "return_logprob": True,
     }
     if episode.has_multimodal:
-        images = episode.example.get("images")
-        if images:
-            payload["image_data"] = [encode_image_for_rollout_engine(img) for img in images]
-        videos = episode.example.get("videos")
-        if videos:
-            payload["video_data"] = videos
-        audios = episode.example.get("audios")
-        if audios:
-            payload["audio_data"] = audios
+        processor_output = {
+            "format": "processor_output",
+            "input_ids": encode_tensor_to_b64_envelope(torch.as_tensor([episode.tokens], dtype=torch.long)),
+        }
+        for key, value in episode.multimodal_inputs.items():
+            processor_output[key] = encode_tensor_to_b64_envelope(value) if hasattr(value, "detach") else value
+
+        # SGLang native /generate already routes image_data as opaque JSON.
+        # With format="processor_output", this field is only a transport
+        # carrier; SGLang's patched processor reads the modality-specific
+        # tensors from the dict and does not treat it as raw image data.
+        payload["image_data"] = [processor_output]
 
     headers = None
     if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:

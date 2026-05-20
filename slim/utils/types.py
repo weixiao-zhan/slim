@@ -47,7 +47,7 @@ class Episode:
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     rollout_routed_experts: Any | None = None          # np.ndarray [token_len, num_layers, top_k] → IntTensor
-    multimodal_train_inputs: dict[str, Any] | None = None
+    multimodal_inputs: dict[str, Any] | None = None
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
     #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)
