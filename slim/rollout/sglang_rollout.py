@@ -248,8 +248,9 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     episode.rollout_log_probs.extend(new_log_probs)
 
     if state.routing_replay_shape is not None:
-        # sglang returns base64-encoded int32 of shape [edge_len, num_layers, top_k]
-        # flattened. edge_len == seqlen - 1, aligned with episode.num_edges.
+        # sglang returns base64-encoded int32 of shape [seqlen, num_layers, top_k]
+        # flattened — token-aligned, one row per token (including the last,
+        # which never produces a non-zero gradient because loss_mask is 0 there).
         # NOTE: partial-rollout (multi-turn) overwrites on each call — sglang
         # re-captures the full sequence each time.
         import numpy as np
@@ -259,11 +260,13 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         if b64 is not None:
             num_layers, top_k = state.routing_replay_shape
             arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
-            edge_len = episode.num_edges
-            arr = arr.reshape(-1, num_layers, top_k)[:edge_len]
-            assert arr.shape[0] == edge_len, (
-                f"routed_experts edge_len {arr.shape[0]} != episode.num_edges {edge_len}"
-            )
+            arr = arr.reshape(-1, num_layers, top_k)
+            seqlen = len(episode.tokens)
+            if arr.shape[0] != seqlen:
+                raise ValueError(
+                    f"sglang returned {arr.shape[0]} rows of routed_experts, "
+                    f"expected {seqlen} (= len(tokens)) for token-aligned replay"
+                )
             episode.rollout_routed_experts = arr
 
     episode.ensure_edge_alignment()

@@ -16,15 +16,15 @@ Patches in this module:
    `causal_conv1d` / `chunk_gated_delta_rule`, which reset state at each
    boundary. Forward becomes bit-identical to the slime/SGLang rollout.
 
-2. `apply_qwen3_5_moe_router_replay_patch()` — replaces
-   `Qwen3_5MoeTopKRouter.forward` with a variant that gathers scores at
-   rollout-recorded expert indices when `RoutingReplay` is active. Eliminates
-   train/inference expert-selection mismatch on MoE models. The router weight
-   still receives gradient (the gather is differentiable in `scores`), only
-   the *choice* of experts is frozen.
+2. ``Qwen3_5MoeRoutingReplayAdapter`` (registered in
+   ``ROUTING_REPLAY_REGISTRY["qwen3_5_moe"]``) — replaces
+   ``Qwen3_5MoeTopKRouter.forward`` with a replay-aware variant that
+   delegates the gather to ``gather_replayed_topk``. Eliminates
+   train/inference expert-selection mismatch. The router weight still
+   receives gradient; only the *choice* of experts is frozen.
 
-Ref: upstream slime `slime_plugins/models/qwen3_5.py` and
-`slime/utils/routing_replay.py` do the same under Megatron; we replicate
+Ref: upstream slime ``slime_plugins/models/qwen3_5.py`` and
+``slime/utils/routing_replay.py`` do the same under Megatron; we replicate
 under stock HF for FSDP.
 """
 
@@ -33,7 +33,8 @@ import torch.nn.functional as F
 from fla.modules.conv.causal_conv1d import causal_conv1d as fla_causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule as fla_chunk_gated_delta_rule
 
-from ..routing_replay import RoutingReplay
+from ..routing_replay import gather_replayed_topk
+from . import ROUTING_REPLAY_REGISTRY
 
 _PATCHED = False
 _ROUTER_REPLAY_PATCHED = False
@@ -235,7 +236,7 @@ def _patched_qwen3_5_moe_router_forward(self, hidden_states):
     Replay forward: identical *autograd shape* (same number/types/shapes of
     saved tensors) so gradient checkpointing's recomputation matches. We
     still call ``torch.topk`` to keep its saved-tensor footprint, then
-    overwrite ``indices`` with rollout-recorded ones and re-gather scores.
+    delegate the actual gather to ``gather_replayed_topk``.
     """
     hidden_states = hidden_states.reshape(-1, self.hidden_dim)
     router_logits = F.linear(hidden_states, self.weight)
@@ -246,30 +247,21 @@ def _patched_qwen3_5_moe_router_forward(self, hidden_states):
     # against the original forward and trip CheckpointError.
     stock_top_value, stock_indices = torch.topk(router_probs, self.top_k, dim=-1)
 
-    routed = RoutingReplay.get()
-    if routed is None:
-        # Fallback: exactly stock behavior.
+    layer_idx = getattr(self, "_routing_replay_layer_idx", None)
+    replayed = (
+        gather_replayed_topk(router_probs, layer_idx, self.top_k)
+        if layer_idx is not None
+        else None
+    )
+    if replayed is None:
         top_value = stock_top_value / stock_top_value.sum(dim=-1, keepdim=True)
         return router_logits, top_value.to(router_logits.dtype), stock_indices
 
-    # Replay: gather at rollout-recorded indices.
-    layer_idx = getattr(self, "_routing_replay_layer_idx", None)
-    assert layer_idx is not None, (
-        "Qwen3_5MoeTopKRouter is missing _routing_replay_layer_idx; "
-        "call apply_qwen3_5_moe_router_replay_patch + register_routing_replay_layer_indices."
-    )
-    frozen = routed[:, layer_idx, :].to(device=router_logits.device, dtype=torch.long)
-    assert frozen.shape == (router_logits.shape[0], self.top_k), (
-        f"routing replay expected {(router_logits.shape[0], self.top_k)}, got {frozen.shape}"
-    )
-
-    top_value = router_probs.gather(1, frozen)
-    top_value = top_value / top_value.sum(dim=-1, keepdim=True)
+    frozen, top_value = replayed
     return router_logits, top_value.to(router_logits.dtype), frozen
 
 
-def apply_qwen3_5_moe_router_replay_patch() -> None:
-    """Monkey-patch ``Qwen3_5MoeTopKRouter.forward`` to honor RoutingReplay."""
+def _apply_qwen3_5_moe_router_replay_patch() -> None:
     global _ROUTER_REPLAY_PATCHED
     if _ROUTER_REPLAY_PATCHED:
         return
@@ -280,7 +272,7 @@ def apply_qwen3_5_moe_router_replay_patch() -> None:
     _ROUTER_REPLAY_PATCHED = True
 
 
-def register_routing_replay_layer_indices(model) -> int:
+def _register_qwen3_5_moe_layer_indices(model) -> int:
     """Stamp each ``Qwen3_5MoeTopKRouter`` instance with its decoder-layer index.
 
     Returns the number of routers tagged. The replay tensor is laid out as
@@ -306,3 +298,14 @@ def register_routing_replay_layer_indices(model) -> int:
             gate._routing_replay_layer_idx = layer_idx
             count += 1
     return count
+
+
+class Qwen3_5MoeRoutingReplayAdapter:
+    def apply_patch(self) -> None:
+        _apply_qwen3_5_moe_router_replay_patch()
+
+    def register_layer_indices(self, model) -> int:
+        return _register_qwen3_5_moe_layer_indices(model)
+
+
+ROUTING_REPLAY_REGISTRY["qwen3_5_moe"] = Qwen3_5MoeRoutingReplayAdapter()
