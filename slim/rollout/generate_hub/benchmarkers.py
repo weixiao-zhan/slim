@@ -1,8 +1,5 @@
 import logging
 import random
-from argparse import Namespace
-from copy import deepcopy
-from typing import Any
 
 from slim.rollout.sglang_rollout import generate as _generate_base
 from slim.utils.types import Episode
@@ -10,16 +7,17 @@ from slim.utils.types import Episode
 logger = logging.getLogger(__name__)
 
 
-async def generate_with_random_osl(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
+async def generate_with_random_osl(state, episode: Episode) -> Episode:
     # TODO: make it configurable after we have an enhanced arg parser
     min_osl = 32 * 1024
     max_osl = 64 * 1024
 
-    modified_sampling_params = deepcopy(sampling_params)
-    modified_sampling_params["ignore_eos"] = True
-    modified_sampling_params["max_new_tokens"] = random.randrange(min_osl, max_osl)
+    if episode._sampling_params is None:
+        raise RuntimeError("Episode._sampling_params must be initialized before generation.")
+    episode._sampling_params["ignore_eos"] = True
+    episode._sampling_params["max_new_tokens"] = random.randrange(min_osl, max_osl)
 
-    ans = await _generate_base(args, episode, modified_sampling_params)
+    ans = await _generate_base(state, episode)
 
     logger.info(f"generate_with_random_osl {ans.response_length=}")
     return ans

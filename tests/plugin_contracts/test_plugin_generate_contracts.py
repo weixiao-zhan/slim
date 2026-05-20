@@ -70,10 +70,11 @@ class FakeGenerateState:
 
 def _make_episode(**example_fields) -> Episode:
     ep = Episode.from_example(example_fields)
+    ep._sampling_params = {"temperature": 0.3}
     return ep
 
 
-async def custom_generate(args, episode: Episode, sampling_params: dict):
+async def custom_generate(state, episode: Episode):
     episode.tokens = [11, 12, 13]
     episode.generated_text = "generated"
     episode.reward = 0.25
@@ -81,7 +82,7 @@ async def custom_generate(args, episode: Episode, sampling_params: dict):
     return episode
 
 
-async def custom_generate_with_evaluation(args, episode: Episode, sampling_params: dict, evaluation: bool = False):
+async def custom_generate_with_evaluation(state, episode: Episode, evaluation: bool = False):
     episode.tokens = [21, 22]
     episode.generated_text = "eval-generated" if evaluation else "train-generated"
     episode.reward = 0.5 if evaluation else 0.75
@@ -99,7 +100,7 @@ def assert_episode_contract(episode: Episode) -> None:
 
 def assert_custom_generate_signature_matches_expected(fn) -> None:
     params = tuple(inspect.signature(fn).parameters)
-    assert params[:3] == ("args", "episode", "sampling_params") or params[:3] == ("args", "sample", "sampling_params")
+    assert params[:2] == ("state", "episode") or params[:2] == ("state", "sample")
 
 
 class _DummySemaphore:
@@ -128,7 +129,7 @@ def patch_generate_state(monkeypatch):
 def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state, monkeypatch):
     sglang_rollout = patch_generate_state
 
-    async def official_default_generate(args, episode: Episode, sampling_params: dict):
+    async def official_default_generate(state, episode: Episode):
         episode.tokens = [31, 32]
         episode.generated_text = "default-generate"
         episode.reward = 1.0
@@ -141,7 +142,6 @@ def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state,
         generate_and_rm(
             make_args(custom_generate_function_path=None),
             _make_episode(prompt="prompt"),
-            sampling_params={"temperature": 0.3},
             evaluation=False,
         )
     )
@@ -153,7 +153,7 @@ def test_generate_and_rm_prefers_per_episode_generate_function(patch_generate_st
     args = make_args(custom_generate_function_path=REFERENCE_CUSTOM_GENERATE_PATH)
     ep = _make_episode(prompt="prompt")
     ep.generate_function_path = REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH
-    result = asyncio.run(generate_and_rm(args, ep, sampling_params={"temperature": 0.3}, evaluation=True))
+    result = asyncio.run(generate_and_rm(args, ep, evaluation=True))
     assert_episode_contract(result)
     assert result.example["evaluation"] is True
 
@@ -168,7 +168,6 @@ def test_custom_generate_function_path_supports_user_override(patch_generate_sta
         generate_and_rm(
             make_args(custom_generate_function_path=custom_generate_path),
             _make_episode(prompt="prompt"),
-            sampling_params={"temperature": 0.3},
             evaluation=False,
         )
     )

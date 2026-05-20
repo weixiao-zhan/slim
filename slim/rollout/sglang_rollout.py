@@ -101,7 +101,6 @@ class GenerateState(metaclass=SingletonMeta):
                     generate_and_rm_group(
                         self.args,
                         group,
-                        sampling_params=self.sampling_params.copy(),
                         evaluation=False,
                     )
                 )
@@ -129,10 +128,8 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
+async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> None:
     """Tokenize prompt into episode.tokens if not already set."""
-    state = GenerateState(args)
-
     if episode.tokens:
         return
 
@@ -185,13 +182,14 @@ async def _prepare_episode_tokens(args: Namespace, episode: Episode) -> None:
     episode.rollout_log_probs = [0.0] * edge_len
 
 
-async def generate(args: Namespace, episode: Episode, sampling_params: dict[str, Any]) -> Episode:
-    state = GenerateState(args)
+async def generate(state: GenerateState, episode: Episode) -> Episode:
+    args = state.args
     from slim.utils.processing_utils import encode_tensor_to_b64_envelope
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
+    sampling_params = episode._sampling_params(episode)
 
-    await _prepare_episode_tokens(args, episode)
+    await _prepare_episode_tokens(state, episode)
     assert episode.rollout_log_probs is not None
 
     max_new_tokens = episode.max_tokens - len(episode.tokens)
@@ -253,7 +251,6 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
 async def generate_and_rm(
     args: Namespace,
     episode: Episode,
-    sampling_params: dict[str, Any],
     evaluation: bool = False,
 ) -> Episode:
     if episode.status in [Episode.Status.COMPLETED, Episode.Status.TRUNCATED]:
@@ -270,11 +267,11 @@ async def generate_and_rm(
             if custom_func_path is not None:
                 custom_generate_func = load_function(custom_func_path)
                 if "evaluation" in inspect.signature(custom_generate_func).parameters:
-                    episode = await custom_generate_func(args, episode, sampling_params, evaluation=evaluation)
+                    episode = await custom_generate_func(state, episode, evaluation=evaluation)
                 else:
-                    episode = await custom_generate_func(args, episode, sampling_params)
+                    episode = await custom_generate_func(state, episode)
             else:
-                episode = await generate(args, episode, sampling_params)
+                episode = await generate(state, episode)
 
     if not args.group_rm and episode.status != Episode.Status.ABORTED and episode.reward is None:
         from .rm_hub import async_rm
@@ -283,9 +280,7 @@ async def generate_and_rm(
     return episode
 
 
-async def generate_and_rm_group(
-    args: Namespace, group: RolloutGroup, sampling_params: dict[str, Any], evaluation: bool = False
-) -> RolloutGroup:
+async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation: bool = False) -> RolloutGroup:
     state = GenerateState(args)
     if state.aborted:
         return group
@@ -296,10 +291,11 @@ async def generate_and_rm_group(
 
     tasks = []
     for idx, episode in enumerate(group.episodes):
-        current_sampling_params = sampling_params.copy()
+        current_sampling_params = state.sampling_params.copy()
         if getattr(args, "sglang_enable_deterministic_inference", False):
             current_sampling_params["sampling_seed"] = state.group_sampling_seeds[idx]
-        tasks.append(asyncio.create_task(generate_and_rm(args, episode, current_sampling_params, evaluation=evaluation)))
+        episode._sampling_params = current_sampling_params
+        tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=evaluation)))
 
     group.episodes = await asyncio.gather(*tasks)
     if not state.aborted and args.group_rm:
@@ -381,7 +377,8 @@ async def generate_rollout_async(
                 do_print = False
 
             assert len(group.episodes) == args.n_samples_per_prompt
-            all_groups.append(group)
+            if args.rollout_all_samples_process_path is not None:
+                all_groups.append(group)
 
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group.episodes)
             if not dynamic_filter_output.keep:
@@ -465,11 +462,11 @@ async def eval_rollout_single_dataset(
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             episode.max_tokens = dataset_cfg.max_context_len
-            sampling_params = base_sampling_params
+            sampling_params = base_sampling_params.copy()
             if getattr(args, "sglang_enable_deterministic_inference", False):
-                sampling_params = base_sampling_params.copy()
                 sampling_params["sampling_seed"] = args.rollout_seed + j
-            tasks.append(asyncio.create_task(generate_and_rm(args, episode, sampling_params=sampling_params, evaluation=True)))
+            episode._sampling_params = sampling_params
+            tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=True)))
 
     raw_episodes = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
     episodes = []

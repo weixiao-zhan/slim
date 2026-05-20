@@ -23,6 +23,7 @@ else
     echo "  Skipped: flash_attention.py (already patched or not found)"
 fi
 
+# Patch: sgl router to accept processor output format
 "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
 import py_compile
@@ -37,6 +38,12 @@ qwen_vl = pkg / "srt" / "multimodal" / "processors" / "qwen_vl.py"
 def patch_file(path: Path, replacements: list[tuple[str, str]]) -> bool:
     text = path.read_text()
     original = text
+    if path == base_processor:
+        text = text.replace("import base64\nimport concurrent\n", "import concurrent\nimport pybase64\n")
+        text = text.replace(
+            'storage = base64.b64decode(value["data"].encode("ascii"))',
+            'storage = pybase64.b64decode(value["data"].encode("ascii"))',
+        )
     for old, new in replacements:
         if new in text:
             continue
@@ -54,7 +61,7 @@ base_changed = patch_file(
     [
         (
             "import concurrent\n",
-            "import base64\nimport concurrent\n",
+            "import concurrent\nimport pybase64\n",
         ),
         (
             '''            if input_format == "processor_output":
@@ -69,7 +76,7 @@ base_changed = patch_file(
                         continue
                     if isinstance(value, dict) and value.get("__tensor__"):
                         dtype = getattr(torch, value["dtype"])
-                        storage = base64.b64decode(value["data"].encode("ascii"))
+                        storage = pybase64.b64decode(value["data"].encode("ascii"))
                         dict_item[key] = torch.frombuffer(
                             bytearray(storage), dtype=dtype
                         ).reshape(value["shape"])
@@ -150,3 +157,7 @@ print(f"patched={base_changed or qwen_changed}")
 print(f"base_processor={base_processor}")
 print(f"qwen_vl={qwen_vl}")
 PY
+
+# Weight sync (Torch CUDA IPC) uses pidfd_getfd. 
+# Change Ubuntu's default Yama policy to relaxed ptrace_scope
+sudo sysctl -w kernel.yama.ptrace_scope=0

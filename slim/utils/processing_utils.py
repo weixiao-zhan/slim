@@ -3,6 +3,8 @@ import copy
 import io
 import logging
 import torch
+
+import pybase64
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 logger = logging.getLogger(__name__)
@@ -81,5 +83,5 @@ def encode_tensor_to_b64_envelope(value) -> dict:
         "__tensor__": True,
         "dtype": str(tensor.dtype).removeprefix("torch."),
         "shape": list(tensor.shape),
-        "data": base64.b64encode(raw).decode("ascii"),
+        "data": pybase64.b64encode(raw).decode("ascii"),
     }
