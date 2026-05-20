@@ -236,11 +236,6 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
     episode.rollout_log_probs.extend(new_log_probs)
 
     if state.routing_replay_shape is not None:
-        # sglang returns base64-encoded int32 of shape [seqlen, num_layers, top_k]
-        # flattened — token-aligned, one row per token (including the last,
-        # which never produces a non-zero gradient because loss_mask is 0 there).
-        # NOTE: partial-rollout (multi-turn) overwrites on each call — sglang
-        # re-captures the full sequence each time.
         import numpy as np
         import pybase64
 

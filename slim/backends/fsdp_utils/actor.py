@@ -1188,8 +1188,21 @@ class FSDPTrainRayActor(TrainRayActor):
             yield
             return
 
-        routed = routed.to(device=torch.cuda.current_device(), non_blocking=True)
-        RoutingReplay.activate(routed)
+        # expand router index from edge align to token align.
+        device = torch.cuda.current_device()
+        cu_seqlens = packed_batch["cu_seqlens"].to(device)
+        total_tokens = int(cu_seqlens[-1].item())
+
+        # Each sequence's last token has no successor edge → zero-pad row;
+        # all other token positions take their edge row in order.
+        is_pad_row = torch.zeros(total_tokens, dtype=torch.bool, device=device)
+        is_pad_row[cu_seqlens[1:] - 1] = True
+        padded = torch.zeros(
+            (total_tokens, *routed.shape[1:]), dtype=routed.dtype, device=device
+        )
+        padded[~is_pad_row] = routed.to(device=device, non_blocking=True)
+
+        RoutingReplay.activate(padded)
         yield  # NOTE: deactivate is intentionally not called here; see docstring.
 
     def _deactivate_routing_replay(self) -> None:

@@ -28,12 +28,7 @@ class Episode:
     - ``loss_mask[i]``: whether predicting ``tokens[i+1]`` contributes to loss.
       Prompt edges are 0, generated edges are 1.
     - ``rollout_log_probs[i]``: log-prob of ``tokens[i+1]`` under the rollout policy.
-
-    Token-aligned invariants (len == len(tokens)):
-    - ``rollout_routed_experts[i]``: top-k MoE expert ids selected at token ``i``
-      during rollout. Shape per row is ``[num_layers, top_k]``. Only set when
-      ``--use-rollout-routing-replay``. The trailing row (last token, no loss)
-      is captured but never gathered against any non-zero gradient.
+    - ``rollout_routed_experts[i]``: top-k MoE expert ids selected at the router
     """
 
     # Raw dataset row — rollout/RM functions read whatever columns they need
@@ -46,7 +41,7 @@ class Episode:
     loss_mask: Any | None = None                       # [int] → IntTensor
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
-    rollout_routed_experts: Any | None = None          # np.ndarray [token_len, num_layers, top_k] → IntTensor
+    rollout_routed_experts: Any | None = None          # np.ndarray [num_edges, num_layers, top_k] → IntTensor
     multimodal_inputs: dict[str, Any] | None = None
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
@@ -91,10 +86,8 @@ class Episode:
             raise ValueError(f"loss_mask length {len(self.loss_mask)} != num_edges {edge_len}")
         if self.rollout_log_probs is not None and len(self.rollout_log_probs) != edge_len:
             raise ValueError(f"rollout_log_probs length {len(self.rollout_log_probs)} != num_edges {edge_len}")
-        if self.rollout_routed_experts is not None and len(self.rollout_routed_experts) != len(self.tokens):
-            raise ValueError(
-                f"rollout_routed_experts length {len(self.rollout_routed_experts)} != len(tokens) {len(self.tokens)}"
-            )
+        if self.rollout_routed_experts is not None and len(self.rollout_routed_experts) != edge_len:
+            raise ValueError(f"rollout_routed_experts length {len(self.rollout_routed_experts)} != num_edges {edge_len}")
 
     def freeze(self) -> None:
         """Convert sequence fields to tensors. Call once after generation + RM."""
