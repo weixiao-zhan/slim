@@ -91,6 +91,10 @@ class Episode:
             raise ValueError(f"loss_mask length {len(self.loss_mask)} != num_edges {edge_len}")
         if self.rollout_log_probs is not None and len(self.rollout_log_probs) != edge_len:
             raise ValueError(f"rollout_log_probs length {len(self.rollout_log_probs)} != num_edges {edge_len}")
+        if self.rollout_routed_experts is not None and len(self.rollout_routed_experts) != len(self.tokens):
+            raise ValueError(
+                f"rollout_routed_experts length {len(self.rollout_routed_experts)} != len(tokens) {len(self.tokens)}"
+            )
 
     def freeze(self) -> None:
         """Convert sequence fields to tensors. Call once after generation + RM."""

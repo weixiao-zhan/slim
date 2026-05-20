@@ -248,14 +248,7 @@ async def generate(args: Namespace, episode: Episode, sampling_params: dict[str,
         if b64 is not None:
             num_layers, top_k = state.routing_replay_shape
             arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
-            arr = arr.reshape(-1, num_layers, top_k)
-            seqlen = len(episode.tokens)
-            if arr.shape[0] != seqlen:
-                raise ValueError(
-                    f"sglang returned {arr.shape[0]} rows of routed_experts, "
-                    f"expected {seqlen} (= len(tokens)) for token-aligned replay"
-                )
-            episode.rollout_routed_experts = arr
+            episode.rollout_routed_experts = arr.reshape(-1, num_layers, top_k)
 
     episode.ensure_edge_alignment()
     episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
