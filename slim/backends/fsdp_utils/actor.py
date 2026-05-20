@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import random
@@ -34,6 +35,8 @@ from slim.utils.types import Episode
 from . import checkpoint
 from .data_packing import pack_sequences, unpack_sequences
 from .lr_scheduler import get_lr_scheduler
+from .models import apply_hf_model_patches
+from .routing_replay import RoutingReplay
 from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTensor
 
 logger = logging.getLogger(__name__)
@@ -117,7 +120,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
-        self._apply_transformers_model_patches()
+        self._routing_replay_adapter = apply_hf_model_patches(self.hf_config, self.args)
 
         init_context = self._get_init_weight_context_manager()
 
@@ -166,6 +169,11 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
         self.model = model
+
+        if self._routing_replay_adapter is not None:
+            n_routers = self._routing_replay_adapter.register_layer_indices(self.model)
+            if dist.get_rank() == 0:
+                logger.info(f"[routing-replay] tagged {n_routers} MoE routers with layer indices")
 
         if args.gradient_checkpointing:
             # Gradient checkpointing requires inputs to have requires_grad=True
@@ -491,6 +499,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
             if not self.args.use_rollout_logprobs:
                 self._compute_log_prob("actor", packed_batches)
+            self._deactivate_routing_replay()
 
             if self.args.offload_train:
                 self.sleep()
@@ -543,7 +552,9 @@ class FSDPTrainRayActor(TrainRayActor):
                     tqdm(packed_batches, desc=f"{store_prefix}log_probs", disable=dist.get_rank() != 0)
                 ):
                     model_args = self._get_model_inputs_args(batch)
-                    logits = active_model(**model_args).logits.squeeze(0)
+                    # Replay only on actor forward; ref model uses its own router.
+                    with self._maybe_routing_replay(batch, enabled=model_tag != "ref"):
+                        logits = active_model(**model_args).logits.squeeze(0)
                     log_probs_result, entropy_result = get_logprob_and_entropy(
                         logits=logits,
                         target_tokens=batch["tokens"],
@@ -653,6 +664,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 packed_batches=packed_batches,
                 grad_accum=grad_accum,
             )
+            self._deactivate_routing_replay()
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -891,7 +903,8 @@ class FSDPTrainRayActor(TrainRayActor):
 
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
         model_args = self._get_model_inputs_args(packed_batch)
-        logits = self.model(**model_args).logits.squeeze(0)
+        with self._maybe_routing_replay(packed_batch, enabled=True):
+            logits = self.model(**model_args).logits.squeeze(0)
 
         # Compute log probs and entropy
         need_full_log_probs = self.args.entropy_coef != 0.0
@@ -1156,16 +1169,32 @@ class FSDPTrainRayActor(TrainRayActor):
         else:
             raise NotImplementedError(f"Loading from checkpoint file {ref_load_path} not yet implemented")
 
-    def _apply_transformers_model_patches(self) -> None:
-        """Apply repo-owned HF model patches needed by packed training."""
-        # Qwen3.5 and Qwen3.6-27B share HF's `qwen3_5` architecture. The
-        # Mamba-style linear_attention/Gated DeltaNet layers in stock HF don't
-        # honor packed-sequence boundaries, so patch the classes before
-        # from_pretrained creates module instances.
-        if getattr(self.hf_config, "model_type", None) == "qwen3_5":
-            from .models.qwen3_5 import apply_qwen_deltanet_varlen_patch
+    @contextlib.contextmanager
+    def _maybe_routing_replay(self, packed_batch: dict, *, enabled: bool):
+        """Activate the MoE routing-replay buffer for the upcoming forward.
 
-            apply_qwen_deltanet_varlen_patch()
+        IMPORTANT: replay must stay active across BOTH the original forward
+        AND the gradient-checkpointing recomputation that runs during backward.
+        We deliberately do NOT deactivate when this context exits — the next
+        batch's activate() overwrites the buffer, and end-of-rollout cleanup
+        is the trainer's responsibility (see ``_deactivate_routing_replay``).
+        """
+        if not (enabled and self._routing_replay_adapter is not None):
+            yield
+            return
+
+        routed = packed_batch.get("rollout_routed_experts")
+        if routed is None:
+            yield
+            return
+
+        routed = routed.to(device=torch.cuda.current_device(), non_blocking=True)
+        RoutingReplay.activate(routed)
+        yield  # NOTE: deactivate is intentionally not called here; see docstring.
+
+    def _deactivate_routing_replay(self) -> None:
+        if self._routing_replay_adapter is not None:
+            RoutingReplay.deactivate()
 
     def _get_model_inputs_args(self, packed_sequence: dict) -> dict:
         input_ids = packed_sequence["tokens"].unsqueeze(0)

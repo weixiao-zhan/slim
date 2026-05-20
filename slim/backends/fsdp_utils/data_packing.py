@@ -14,7 +14,7 @@ _EDGE_KEYS = frozenset([
     "rollout_log_probs", "loss_masks", "advantages", "returns", "old_values",
 ])
 # Keys sliced by token offsets (cu_seqlens)
-_TOKEN_KEYS = frozenset(["tokens", "position_ids"])
+_TOKEN_KEYS = frozenset(["tokens", "position_ids", "rollout_routed_experts"])
 
 
 def pack_sequences(
@@ -49,6 +49,7 @@ def pack_sequences(
         return_parts = []
         logprob_parts = []
         old_value_parts = []
+        routed_experts_parts = []
         cu_seqlens = [0]
         edge_lengths = []
 
@@ -65,6 +66,8 @@ def pack_sequences(
 
             if ep.rollout_log_probs is not None and len(ep.rollout_log_probs):
                 logprob_parts.append(ep.rollout_log_probs)
+            if ep.rollout_routed_experts is not None and len(ep.rollout_routed_experts):
+                routed_experts_parts.append(ep.rollout_routed_experts)
             if hasattr(ep, "_values") and ep._values is not None:
                 old_value_parts.append(torch.tensor(ep._values, dtype=torch.float32))
             cu_seqlens.append(cu_seqlens[-1] + n)
@@ -89,6 +92,11 @@ def pack_sequences(
 
         if old_value_parts:
             packed_batch["old_values"] = torch.cat(old_value_parts)
+
+        if routed_experts_parts:
+            # [total_tokens, num_layers, top_k] int32 — kept on CPU until the
+            # actor pushes it into the routing-replay buffer.
+            packed_batch["rollout_routed_experts"] = torch.cat(routed_experts_parts, dim=0)
 
         has_multimodal = any(episodes[i].multimodal_train_inputs is not None for i in indices)
         if has_multimodal:
