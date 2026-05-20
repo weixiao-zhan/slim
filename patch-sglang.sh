@@ -12,6 +12,17 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   fi
 fi
 
+# Patch: guard s_aux against None in flash_attention_forward (transformers 5.6 regression)
+# Vision encoder attention doesn't pass s_aux, so it arrives as None and crashes.
+TRANS=$("${PYTHON_BIN}" -c "import transformers, os; print(os.path.dirname(transformers.__file__))")
+FA="$TRANS/integrations/flash_attention.py"
+if [ -f "$FA" ] && grep -q 's_aux=s_aux\.to(query\.dtype)' "$FA"; then
+    sed -i 's/s_aux=s_aux\.to(query\.dtype),/s_aux=s_aux.to(query.dtype) if s_aux is not None else None,/' "$FA"
+    echo "  Applied: flash_attention.py s_aux None guard (transformers 5.6 vision encoder fix)"
+else
+    echo "  Skipped: flash_attention.py (already patched or not found)"
+fi
+
 "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
 import py_compile
