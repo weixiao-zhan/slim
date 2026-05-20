@@ -98,12 +98,12 @@ def pack_sequences(
             # actor pushes it into the routing-replay buffer.
             packed_batch["rollout_routed_experts"] = torch.cat(routed_experts_parts, dim=0)
 
-        has_multimodal = any(episodes[i].multimodal_train_inputs is not None for i in indices)
+        has_multimodal = any(episodes[i].multimodal_inputs is not None for i in indices)
         if has_multimodal:
             multimodal_data = {}
             multimodal_num_items = {}
             for episode_idx, i in enumerate(indices):
-                mm = episodes[i].multimodal_train_inputs
+                mm = episodes[i].multimodal_inputs
                 mm = mm or {}
                 for key in mm:
                     if key not in multimodal_num_items:
@@ -121,7 +121,7 @@ def pack_sequences(
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
                     counts.append(mm_tensor.size(0))
-            packed_batch["multimodal_train_inputs"] = multimodal_data
+            packed_batch["multimodal_inputs"] = multimodal_data
             packed_batch["multimodal_num_items"] = multimodal_num_items
 
         packed_batch["_episode_indices"] = list(indices)
@@ -160,7 +160,7 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
         for key, value in packed_batch.items():
             if key in instance or key == "multimodal_num_items":
                 continue
-            if key == "multimodal_train_inputs":
+            if key == "multimodal_inputs":
                 instance[key] = {}
                 for mm_key, mm_tensor in value.items():
                     if mm_key in mm_offsets:
