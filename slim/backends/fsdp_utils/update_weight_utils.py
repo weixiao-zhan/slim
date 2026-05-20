@@ -62,15 +62,6 @@ class UpdateWeight(abc.ABC):
 
         peft_prefix = self.model.base_model.prefix if peft_remap else ""
 
-        # TODO
-        # Qwen3-VL-MoE: transformers 5.6 stores fused expert weights as
-        # [E, 2*intermediate, hidden] / [E, hidden, intermediate], but sglang's
-        # qwen3_vl_moe loader was written against the safetensors layout
-        # [E, hidden, 2*intermediate] / [E, intermediate, hidden] and applies a
-        # transpose(-1, -2) before chunking. Pre-transpose here so update_weights
-        # delivers the same layout as a disk load.
-        is_qwen3_vl_moe = getattr(self.model.config, "model_type", "") == "qwen3_vl_moe"
-
         bucket = []
         bucket_size = 0
         for name, param in self.model.state_dict().items():
@@ -95,11 +86,6 @@ class UpdateWeight(abc.ABC):
                     placements=[Replicate()] * param.device_mesh.ndim,
                     async_op=True,
                 ).to_local()
-            if is_qwen3_vl_moe and (
-                name.endswith("mlp.experts.gate_up_proj")
-                or name.endswith("mlp.experts.down_proj")
-            ):
-                param = param.transpose(-1, -2)
             bucket.append((name, param))
             bucket_size += param_size
 

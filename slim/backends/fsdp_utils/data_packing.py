@@ -12,10 +12,9 @@ from slim.utils.types import Episode
 _EDGE_KEYS = frozenset([
     "log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values",
     "rollout_log_probs", "loss_masks", "advantages", "returns", "old_values",
-    "rollout_routed_experts",
 ])
 # Keys sliced by token offsets (cu_seqlens)
-_TOKEN_KEYS = frozenset(["tokens", "position_ids"])
+_TOKEN_KEYS = frozenset(["tokens", "position_ids", "rollout_routed_experts"])
 
 
 def pack_sequences(
@@ -95,7 +94,7 @@ def pack_sequences(
             packed_batch["old_values"] = torch.cat(old_value_parts)
 
         if routed_experts_parts:
-            # [total_edges, num_layers, top_k] int32 — kept on CPU until the
+            # [total_tokens, num_layers, top_k] int32 — kept on CPU until the
             # actor pushes it into the routing-replay buffer.
             packed_batch["rollout_routed_experts"] = torch.cat(routed_experts_parts, dim=0)
 
