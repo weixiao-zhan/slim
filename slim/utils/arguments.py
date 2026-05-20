@@ -805,6 +805,17 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "If not set, we will use the logprobs from the actor model."
                 ),
             )
+            parser.add_argument(
+                "--use-rollout-routing-replay",
+                action="store_true",
+                default=False,
+                help=(
+                    "Replay rollout-time MoE expert routing during training. Captures top-k expert "
+                    "indices from sglang via enable_return_routed_experts and forces the actor's "
+                    "router to gather scores at those same indices. Eliminates train/inference "
+                    "expert-selection mismatch on MoE models. Currently wired for Qwen3.5-MoE."
+                ),
+            )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
             parser.add_argument(
                 "--use-tis",

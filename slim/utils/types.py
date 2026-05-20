@@ -28,6 +28,12 @@ class Episode:
     - ``loss_mask[i]``: whether predicting ``tokens[i+1]`` contributes to loss.
       Prompt edges are 0, generated edges are 1.
     - ``rollout_log_probs[i]``: log-prob of ``tokens[i+1]`` under the rollout policy.
+
+    Token-aligned invariants (len == len(tokens)):
+    - ``rollout_routed_experts[i]``: top-k MoE expert ids selected at token ``i``
+      during rollout. Shape per row is ``[num_layers, top_k]``. Only set when
+      ``--use-rollout-routing-replay``. The trailing row (last token, no loss)
+      is captured but never gathered against any non-zero gradient.
     """
 
     # Raw dataset row — rollout/RM functions read whatever columns they need
@@ -40,6 +46,7 @@ class Episode:
     loss_mask: Any | None = None                       # [int] → IntTensor
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
+    rollout_routed_experts: Any | None = None          # np.ndarray [token_len, num_layers, top_k] → IntTensor
     multimodal_train_inputs: dict[str, Any] | None = None
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
@@ -92,6 +99,8 @@ class Episode:
             self.loss_mask = torch.tensor(self.loss_mask, dtype=torch.int)
         if self.rollout_log_probs is not None:
             self.rollout_log_probs = torch.tensor(self.rollout_log_probs, dtype=torch.float32)
+        if self.rollout_routed_experts is not None and not isinstance(self.rollout_routed_experts, torch.Tensor):
+            self.rollout_routed_experts = torch.from_numpy(self.rollout_routed_experts).to(torch.int32)
 
     # --- Properties (work on both lists and tensors) ---
 
