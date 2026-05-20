@@ -53,12 +53,12 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 
 **Signature**:
 ```python
-async def custom_generate(args, episode: Episode, sampling_params: dict) -> Episode
+async def custom_generate(state, episode: Episode) -> Episode
 ```
 
 An optional `evaluation` keyword argument is also supported:
 ```python
-async def custom_generate(args, episode: Episode, sampling_params: dict, evaluation: bool = False) -> Episode
+async def custom_generate(state, episode: Episode, evaluation: bool = False) -> Episode
 ```
 
 The function receives an `Episode` whose `episode.example` dict contains the raw dataset row. Read prompt, tools, images, or any task-specific columns directly from `episode.example`.
@@ -373,7 +373,7 @@ slim supports complex agent scenarios (multi-turn interaction, tool calling) by 
 
 2. **Custom Generation Function** (`--custom-generate-function-path`):
    ```python
-   async def generate(args, episode: Episode, sampling_params) -> Episode:
+   async def generate(state, episode: Episode) -> Episode:
    ```
    Implement the interaction loop: model generates action -> execute tool -> append observation -> repeat.
 
@@ -391,7 +391,7 @@ For multi-turn training, `loss_mask` controls which tokens contribute to loss:
 ### Generation Pseudocode
 
 ```python
-async def generate(args, episode: Episode, sampling_params) -> Episode:
+async def generate(state, episode: Episode) -> Episode:
     # episode.tokens starts with tokenized prompt; episode.loss_mask has 0s for prompt edges
 
     for _ in range(max_turns):

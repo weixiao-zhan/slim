@@ -1,6 +1,5 @@
 import asyncio
 import ipaddress
-import json
 import logging
 import multiprocessing
 import os
@@ -8,6 +7,7 @@ import random
 import socket
 
 import httpx
+import orjson
 
 logger = logging.getLogger(__name__)
 
@@ -162,18 +162,42 @@ def _next_actor():
     return actor
 
 
+def _json_headers(headers=None):
+    merged = {"content-type": "application/json"}
+    if headers:
+        merged.update(headers)
+    return merged
+
+
+def _orjson_dumps(payload):
+    return orjson.dumps(payload or {})
+
+
+def _orjson_loads(content):
+    return orjson.loads(content)
+
+
+async def _encode_json(payload):
+    return _orjson_dumps(payload)
+
+
+async def _decode_json(content):
+    try:
+        return _orjson_loads(content)
+    except orjson.JSONDecodeError:
+        return content.decode() if isinstance(content, bytes) else content
+
+
 async def _post(client, url, payload, max_retries=60, headers=None):
     retry_count = 0
     while retry_count < max_retries:
         response = None
         try:
-            response = await client.post(url, json=payload or {}, headers=headers)
+            body = await _encode_json(payload)
+            response = await client.post(url, content=body, headers=_json_headers(headers))
             response.raise_for_status()
             content = await response.aread()
-            try:
-                output = json.loads(content)
-            except json.JSONDecodeError:
-                output = content.decode() if isinstance(content, bytes) else content
+            output = await _decode_json(content)
         except Exception as e:
             retry_count += 1
 
@@ -292,5 +316,4 @@ async def get(url):
     response = await _http_client.get(url)
     response.raise_for_status()
     content = await response.aread()
-    output = json.loads(content)
-    return output
+    return await _decode_json(content)

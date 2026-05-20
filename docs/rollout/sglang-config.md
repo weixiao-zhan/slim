@@ -173,7 +173,10 @@ python train.py \
 from slim.rollout.sglang_rollout import get_model_url
 from slim.utils.http_utils import post
 
-async def my_generate(args, sample, sampling_params):
+async def my_generate(state, sample):
+    args = state.args
+    sampling_params = sample._sampling_params
+
     # Route to the actor model (default)
     actor_url = get_model_url(args, "actor", "/generate")
     output = await post(actor_url, {"text": sample.prompt, "sampling_params": sampling_params})
@@ -395,8 +398,10 @@ python train.py \
 from slim.rollout.sglang_rollout import get_model_url
 from slim.utils.http_utils import post
 
-async def generate_with_models(args, sample, sampling_params):
+async def generate_with_models(state, sample):
     """Generate using actor, score with reward model, compare with reference."""
+    args = state.args
+    sampling_params = sample._sampling_params
     
     # Generate from actor
     actor_url = get_model_url(args, "actor", "/generate")

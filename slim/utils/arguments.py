@@ -312,7 +312,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help=(
-                    "Only substitue the `def generate(args, episode, sampling_params)` function within the example rollout function. "
+                    "Only substitue the `def generate(state, episode)` function within the example rollout function. "
                     "This should be useful if you need to implement some special rollout logic, e.g. multi-turn, function calling."
                 ),
             )

@@ -52,6 +52,7 @@ class Episode:
     non_generation_time: float = 0.0
     train_metadata: dict = field(default_factory=dict)
     max_tokens: int = 0
+    _sampling_params: dict[str, Any] | None = None     # transient rollout request params; cleared by freeze()
 
     # Status tracking
     class Status:
@@ -98,6 +99,7 @@ class Episode:
             self.rollout_log_probs = torch.tensor(self.rollout_log_probs, dtype=torch.float32)
         if self.rollout_routed_experts is not None and not isinstance(self.rollout_routed_experts, torch.Tensor):
             self.rollout_routed_experts = torch.from_numpy(self.rollout_routed_experts).to(torch.int32)
+        self._sampling_params = None
 
     # --- Properties (work on both lists and tensors) ---
 
@@ -163,5 +165,4 @@ class MultimodalTypes:
     @classmethod
     def get(cls, name: str) -> MultimodalType | None:
         return next((m for m in cls.all() if m.name == name), None)
-
 
