@@ -58,6 +58,11 @@ def init_wandb_primary(args):
         "config": _compute_config_for_logging(args),
     }
 
+    # Resume an existing run if --wandb-run-id was provided.
+    if getattr(args, "wandb_run_id", None):
+        init_kwargs["id"] = args.wandb_run_id
+        init_kwargs["resume"] = "allow"
+
     # Configure settings based on offline/online mode
     if offline:
         init_kwargs["settings"] = wandb.Settings(mode="offline")
@@ -133,7 +138,7 @@ def init_wandb_secondary(args, router_addr=None):
         "project": args.wandb_project,
         "config": args.__dict__,
         "resume": "allow",
-        "reinit": True,
+        "reinit": "finish_previous",
         "settings": wandb.Settings(**settings_kwargs),
     }
 

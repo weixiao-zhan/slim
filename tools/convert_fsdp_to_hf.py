@@ -154,16 +154,24 @@ def _merge_lora_state_dict(
     return merged
 
 
-def _infer_dtype(origin_hf_dir: str) -> torch.dtype:
-    """Infer dtype from the base model's safetensors files."""
+def _infer_dtype_map(origin_hf_dir: str) -> dict[str, torch.dtype]:
+    """Map each parameter name to its dtype in the base model's safetensors files."""
     from safetensors import safe_open
 
-    for f in os.listdir(origin_hf_dir):
-        if f.endswith(".safetensors"):
-            with safe_open(os.path.join(origin_hf_dir, f), framework="pt") as sf:
-                key = list(sf.keys())[0]
-                return sf.get_tensor(key).dtype
-    return torch.bfloat16
+    dtype_map: dict[str, torch.dtype] = {}
+    for f in sorted(os.listdir(origin_hf_dir)):
+        if not f.endswith(".safetensors"):
+            continue
+        with safe_open(os.path.join(origin_hf_dir, f), framework="pt") as sf:
+            for k in sf.keys():
+                dtype_map[k] = sf.get_slice(k).get_dtype()
+    # safetensors returns dtype as string (e.g. "BF16"); convert to torch.dtype
+    str_to_torch = {
+        "F64": torch.float64, "F32": torch.float32, "F16": torch.float16,
+        "BF16": torch.bfloat16, "I64": torch.int64, "I32": torch.int32,
+        "I16": torch.int16, "I8": torch.int8, "U8": torch.uint8, "BOOL": torch.bool,
+    }
+    return {k: str_to_torch.get(v, v) if isinstance(v, str) else v for k, v in dtype_map.items()}
 
 
 def _build_hf_model(config: AutoConfig) -> torch.nn.Module:
@@ -220,10 +228,20 @@ def _convert_fsdp_to_hf(
         lora_alpha = peft_config.get("lora_alpha", lora_r * 2)
         model_state = _merge_lora_state_dict(model_state, lora_alpha, lora_r, device=device)
 
-    # Cast to match the base model dtype (FSDP checkpoints store float32 master weights)
-    dtype = _infer_dtype(origin_hf_dir)
-    print(f"Casting to {dtype} (inferred from base model)")
-    model_state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in model_state.items()}
+    # Cast each tensor to its native dtype in the base model (FSDP stores fp32 masters,
+    # but some params like SSM A_log / norm weights must stay fp32).
+    dtype_map = _infer_dtype_map(origin_hf_dir)
+    fallback = next(iter(dtype_map.values()), torch.bfloat16)
+    dtype_counts: dict[torch.dtype, int] = {}
+    casted: dict[str, torch.Tensor] = {}
+    for k, v in model_state.items():
+        if v.is_floating_point():
+            target = dtype_map.get(k, fallback)
+            v = v.to(target)
+            dtype_counts[target] = dtype_counts.get(target, 0) + 1
+        casted[k] = v
+    model_state = casted
+    print(f"Per-tensor dtype cast: { {str(d): n for d, n in dtype_counts.items()} }")
 
     # Validate keys
     merged_keys = set(model_state.keys())
