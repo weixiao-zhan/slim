@@ -187,6 +187,7 @@ def _convert_fsdp_to_hf(
     output_dir: str,
     peft_config: dict | None = None,
     device: str = "cpu",
+    max_shard_size: str = "5GB",
 ) -> None:
     print(f"loading FSDP model from {input_dir}")
     t = time.time()
@@ -255,7 +256,7 @@ def _convert_fsdp_to_hf(
     del model_state
 
     os.makedirs(output_dir, exist_ok=True)
-    hf_model.save_pretrained(output_dir, safe_serialization=True)
+    hf_model.save_pretrained(output_dir, safe_serialization=True, max_shard_size=max_shard_size)
     print(f"Model weights saved to {output_dir}")
 
 
@@ -298,6 +299,12 @@ if __name__ == "__main__":
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device for LoRA merge matmul (default: cuda if available).",
     )
+    parser.add_argument(
+        "--max-shard-size",
+        type=str,
+        default="5GB",
+        help="Max size per safetensors shard passed to save_pretrained (default: 5GB).",
+    )
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and not args.force:
@@ -309,5 +316,6 @@ if __name__ == "__main__":
     _convert_fsdp_to_hf(
         args.origin_hf_dir, model_dir, args.output_dir,
         peft_config=peft_config, device=args.device,
+        max_shard_size=args.max_shard_size,
     )
     copy_assets(args.origin_hf_dir, args.output_dir)
