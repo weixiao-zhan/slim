@@ -138,6 +138,7 @@ def load(actor: Any) -> dict[str, Any] | None:
     state_dict = {"model_state": model_state}
 
     try:
+        logger.info(f"[FSDP] Loading model from {model_dir} ...")
         dcp.load(
             state_dict=state_dict,
             checkpoint_id=str(model_dir),
@@ -154,6 +155,7 @@ def load(actor: Any) -> dict[str, Any] | None:
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}
         try:
+            logger.info(f"[FSDP] Loading optimizer from {optimizer_dir} ...")
             dcp.load(
                 state_dict=optim_state_dict,
                 checkpoint_id=str(optimizer_dir),
@@ -177,6 +179,7 @@ def load(actor: Any) -> dict[str, Any] | None:
         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
         lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
         try:
+            logger.info(f"[FSDP] Loading LR scheduler from {lr_scheduler_dir} ...")
             dcp.load(state_dict=lr_scheduler_state_dict, checkpoint_id=str(lr_scheduler_dir))
             logger.info(
                 f"[FSDP] Loaded LR scheduler from {lr_scheduler_dir} (last_epoch={actor.lr_scheduler.last_epoch})"

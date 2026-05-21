@@ -23,6 +23,20 @@ else
     echo "  Skipped: flash_attention.py (already patched or not found)"
 fi
 
+# Patch: force legacy mm-load path for pre-expanded vision tokens
+# The legacy path is required when input_ids already contain expanded vision
+# tokens (token-in/token-out rollout that sends image_data as PNG data URLs).
+# The processor_output path below remains active for envelope-encoded payloads,
+# so both rollout styles are supported.
+SGLANG_DIR=$("${PYTHON_BIN}" -c "import sglang, os; print(os.path.dirname(sglang.__file__))")
+QWEN_VL="$SGLANG_DIR/srt/multimodal/processors/qwen_vl.py"
+if [ -f "$QWEN_VL" ] && grep -q 'base_output = self\.load_mm_data(' "$QWEN_VL"; then
+    sed -i 's/base_output = self\.load_mm_data(/base_output = self.legacy_load_mm_data(/' "$QWEN_VL"
+    echo "  Applied: qwen_vl.py legacy mm-load path fix (for pre-expanded vision tokens)"
+else
+    echo "  Skipped: qwen_vl.py legacy mm-load (already patched or not found)"
+fi
+
 # Patch: sgl router to accept processor output format
 "${PYTHON_BIN}" - <<'PY'
 from pathlib import Path
