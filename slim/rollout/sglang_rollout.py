@@ -51,7 +51,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        concurrency = args.rollout_concurrency_per_engine * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
         self.sampling_params: dict[str, Any] = {
