@@ -21,8 +21,8 @@ class FSDPArgs:
     lr_warmup_fraction: float | None = None
     lr_wsd_decay_iters: int | None = None
     lr_wsd_decay_style: str | None = None
-    use_checkpoint_lr_scheduler: bool = True
-    override_lr_scheduler: bool = False
+    no_load_lr_scheduler: bool = False
+    lr_scheduler_start_step: int | None = None
     weight_decay: float = 0.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95

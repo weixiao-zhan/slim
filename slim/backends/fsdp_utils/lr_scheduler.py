@@ -23,10 +23,6 @@ class FSDPLRScheduler(LRScheduler):
         lr_warmup_steps (int): Number of warmup steps.
         lr_decay_steps (int): Number of decay steps.
         lr_decay_style (str): Decay style for learning rate.
-        use_checkpoint_lr_scheduler (bool, optional): Whether to use the checkpoint values
-            for the lr scheduler.
-        override_lr_scheduler (bool, optional): Whether to override the lr scheduler values
-            with the class values.
         wsd_decay_steps (int, optional): Number of weight decay decay steps.
         lr_wsd_decay_style (str, optional): Decay style for learning rate during weight decay decay
             steps.
@@ -42,8 +38,6 @@ class FSDPLRScheduler(LRScheduler):
         lr_warmup_steps: int,
         lr_decay_steps: int,
         lr_decay_style: str,
-        use_checkpoint_lr_scheduler: bool | None = True,
-        override_lr_scheduler: bool | None = False,
         wsd_decay_steps: int | None = None,
         lr_wsd_decay_style: str | None = None,
         last_epoch: int = -1,
@@ -67,12 +61,6 @@ class FSDPLRScheduler(LRScheduler):
         self.lr_decay_style = lr_decay_style
         if self.lr_decay_style == "WSD":
             assert self.wsd_decay_steps is not None
-
-        self.override_lr_scheduler = override_lr_scheduler
-        self.use_checkpoint_lr_scheduler = use_checkpoint_lr_scheduler
-
-        if self.override_lr_scheduler:
-            assert not self.use_checkpoint_lr_scheduler, "both override and use-checkpoint are set."
 
         # Initialize parent class
         super().__init__(optimizer, last_epoch)
@@ -186,8 +174,6 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style=args.lr_decay_style,
-        use_checkpoint_lr_scheduler=args.use_checkpoint_lr_scheduler,
-        override_lr_scheduler=args.override_lr_scheduler,
         wsd_decay_steps=wsd_decay_steps,
         lr_wsd_decay_style=args.lr_wsd_decay_style,
     )
