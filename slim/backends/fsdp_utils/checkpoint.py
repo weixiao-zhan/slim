@@ -174,7 +174,11 @@ def load(actor: Any) -> dict[str, Any] | None:
         logger.info(f"[FSDP] Optimizer checkpoint not found at {optimizer_dir}, skipping optimizer load.")
 
     # Load LR scheduler state (optional)
-    load_lr_scheduler = hasattr(actor, "lr_scheduler") and lr_scheduler_dir.exists()
+    load_lr_scheduler = (
+        hasattr(actor, "lr_scheduler")
+        and lr_scheduler_dir.exists()
+        and not getattr(actor.args, "no_load_lr_scheduler", False)
+    )
     if load_lr_scheduler:
         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
         lr_scheduler_state_dict = {"lr_scheduler_state": lr_scheduler_state}
@@ -186,6 +190,8 @@ def load(actor: Any) -> dict[str, Any] | None:
             )
         except Exception as e:
             logger.warning(f"[FSDP] Failed to load LR scheduler from {lr_scheduler_dir}: {e}")
+    elif hasattr(actor, "lr_scheduler") and getattr(actor.args, "no_load_lr_scheduler", False):
+        logger.info("[FSDP] --no-load-lr-scheduler set; using fresh LR scheduler from args.")
     elif hasattr(actor, "lr_scheduler"):
         logger.info(f"[FSDP] LR scheduler checkpoint not found at {lr_scheduler_dir}, skipping LR scheduler load.")
 
@@ -229,6 +235,13 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
     elif iteration is not None:
         if getattr(actor.args, "start_rollout_id", None) is None:
             actor.args.start_rollout_id = iteration
+
+    start_step = getattr(actor.args, "lr_scheduler_start_step", None)
+    if start_step is None and getattr(actor.args, "no_load_lr_scheduler", False):
+        start_step = iteration
+    if start_step is not None and hasattr(actor, "lr_scheduler"):
+        actor.lr_scheduler.last_epoch = int(start_step)
+        logger.info(f"[FSDP] LR scheduler last_epoch set to {start_step}")
 
     torch.cuda.synchronize()
     dist.barrier()
