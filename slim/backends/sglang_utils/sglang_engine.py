@@ -586,7 +586,7 @@ def _compute_server_args(
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
         # cuda graph must cover the max concurrent batch size to avoid eager fallback.
-        "cuda_graph_max_bs": args.sglang_server_concurrency,
+        "cuda_graph_max_bs": int(args.rollout_concurrency_per_engine * 1.5),
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.
@@ -628,6 +628,10 @@ def _compute_server_args(
     # Default context_length from the single source of truth if not set via --sglang-context-length.
     if kwargs.get("context_length") is None:
         kwargs["context_length"] = args.max_context_len
+
+    # Allow --sglang-cuda-graph-max-bs to override the heuristic default above.
+    if getattr(args, "sglang_cuda_graph_max_bs", None) is not None:
+        kwargs["cuda_graph_max_bs"] = args.sglang_cuda_graph_max_bs
 
     # Per-server-group overrides from --sglang-config YAML.
     # Applied after base args so they take highest priority.
