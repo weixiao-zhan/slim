@@ -25,7 +25,7 @@ envs:
 setup: | # shell
   set -ex
   uv sync --prerelease=allow
-  uv run bash patch-sglang.sh
+  uv run python patch_sglang.py
 
 run: | # shell
   set -ex
