@@ -16,6 +16,7 @@ class Timer(metaclass=SingletonMeta):
     def __init__(self):
         self.timers = {}
         self.start_time = {}
+        self.counters = {}
 
     def start(self, name):
         assert name not in self.start_time, f"Timer {name} already started."
@@ -34,14 +35,21 @@ class Timer(metaclass=SingletonMeta):
     def reset(self, name=None):
         if name is None:
             self.timers = {}
+            self.counters = {}
         elif name in self.timers:
             del self.timers[name]
 
     def add(self, name, elapsed_time):
         self.timers[name] = self.timers.get(name, 0) + elapsed_time
 
+    def add_count(self, name, value=1):
+        self.counters[name] = self.counters.get(name, 0) + value
+
     def log_dict(self):
         return self.timers
+
+    def counter_dict(self):
+        return self.counters
 
     @contextmanager
     def context(self, name):
