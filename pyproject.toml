@@ -10,6 +10,7 @@ dependencies = [
     "flash-attn-3",
     "flash-linear-attention",
     "httpx[http2]",
+    "kernels==0.14.0", # transformers 5.6.0's hub_kernels.py builds LayerRepository with no revision/version, which only the 0.14.0 lazy-resolve API tolerates
     "liger-kernel",
     "omegaconf",
     "packaging",
