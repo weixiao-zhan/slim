@@ -289,8 +289,8 @@ class SGLangEngine(RayActor):
             raise
         return response.json()
 
-    def health_generate(self, timeout: float = 5.0) -> bool:
-        """Run /health_generate on the underlying SGLang HTTP server.
+    def health(self, timeout: float = 5.0) -> bool:
+        """Run /health on the underlying SGLang HTTP server.
 
         Args:
             timeout: Timeout for the health request in seconds.
@@ -304,7 +304,7 @@ class SGLangEngine(RayActor):
         if self.node_rank != 0:
             return True
 
-        url = f"http://{self.server_host}:{self.server_port}/health_generate"
+        url = f"http://{self.server_host}:{self.server_port}/health"
         try:
             response = requests.get(url, timeout=timeout)
             response.raise_for_status()

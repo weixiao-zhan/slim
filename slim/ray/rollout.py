@@ -1004,6 +1004,8 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
         rewards = [ep.reward for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
+        if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
+            log_dict[f"eval/{key}/rollout_log_probs"] = rollout_log_probs
         if args.eval_log_passrate:
             log_dict |= dict_add_prefix(
                 compute_pass_rate(flat_rewards=rewards, group_size=args.eval_n_samples_per_prompt),
@@ -1052,6 +1054,23 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
     logging_utils.log(args, log_dict, step_key="rollout/step")
+
+
+def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
+    """Mean over samples of each sample's mean rollout log-prob across response tokens.
+
+    Mirrors the train-side rollout/rollout_log_probs metric (actor._log_rollout_data).
+    """
+    per_sample_means = []
+    for ep in episodes:
+        if ep.rollout_log_probs is None:
+            continue
+        mask = ep.loss_mask.float()
+        denom = mask.sum().clamp_min(1)
+        per_sample_means.append(((ep.rollout_log_probs * mask).sum() / denom).item())
+    if not per_sample_means:
+        return None
+    return sum(per_sample_means) / len(per_sample_means)
 
 
 def _compute_episode_metrics(args, episodes: list[Episode]):
