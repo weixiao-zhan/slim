@@ -86,7 +86,7 @@ class RolloutHealthMonitor:
         """Pause health checking. Called when engines are offloaded.
 
         Waits for any in-flight health check to complete before returning,
-        so that no health_generate requests are active when the caller
+        so that no health requests are active when the caller
         proceeds to release_memory_occupation.
         """
         if self._pause_event is None:
@@ -158,7 +158,7 @@ class RolloutHealthMonitor:
             return
 
         try:
-            ray.get(engine.health_generate.remote(timeout=self._check_timeout))
+            ray.get(engine.health.remote(timeout=self._check_timeout))
         except Exception as e:
             logger.error(
                 f"Health check failed for rollout engine {rollout_engine_id} (ray timeout or error). Killing actor. Exception: {e}"
