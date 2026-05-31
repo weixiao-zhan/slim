@@ -540,8 +540,9 @@ class FSDPTrainRayActor(TrainRayActor):
                 torch.cuda.empty_cache()
                 dist.barrier(group=get_gloo_group())
 
-            active_model = self.ref_model
-            active_model.eval()
+                self.ref_model.cuda()
+                dist.barrier(group=get_gloo_group())
+            active_model = self.ref_model.eval()
         else:
             active_model = self.model
 
@@ -570,13 +571,13 @@ class FSDPTrainRayActor(TrainRayActor):
 
         finally:
             # Restore actor model if it was offloaded
-            if model_tag == "ref" and self.ref_model is not None:
+            if model_tag == "ref" and self.ref_model is not None and not self.fsdp_cpu_offload:
+                self.ref_model.cpu()
                 torch.cuda.empty_cache()
                 dist.barrier(group=get_gloo_group())
 
-                if not self.fsdp_cpu_offload:
-                    self.model.cuda()
-                    dist.barrier(group=get_gloo_group())
+                self.model.cuda()
+                dist.barrier(group=get_gloo_group())
 
     def _packed_data(self, episodes: list[Episode]) -> tuple[list[dict[str, torch.Tensor]], list[int]]:
         """Pack variable-length episodes for efficient processing.
@@ -771,7 +772,8 @@ class FSDPTrainRayActor(TrainRayActor):
             # Copy actor model state to ref model
             actor_state = self.model.state_dict()
             self.ref_model.load_state_dict(actor_state)
-            self.ref_model.cpu()
+            if not self.fsdp_cpu_offload:
+                self.ref_model.cpu()
 
     def _compute_ppo_advantages(self, episodes: list[Episode], values: list[torch.Tensor]) -> None:
         """Compute GAE advantages and returns for PPO, and store on episodes.
@@ -1132,19 +1134,14 @@ class FSDPTrainRayActor(TrainRayActor):
         clear_memory()
 
     def _create_ref_model(self, ref_load_path: str | None):
-        """Create and initialize a separate reference model with FSDP2 CPUOffloadPolicy.
+        """Create and initialize a separate reference model.
 
         Parameters:
             ref_load_path: Path to a directory containing a HF checkpoint. If
                 None, a ValueError is raised.
 
         Returns:
-            FSDP2-wrapped ref model with CPU offload enabled
-
-        Note:
-            Creates a separate FSDP2 model instance for the reference model.
-            ALWAYS uses CPUOffloadPolicy for the reference model to save memory,
-            regardless of the actor model's CPU offload setting.
+            FSDP2-wrapped ref model using actor-same CPU offload strategy.
         """
         if ref_load_path is None:
             raise ValueError("ref_load_path must be provided when loading reference model")
@@ -1157,16 +1154,34 @@ class FSDPTrainRayActor(TrainRayActor):
             with init_context():
                 ref_model = self.get_model_cls().from_pretrained(ref_load_path, **self._load_kwargs)
 
+            # Frozen vision/audio encoders stay in bf16 (mirror the actor); must run
+            # before state_dict() capture so the cast survives _fsdp2_load_full_state_dict.
+            # Keep keywords in sync with apply_fsdp2's _REPLICATED_PATH_KEYWORDS.
+            for name, module in ref_model.named_modules():
+                if any(kw in name for kw in ("visual", "vision_tower", "vision_model", "audio", "speech")):
+                    module.to(torch.bfloat16)
+
             # Apply PEFT to ref model (fresh adapters, no checkpoint resume)
             ref_model = self._maybe_apply_peft(ref_model)
 
             full_state = ref_model.state_dict()
 
-            # Always use CPUOffloadPolicy for reference, let FSDP2 handle the offload. It is faster than model.cpu().
-            ref_model = apply_fsdp2(ref_model, mesh=self.dp_mesh, cpu_offload=True, args=self.args)
-            ref_model = self._fsdp2_load_full_state_dict(ref_model, full_state, self.dp_mesh, cpu_offload=True)
+            # Same offload wiring as the actor model (see init): CPUOffloadPolicy when
+            # fsdp_cpu_offload is set, otherwise bulk wake/sleep around the ref forward.
+            ref_model = apply_fsdp2(
+                ref_model, mesh=self.dp_mesh, cpu_offload=self.fsdp_cpu_offload, args=self.args
+            )
+            ref_model = self._fsdp2_load_full_state_dict(
+                ref_model, full_state, self.dp_mesh, cpu_offload=True if self.fsdp_cpu_offload else None
+            )
+            if not self.fsdp_cpu_offload:
+                # Park on CPU; woken in bulk around the ref forward.
+                ref_model.cpu()
 
-            logger.info(f"[Rank {dist.get_rank()}] Reference model created with FSDP2 CPUOffloadPolicy")
+            logger.info(
+                f"[Rank {dist.get_rank()}] Reference model created "
+                f"({'CPUOffloadPolicy' if self.fsdp_cpu_offload else 'bulk wake/sleep, parked on CPU'})"
+            )
             return ref_model
         else:
             raise NotImplementedError(f"Loading from checkpoint file {ref_load_path} not yet implemented")
