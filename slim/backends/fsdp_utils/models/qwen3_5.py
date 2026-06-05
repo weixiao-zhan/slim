@@ -16,6 +16,16 @@ Patches in this module:
    `causal_conv1d` / `chunk_gated_delta_rule`, which reset state at each
    boundary. Forward becomes bit-identical to the slime/SGLang rollout.
 
+   RETIREMENT: upstream HF merged the equivalent fix in transformers#45034
+   ("Pass packed boundary metadata to Qwen3.5 linear-attention fast kernels
+   from data collator"), first released in transformers>=5.9.0. We can't
+   simply bump because we're pinned to the transformers version sglang
+   requires (currently 5.6.0). Once sglang updates its HF dependency to
+   >=5.9.0, drop this patch — but first verify the stock forward's kwarg
+   contract matches how we pass cu_seq_lens_q/k (the upstream fix routes it
+   "from data collator", which may differ from our _get_model_inputs_args
+   path), and confirm the MoE GatedDeltaNet is covered too.
+
 2. ``Qwen3_5MoeRoutingReplayAdapter`` (registered in
    ``ROUTING_REPLAY_REGISTRY["qwen3_5_moe"]``) — replaces
    ``Qwen3_5MoeTopKRouter.forward`` with a replay-aware variant that
