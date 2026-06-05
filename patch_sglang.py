@@ -48,6 +48,10 @@ def patch_transformers_flash_attention() -> bool:
 
     transformers 5.6 vision encoder attention doesn't pass s_aux, so it arrives
     as None and crashes the .to(query.dtype) call.
+
+    Fixed upstream in transformers#45589, released in v5.6.2; can deprecate this
+    patch once we upgrade to transformers>=5.6.2 (blocked by sglang's
+    transformers==5.6.0 pin).
     """
     import transformers
 
