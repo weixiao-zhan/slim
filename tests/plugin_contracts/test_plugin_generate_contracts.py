@@ -40,8 +40,6 @@ def run_contract_test_file() -> None:
 
 def make_args(**overrides):
     class Args:
-        partial_rollout = False
-        mask_offpolicy_in_partial_rollout = False
         group_rm = False
         custom_generate_function_path = None
         sglang_enable_deterministic_inference = False
@@ -59,7 +57,6 @@ class FakeGenerateState:
         self.args = args
         self.semaphore = types.SimpleNamespace(__aenter__=None)
         self.pendings = set()
-        self.remaining_batch_size = 0
         self.aborted = False
         self.group_sampling_seeds = [args.rollout_seed + i for i in range(args.n_samples_per_prompt)]
 

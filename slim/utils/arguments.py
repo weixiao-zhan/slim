@@ -262,48 +262,33 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
             # sampling
             parser.add_argument(
-                "--over-sampling-batch-size",
+                "--rollout-concurrency-per-engine",
                 type=int,
-                default=None,
+                default=128,
                 help=(
-                    "This defines the granularity of the sampling batch in the rollout function. "
-                    "When the number of available samples falls below the target, a sampling "
-                    "operation of size over_sampling_batch_size will be triggered."
-                    "Regardless of whether dynamic filters are applied, "
-                    "the sampling granularity is always determined by this value. "
-                    "If this value is None, rollout_batch_size will be used as the default over_sampling_batch_size."
+                    "The total in-flight generate concurrency is sized to "
+                    "rollout_concurrency_per_engine * num_rollout_engines. "
+                    "The router decides how to distribute these requests across engines."
                 ),
             )
             parser.add_argument(
-                "--dynamic-sampling-filter-path",
+                "--over-sampling-batch-size",
+                type=int, 
+                default=None,
+                help=(
+                    "Target size of the in-flight rollout group pool. The rollout loop tops up to this "
+                    "number on every iteration. Set larger than rollout_batch_size to oversample. "
+                    "If None, defaults to rollout_batch_size."
+                ),
+            )
+            parser.add_argument(
+                "--rollout-group-filter-path",
                 type=str,
                 default=None,
                 help=(
-                    "This is the filter function for dynamic sampling. "
-                    "It should be able to judge whether the result of a prompt should be selected or not."
-                    "We will do dynamic filter for sampling as in DAPO. e.g. not all correct or all wrong samples."
+                    "Group-level dynamic sampling filter: decides whether to KEEP or DROP an entire "
+                    "sample group during rollout, e.g. drop all-correct / all-wrong groups with zero std"
                     "You could use `slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` as an example."
-                ),
-            )
-
-            # partial rollout
-            parser.add_argument(
-                "--partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to use partial rollout. "
-                    "If set, the unfinished samples during dynamic sampling will be recycled back to data buffer. "
-                    "This is useful for long responses."
-                ),
-            )
-            parser.add_argument(
-                "--mask-offpolicy-in-partial-rollout",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to mask previous generation in partial rollout. "
-                    "If set, only on-policy generated tokens will be used in training"
                 ),
             )
 
@@ -384,7 +369,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
         def add_fault_tolerance_arguments(parser):
             parser.add_argument(
-                "--use-fault-tolerance",
+                "--rollout-fault-tolerance",
                 action="store_true",
                 default=False,
                 help="Whether to enable the fault tolerance function during rollout.",

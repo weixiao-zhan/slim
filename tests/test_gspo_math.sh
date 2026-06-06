@@ -24,7 +24,7 @@ run_train "
     --sglang-mem-fraction-static 0.6
     --sglang-attention-backend fa3
     --sglang-mm-enable-dp-encoder
-    --use-fault-tolerance
+    --rollout-fault-tolerance
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 8

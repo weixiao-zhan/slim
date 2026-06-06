@@ -39,7 +39,7 @@ run_train "
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
     --sglang-enforce-disable-flashinfer-allreduce-fusion
-    --use-fault-tolerance
+    --rollout-fault-tolerance
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 8

@@ -78,10 +78,10 @@ Enable DAPO-style dynamic sampling:
 --rollout-batch-size 32
 --n-samples-per-prompt 8
 --over-sampling-batch-size 64
---dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+--rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 ```
 
-Samples 64 prompts, filters groups with zero reward variance, and re-samples when too many are discarded.
+Keeps 64 prompts in flight running or queued on the concurrency semaphore, continuously refills the pool back up to 64 until a full `rollout-batch-size` of keepers is collected.
 
 ## Evaluation
 

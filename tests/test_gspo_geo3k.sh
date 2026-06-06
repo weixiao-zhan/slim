@@ -30,7 +30,7 @@ run_train "
     --sglang-mm-enable-dp-encoder
     --sglang-mamba-scheduler-strategy extra_buffer 
     --sglang-page-size 64
-    --use-fault-tolerance
+    --rollout-fault-tolerance
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 1

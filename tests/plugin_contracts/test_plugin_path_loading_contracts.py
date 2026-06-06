@@ -52,7 +52,7 @@ def run_contract_test_file() -> None:
         path_args=[
             "eval-function-path",
             "custom-rm-path",
-            "dynamic-sampling-filter-path",
+            "rollout-group-filter-path",
             "buffer-filter-path",
             "data-source-path",
             "rollout-sample-filter-path",
