@@ -382,7 +382,7 @@ class RolloutManager:
         self.rollout_id = -1
 
         self._health_monitors = []
-        if not self.args.debug_train_only and self.args.use_fault_tolerance:
+        if not self.args.debug_train_only and self.args.rollout_fault_tolerance:
             for srv in self.servers.values():
                 for group in srv.server_groups:
                     monitor = RolloutHealthMonitor(group, args)
@@ -471,7 +471,7 @@ class RolloutManager:
         start_time = time.time()
         self.rollout_id = rollout_id
         self.health_monitoring_resume()
-        if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
+        if self.args.ci_test and self.args.rollout_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
         episodes, metrics = self._get_rollout_episodes(rollout_id=rollout_id)
         self._save_debug_rollout_data(episodes, rollout_id=rollout_id, evaluation=False)

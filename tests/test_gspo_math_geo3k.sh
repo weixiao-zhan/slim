@@ -6,7 +6,7 @@ MODEL_DIR="${VLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
 DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/mixed_math_vlm}"
 SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-mixed-math-geo3k-qwen35-2b}"
 
-# --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+# --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 # --over-sampling-batch-size 64
 
 start_ray
@@ -32,7 +32,7 @@ run_train "
     --sglang-mem-fraction-static 0.6
     --sglang-attention-backend fa3
     --sglang-mm-enable-dp-encoder
-    --use-fault-tolerance
+    --rollout-fault-tolerance
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node $NUM_GPUS

@@ -1084,7 +1084,7 @@ class FSDPTrainRayActor(TrainRayActor):
         # Two-phase recovery (matches upstream slime pattern):
         # Phase 1: only rank 0 triggers recovery so start_engines() sets
         #          num_new_engines exactly once (subsequent calls would reset it to 0).
-        if self.args.use_fault_tolerance:
+        if self.args.rollout_fault_tolerance:
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.recover_and_get_updatable_engines.remote())
             dist.barrier(group=get_gloo_group())

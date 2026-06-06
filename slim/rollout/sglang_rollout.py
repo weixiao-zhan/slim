@@ -90,7 +90,6 @@ class GenerateState(metaclass=SingletonMeta):
             assert self.dp_counts[dp_rank] >= 0
 
     def reset(self) -> None:
-        self.remaining_batch_size = 0
         self.pendings: set[asyncio.Task] = set()
         self.aborted = False
 
@@ -105,7 +104,6 @@ class GenerateState(metaclass=SingletonMeta):
                     )
                 )
             )
-        self.remaining_batch_size += len(groups)
 
 
 def _episode_full_text(args: Namespace, episode: Episode) -> str:
@@ -207,10 +205,14 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if episode.has_multimodal:
         processor_output = {
             "format": "processor_output",
-            "input_ids": encode_tensor_to_b64_envelope(torch.as_tensor([episode.tokens], dtype=torch.long)),
+            "input_ids": await asyncio.to_thread(
+                encode_tensor_to_b64_envelope, torch.as_tensor([episode.tokens], dtype=torch.long)
+            ),
         }
         for key, value in episode.multimodal_inputs.items():
-            processor_output[key] = encode_tensor_to_b64_envelope(value) if hasattr(value, "detach") else value
+            processor_output[key] = (
+                await asyncio.to_thread(encode_tensor_to_b64_envelope, value) if hasattr(value, "detach") else value
+            )
 
         # SGLang native /generate already routes image_data as opaque JSON.
         # With format="processor_output", this field is only a transport
@@ -240,8 +242,13 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         b64 = meta_info.get("routed_experts")
         if b64 is not None:
             num_layers, top_k = state.routing_replay_shape
-            arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
-            episode.rollout_routed_experts = arr.reshape(-1, num_layers, top_k)
+
+            def _decode_routed_experts(raw: str):
+                # pybase64 decode + numpy copy both release the GIL.
+                arr = np.frombuffer(pybase64.b64decode(raw.encode("utf-8")), dtype=np.int32).copy()
+                return arr.reshape(-1, num_layers, top_k)
+
+            episode.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
 
     episode.ensure_edge_alignment()
     episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
@@ -346,7 +353,7 @@ async def generate_rollout_async(
 ) -> tuple[RolloutFnTrainOutput, list[dict]]:
     assert args.rollout_global_dataset
     state = GenerateState(args)
-    dynamic_filter = load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path else None
+    dynamic_filter = load_function(args.rollout_group_filter_path) if args.rollout_group_filter_path else None
 
     metric_gatherer = MetricGatherer()
     target_data_size = args.rollout_batch_size
@@ -357,8 +364,9 @@ async def generate_rollout_async(
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
 
     while len(kept_groups) < target_data_size:
-        while state.remaining_batch_size < target_data_size:
-            examples = get_examples(args.over_sampling_batch_size)
+        refill = args.over_sampling_batch_size - len(state.pendings)
+        if refill > 0:
+            examples = get_examples(refill)
             groups = _examples_to_rollout_groups(examples, args)
             for group in groups:
                 group.index = next_group_index
@@ -383,7 +391,6 @@ async def generate_rollout_async(
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group.episodes)
             if not dynamic_filter_output.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
-                state.remaining_batch_size -= 1
                 continue
 
             if len(kept_groups) < target_data_size:

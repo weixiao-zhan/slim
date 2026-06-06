@@ -14,7 +14,7 @@ run_train "
     --max-context-len 2048
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
+    --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
     --over-sampling-batch-size 48
 
     --prompt-data $DATASET_DIR/train.parquet
@@ -29,7 +29,7 @@ run_train "
     --sglang-mem-fraction-static 0.6
     --sglang-attention-backend fa3
     --sglang-mm-enable-dp-encoder
-    --use-fault-tolerance
+    --rollout-fault-tolerance
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 8

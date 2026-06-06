@@ -11,7 +11,7 @@ Below is a summary of all available customization interfaces and their purposes.
 | [`--rollout-function-path`](#1-rollout-function---rollout-function-path) | Override the entire rollout generation logic. |
 | [`--custom-generate-function-path`](#2-custom-generate-function---custom-generate-function-path) | Override only the generation step (e.g., for RAG or tool use). |
 | [`--custom-rm-path`](#3-reward-model---custom-rm-path) | Implement custom reward computation logic. |
-| [`--dynamic-sampling-filter-path`](#4-dynamic-sampling-filter---dynamic-sampling-filter-path) | Filter episodes during dynamic sampling (e.g., DAPO). |
+| [`--rollout-group-filter-path`](#4-group-filter---rollout-group-filter-path) | Keep/drop whole sample groups during dynamic sampling (e.g., DAPO). |
 | [`--rollout-sample-filter-path`](#5-rollout-sample-filter---rollout-sample-filter-path) | Determine if individual episodes participate in loss calculation. |
 | [`--rollout-all-samples-process-path`](#6-rollout-all-samples-process---rollout-all-samples-process-path) | Process all episodes (including filtered ones) after rollout. |
 | [`--rollout-data-postprocess-path`](#7-rollout-data-postprocess---rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
@@ -107,11 +107,11 @@ Additionally, any `--rm-type` value can be prefixed with `boxed_` (e.g. `boxed_m
 
 ---
 
-### 4. Dynamic Sampling Filter (`--dynamic-sampling-filter-path`)
+### 4. Group Filter (`--rollout-group-filter-path`)
 
 **Default**: `None`
 
-**Purpose**: Filter episodes during dynamic sampling (e.g., DAPO-style filtering).
+**Purpose**: Keep or drop an entire sample group (one prompt's n_samples) during dynamic sampling (e.g., DAPO-style filtering). Contrast with `--rollout-sample-filter-path`, which masks individual samples from loss without dropping the group.
 
 **Signature**:
 ```python
@@ -334,7 +334,7 @@ The tests live under `tests/plugin_contracts/` and are grouped by hook shape:
 - `tests/plugin_contracts/test_plugin_generate_contracts.py`
   Covers `--custom-generate-function-path`
 - `tests/plugin_contracts/test_plugin_path_loading_contracts.py`
-  Covers `--eval-function-path`, `--custom-rm-path`, `--dynamic-sampling-filter-path`, `--data-source-path`, `--rollout-sample-filter-path`, and `--rollout-all-samples-process-path`
+  Covers `--eval-function-path`, `--custom-rm-path`, `--rollout-group-filter-path`, `--data-source-path`, `--rollout-sample-filter-path`, and `--rollout-all-samples-process-path`
 - `tests/plugin_contracts/test_plugin_runtime_hook_contracts.py`
   Covers `--custom-rollout-log-function-path`, `--custom-eval-rollout-log-function-path`, `--custom-reward-post-process-path`, and `--rollout-data-postprocess-path`
 
