@@ -52,7 +52,7 @@ run_train "
     --kl-coef 0.00
 
     --optimizer adam
-    --lr 1e-6
+    --lr 1e-5
     --lr-warmup-iters 10
     --lr-decay-style constant
     --weight-decay 0.1

@@ -7,12 +7,16 @@ def get_nvidia_ld_library_path() -> dict[str, str]:
 
     Returns a dict suitable for unpacking into Ray runtime_env env_vars.
     """
+    # `nvidia` is a namespace package (no __init__.py), so __file__ is None;
+    # resolve its location via __path__ instead.
     try:
-        nvidia_base = os.path.join(os.path.dirname(os.path.dirname(__import__("nvidia").__file__)), "nvidia")
-        lib_dirs = glob.glob(os.path.join(nvidia_base, "*/lib"))
-        if lib_dirs:
-            existing = os.environ.get("LD_LIBRARY_PATH", "")
-            return {"LD_LIBRARY_PATH": ":".join(lib_dirs) + (f":{existing}" if existing else "")}
-    except (ImportError, Exception):
-        pass
-    return {}
+        nvidia_bases = list(__import__("nvidia").__path__)
+    except (ImportError, AttributeError):
+        return {}
+
+    lib_dirs = [d for base in nvidia_bases for d in glob.glob(os.path.join(base, "*/lib"))]
+    if not lib_dirs:
+        return {}
+
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    return {"LD_LIBRARY_PATH": ":".join(lib_dirs) + (f":{existing}" if existing else "")}

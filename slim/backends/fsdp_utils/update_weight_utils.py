@@ -29,9 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 class UpdateWeight(abc.ABC):
-    def __init__(self, args: Namespace, model: torch.nn.Module) -> None:
+    def __init__(self, args: Namespace, model: torch.nn.Module, quantizer=None) -> None:
         self.args = args
         self.model = model
+        self.quantizer = quantizer
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -72,22 +73,24 @@ class UpdateWeight(abc.ABC):
                 if "original_module" in name:
                     continue
 
-            param_size = param.numel() * param.element_size()
-            if bucket and bucket_size + param_size >= self.args.update_weight_buffer_size:
-                self.wait_and_update_bucket_weights(bucket)
-                del bucket
-                torch.cuda.ipc_collect()
-                bucket = []
-                bucket_size = 0
-
             param = param.cuda()
             if isinstance(param, DTensor):
                 param = param.redistribute(
                     placements=[Replicate()] * param.device_mesh.ndim,
                     async_op=True,
                 ).to_local()
-            bucket.append((name, param))
-            bucket_size += param_size
+
+            named_tensors = self.quantizer.quantize(name, param) if self.quantizer else ((name, param),)
+            for tensor_name, tensor in named_tensors:
+                tensor_size = tensor.numel() * tensor.element_size()
+                if bucket and bucket_size + tensor_size >= self.args.update_weight_buffer_size:
+                    self.wait_and_update_bucket_weights(bucket)
+                    del bucket
+                    torch.cuda.ipc_collect()
+                    bucket = []
+                    bucket_size = 0
+                bucket.append((tensor_name, tensor))
+                bucket_size += tensor_size
 
         if bucket:
             self.wait_and_update_bucket_weights(bucket)
