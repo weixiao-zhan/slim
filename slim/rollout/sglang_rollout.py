@@ -106,12 +106,19 @@ class GenerateState(metaclass=SingletonMeta):
             )
 
 
-def _episode_full_text(args: Namespace, episode: Episode) -> str:
-    tokens = episode.tokens
-    if not len(tokens):
+def decode_text(args: Namespace, episode: Episode) -> str:
+    """Decode the full prompt+response sequence. Multi-turn safe; RM may parse it as needed."""
+    if not len(episode.tokens):
         return ""
-    ids = tokens.tolist() if hasattr(tokens, "tolist") else list(tokens)
-    return GenerateState(args).tokenizer.decode(ids)
+    return GenerateState(args).tokenizer.decode(episode.tokens)
+
+
+def decode_generated_text(args: Namespace, episode: Episode) -> str:
+    """Decode only the generated (loss_mask==1) tokens — the response region rule-based RMs score."""
+    gen_ids = episode.get_generated_token_ids()
+    if not gen_ids:
+        return ""
+    return GenerateState(args).tokenizer.decode(gen_ids)
 
 
 def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup]:
@@ -280,6 +287,11 @@ async def generate_and_rm(
             else:
                 episode = await generate(state, episode)
 
+    if episode.status != Episode.Status.ABORTED:
+        episode.text = decode_text(args, episode)
+        if episode.generated_text is None:
+            episode.generated_text = decode_generated_text(args, episode)
+
     if not args.group_rm and episode.status != Episode.Status.ABORTED and episode.reward is None:
         from .rm_hub import async_rm
 
@@ -380,7 +392,7 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[_episode_full_text(args, ep)]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+                    f"First rollout sample: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
                 )
                 do_print = False
 
@@ -400,7 +412,7 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[_episode_full_text(args, ep)]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+        f"Finish rollout: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
     )
 
     aborted_examples = await abort(args)
@@ -479,7 +491,7 @@ async def eval_rollout_single_dataset(
     episodes = []
     for i, episode in enumerate(raw_episodes):
         if i == 0:
-            logger.info(f"eval_rollout_single_dataset example data: {[_episode_full_text(args, episode)]} reward={episode.reward}")
+            logger.info(f"eval_rollout_single_dataset example data: {[episode.text]} reward={episode.reward}")
         episode.ensure_edge_alignment()
         episode.freeze()
         episodes.append(episode)

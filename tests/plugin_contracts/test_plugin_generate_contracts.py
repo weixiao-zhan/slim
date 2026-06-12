@@ -52,9 +52,15 @@ def make_args(**overrides):
     return args
 
 
+class _FakeTokenizer:
+    def decode(self, ids) -> str:
+        return " ".join(str(i) for i in ids)
+
+
 class FakeGenerateState:
     def __init__(self, args) -> None:
         self.args = args
+        self.tokenizer = _FakeTokenizer()
         self.semaphore = types.SimpleNamespace(__aenter__=None)
         self.pendings = set()
         self.aborted = False

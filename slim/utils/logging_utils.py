@@ -3,7 +3,6 @@ import logging
 import wandb
 
 from . import wandb_utils
-from .tensorboard_utils import _TensorboardAdapter
 
 _LOGGER_CONFIGURED = False
 
@@ -41,11 +40,6 @@ def finish_tracking(args):
         logging.getLogger(__name__).exception("Failed to finish wandb run")
 
 
-# TODO further refactor, e.g. put TensorBoard init to the "init" part
-def log(args, metrics, step_key: str):
+def log(args, metrics):
     if args.use_wandb:
         wandb.log(metrics)
-
-    if args.use_tensorboard:
-        metrics_except_step = {k: v for k, v in metrics.items() if k != step_key}
-        _TensorboardAdapter(args).log(data=metrics_except_step, step=metrics[step_key])

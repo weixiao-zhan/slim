@@ -1024,7 +1024,7 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
 
     step = compute_rollout_step(args, rollout_id)
     log_dict["eval/step"] = step
-    logging_utils.log(args, log_dict, step_key="eval/step")
+    logging_utils.log(args, log_dict)
 
     _save_eval_rollout(rollout_id, args, data)
 
@@ -1053,7 +1053,7 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
     logger.info(f"perf {rollout_id}: {log_dict}")
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
-    logging_utils.log(args, log_dict, step_key="rollout/step")
+    logging_utils.log(args, log_dict)
 
 
 def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
