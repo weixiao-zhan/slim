@@ -16,6 +16,7 @@ from slim.ray.train_actor import TrainRayActor
 from slim.utils import logging_utils, train_dump_utils, train_metric_utils
 from slim.utils.data import get_minimum_num_micro_batch_size, process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group
+from slim.utils.quant import Quantizer
 from slim.utils.logging_utils import init_tracking
 from slim.utils.memory_utils import clear_memory, print_memory
 from slim.utils.metric_utils import compute_rollout_step
@@ -220,10 +221,13 @@ class FSDPTrainRayActor(TrainRayActor):
         # Critic does not sync weights to rollout engines.
         self.weight_updater = None
         if not self._is_critic:
+            quantizer: Quantizer | None = Quantizer.maybe_from_checkpoint(args.hf_checkpoint)
+            if quantizer is not None:
+                logger.info(f"Rollout weight quantization enabled ({type(quantizer).__name__}) from {args.hf_checkpoint}")
             self.weight_updater = (
-                UpdateWeightFromTensor(self.args, self.model)
+                UpdateWeightFromTensor(self.args, self.model, quantizer)
                 if self.args.colocate
-                else UpdateWeightFromDistributed(self.args, self.model)
+                else UpdateWeightFromDistributed(self.args, self.model, quantizer)
             )
 
         # Handle to the paired critic (set by connect_actor_critic for actor role)

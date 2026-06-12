@@ -115,7 +115,7 @@ PPO requires a separate critic model (additional GPU allocation):
 
 ```bash
 --optimizer adam
---lr 1e-6
+--lr 1e-5
 --lr-decay-style constant
 --weight-decay 0.1
 ```

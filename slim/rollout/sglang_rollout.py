@@ -185,7 +185,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     from slim.utils.processing_utils import encode_tensor_to_b64_envelope
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
-    sampling_params = episode._sampling_params(episode)
+    sampling_params = episode._sampling_params
 
     await _prepare_episode_tokens(state, episode)
     assert episode.rollout_log_probs is not None

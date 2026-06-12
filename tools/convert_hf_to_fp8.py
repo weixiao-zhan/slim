@@ -1,15 +1,26 @@
-"""
-python tools/convert_hf_to_fp8.py [-h] [--model-dir MODEL_DIR] [--save-dir SAVE_DIR] [--strategy {block,channel,tensor}] [--block-size [BLOCK_SIZE ...]]
-                           [--max-workers MAX_WORKERS]
+"""Quantize a BF16 HF safetensors model to FP8, mimicking a reference recipe.
+
+The recipe (strategy, block size, activation_scheme, scale_fmt, and the exact
+`modules_to_not_convert` keep-list) is always read from a reference FP8 model's
+`quantization_config` via --ref-config, so the produced checkpoint matches the
+target FP8 model's layer selection exactly. Explicit --strategy / --block-size /
+--scale-fmt override the corresponding values derived from the reference config.
+
+python tools/convert_hf_to_fp8.py --model-dir MODEL_DIR --save-dir SAVE_DIR --ref-config REF_CONFIG
+                           [--strategy {block,channel,tensor}] [--block-size [BLOCK_SIZE ...]]
+                           [--scale-fmt {ue8m0}] [--max-workers MAX_WORKERS]
 
 options:
   -h, --help            show this help message and exit
   --model-dir MODEL_DIR
-                        Path to the directory of the HF safetensors model.
+                        Path to the directory of the HF safetensors model (BF16 source).
   --save-dir SAVE_DIR   Path to the directory to save the converted model.
+  --ref-config REF_CONFIG
+                        Reference FP8 model dir (or its config.json) whose
+                        `quantization_config` defines the recipe and keep-list. Required.
   --strategy {block,channel,tensor}
   --block-size [BLOCK_SIZE ...]
-                        eg. --block-size 32 32
+                        eg. --block-size 128 128
   --max-workers MAX_WORKERS
                         Number of worker threads for parallel processing
 """
@@ -25,74 +36,21 @@ from concurrent.futures import ThreadPoolExecutor
 import safetensors
 import safetensors.torch
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 
-FP8_INFO = torch.finfo(torch.float8_e4m3fn)
-FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
+from slim.utils.quant import make_keep_predicate, module_name_of, parse_quant_recipe, quant_fp8
 
 
-def ceildiv(a, b):
-    return -(-a // b)
-
-
-def block_fp8(weight, block_size):
-
-    # per block quant
-    block_n, block_k = block_size[0], block_size[1]
-
-    shape_0, shape_1 = weight.shape
-
-    n_tiles = ceildiv(shape_0, block_n)
-    k_tiles = ceildiv(shape_1, block_k)
-
-    q_weight = F.pad(
-        weight,
-        (0, k_tiles * block_k - shape_1, 0, n_tiles * block_n - shape_0),
-        mode="constant",
-        value=0.0,
-    )
-
-    qweight = q_weight.reshape(n_tiles, block_n, k_tiles, block_k)
-    block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
-    block_max = torch.max(block_max, dim=3, keepdim=True)[0]
-
-    scale = block_max.to(torch.float32) / FP8_MAX
-    qweight = (
-        (qweight / scale)
-        .clamp(min=FP8_MIN, max=FP8_MAX)
-        .reshape((n_tiles * block_n, k_tiles * block_k))
-        .to(torch.float8_e4m3fn)
-    )
-    qweight = qweight[:shape_0, :shape_1].clone().detach()
-    scale = scale.reshape(n_tiles, k_tiles)
-
-    return qweight, scale
-
-
-def channel_fp8(weight):
-    channel_max = torch.max(weight.abs(), dim=-1, keepdim=True)[0]
-    scale = channel_max.clamp(min=1e-12).to(torch.float32) / FP8_MAX
-    qweight = (weight / scale).clamp(min=FP8_MIN, max=FP8_MAX)
-    qweight = qweight.to(torch.float8_e4m3fn)
-    return qweight, scale
-
-
-def tensor_fp8(weight):
-    scale = weight.abs().max().clamp(min=1e-12).to(torch.float32) / FP8_MAX
-    qweight = (weight / scale).clamp(min=FP8_MIN, max=FP8_MAX)
-    qweight = qweight.to(torch.float8_e4m3fn)
-    scale = scale.view(1)
-    return qweight, scale
-
-
-def quant_fp8(weight, strategy, block_size=None):
-    if strategy == "tensor":
-        return tensor_fp8(weight)
-    elif strategy == "channel":
-        return channel_fp8(weight)
-    else:
-        return block_fp8(weight, block_size)
+def load_quant_recipe(ref_config):
+    """Read `ref_config` (a model dir or config.json) and parse its quant recipe."""
+    path = ref_config
+    if os.path.isdir(path):
+        path = os.path.join(path, "config.json")
+    with open(path) as f:
+        cfg = json.load(f)
+    if cfg.get("quantization_config") is None:
+        raise ValueError(f"No `quantization_config` found in reference config: {path}")
+    return parse_quant_recipe(cfg["quantization_config"])
 
 
 class ConversionResult:
@@ -110,7 +68,7 @@ class ConversionResult:
             self.modules_to_not_convert.extend(module_names)
 
 
-def process_file(input_path, output_path, filename, strategy, block_size, result_collector):
+def process_file(input_path, output_path, filename, strategy, block_size, is_kept, result_collector):
     if not filename.endswith(".safetensors"):
         return
 
@@ -124,36 +82,44 @@ def process_file(input_path, output_path, filename, strategy, block_size, result
 
     modules_to_not_convert = []
     for key in weights.keys():
-        if (
-            "weight" in key
-            and "layernorm" not in key
-            and "embed" not in key
-            and "router" not in key
-            and "mlp.gate." not in key
-            and "norm" not in key
-            and "lm_head" not in key
-            and "eh_proj" not in key
-            and "weights_proj" not in key
-        ):
-            qw, s = quant_fp8(weights[key], strategy, block_size)
+        weight = weights[key]
+        module_name = module_name_of(key)
+
+        do_quant = key.endswith(".weight") and weight.dim() == 2 and not is_kept(module_name)
+
+        if do_quant:
+            qw, s = quant_fp8(weight, strategy, block_size)
             q_weights[key] = qw
-            if block_size:
+            if strategy == "block":
                 scale_name = key.replace(".weight", ".weight_scale_inv")
             else:
                 scale_name = key.replace(".weight", ".weight_scale")
             q_weights[scale_name] = s
         else:
-            modules_to_not_convert.append(key.replace(".weight", ""))
-            q_weights[key] = weights[key]
+            if key.endswith(".weight"):
+                modules_to_not_convert.append(module_name)
+            q_weights[key] = weight
 
     safetensors.torch.save_file(q_weights, os.path.join(output_path, filename), metadata={"format": "pt"})
 
     result_collector.add_result(filename, q_weights, modules_to_not_convert)
 
 
-def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=4, scale_fmt=None):
+def convert_fp8(
+    input_path,
+    output_path,
+    strategy,
+    block_size=None,
+    max_workers=4,
+    scale_fmt=None,
+    keep_patterns=(),
+    activation_scheme="dynamic",
+    fmt="e4m3",
+):
     input_path = os.path.abspath(input_path)
     os.makedirs(output_path, exist_ok=True)
+
+    is_kept = make_keep_predicate(keep_patterns)
 
     for filename in os.listdir(input_path):
         if not filename.endswith(".safetensors") and not os.path.isdir(os.path.join(input_path, filename)):
@@ -167,25 +133,31 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
         futures = []
         for filename in safetensors_files:
             future = executor.submit(
-                process_file, input_path, output_path, filename, strategy, block_size, result_collector
+                process_file, input_path, output_path, filename, strategy, block_size, is_kept, result_collector
             )
             futures.append(future)
 
         for future in tqdm(futures, desc="Processing files"):
             future.result()
 
+    # Emit the concrete kept modules plus the requested keep-patterns, so a pattern
+    # that matched nothing in the source (e.g. `lm_head` under tied embeddings) is
+    # still honored downstream — the training model may have that module untied.
+    kept_modules = sorted(set(result_collector.modules_to_not_convert) | set(keep_patterns))
+    print(f"  Kept {len(result_collector.modules_to_not_convert)} source modules in source dtype; quantized the rest.")
+
     if strategy == "block" or strategy == "tensor":
         quantization_config = {
-            "activation_scheme": "dynamic",
-            "fmt": "e4m3",
+            "activation_scheme": activation_scheme,
+            "fmt": fmt,
             "quant_method": "fp8",
         }
-        if block_size:
+        if strategy == "block":
             quantization_config["weight_block_size"] = block_size
             if scale_fmt is not None:
                 quantization_config["scale_fmt"] = scale_fmt
-        if len(result_collector.modules_to_not_convert) > 0:
-            quantization_config["modules_to_not_convert"] = list(set(result_collector.modules_to_not_convert))
+        if len(kept_modules) > 0:
+            quantization_config["modules_to_not_convert"] = kept_modules
     else:
         quant_group = {
             "group_0": {
@@ -220,7 +192,7 @@ def convert_fp8(input_path, output_path, strategy, block_size=None, max_workers=
         quantization_config = {
             "config_groups": quant_group,
             "format": "float-quantized",
-            "ignore": list(set(result_collector.modules_to_not_convert)),
+            "ignore": kept_modules,
             "quant_method": "compressed-tensors",
             "quantization_status": "compressed",
         }
@@ -242,11 +214,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", type=str, help="Path to the directory of the HF safetensors model.")
     parser.add_argument("--save-dir", type=str, help="Path to the directory to save the converted model.")
-    parser.add_argument("--strategy", type=str, default="block", choices=["block", "channel", "tensor"])
+    parser.add_argument("--ref-config", type=str, required=True,
+                        help="Reference FP8 model dir or config.json whose quantization_config defines the recipe and keep-list.")
+    parser.add_argument("--strategy", type=str, default=None, choices=["block", "channel", "tensor"])
     parser.add_argument("--block-size", type=int, nargs="*", default=None, help="eg. --block-size 128 128")
     parser.add_argument("--max-workers", type=int, default=1, help="Number of worker threads for parallel processing")
     parser.add_argument("--scale-fmt", type=str, default=None, choices=["ue8m0"])
     args = parser.parse_args()
+
+    recipe = load_quant_recipe(args.ref_config)
+
+    # Resolve recipe parameters: explicit CLI flags override the reference config.
+    strategy = args.strategy or recipe["strategy"]
+    block_size = args.block_size if args.block_size is not None else recipe["block_size"]
+    scale_fmt = args.scale_fmt or recipe.get("scale_fmt")
+    keep_patterns = recipe["keep_patterns"]
+    activation_scheme = recipe["activation_scheme"]
+    fmt = recipe["fmt"]
+
+    if strategy == "block" and not block_size:
+        raise ValueError("Block strategy requires --block-size (or a reference config with weight_block_size).")
+
+    print(
+        f"Recipe from {args.ref_config}: strategy={strategy} block_size={block_size} "
+        f"scale_fmt={scale_fmt} keep={len(keep_patterns)} modules"
+    )
 
     if not os.path.exists(args.save_dir):
         print(f"Creating directory {args.save_dir}")
@@ -254,4 +246,14 @@ if __name__ == "__main__":
     elif not os.path.isdir(args.save_dir):
         raise ValueError("The save_dir should be a directory.")
 
-    convert_fp8(args.model_dir, args.save_dir, args.strategy, args.block_size, args.max_workers, args.scale_fmt)
+    convert_fp8(
+        args.model_dir,
+        args.save_dir,
+        strategy,
+        block_size=block_size,
+        max_workers=args.max_workers,
+        scale_fmt=scale_fmt,
+        keep_patterns=keep_patterns,
+        activation_scheme=activation_scheme,
+        fmt=fmt,
+    )

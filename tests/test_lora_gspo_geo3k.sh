@@ -51,7 +51,7 @@ run_train "
     --eps-clip-high 4e-4
 
     --optimizer adam
-    --lr 2e-5
+    --lr 5e-5
     --lr-warmup-iters 10
     --lr-decay-style constant
     --weight-decay 0.1
