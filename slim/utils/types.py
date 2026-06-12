@@ -48,7 +48,8 @@ class Episode:
     #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)
     #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
     #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
-    generated_text: str | None = None                  # cached decode of loss_mask==1 tokens, set by RM
+    text: str | None = None                            # decode of all tokens
+    generated_text: str | None = None                  # decode of loss_mask==1 tokens
     non_generation_time: float = 0.0
     train_metadata: dict = field(default_factory=dict)
     max_tokens: int = 0

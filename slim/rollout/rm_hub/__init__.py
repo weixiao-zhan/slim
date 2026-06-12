@@ -7,7 +7,6 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 from slim.utils.misc import load_function
-from slim.utils.processing_utils import load_tokenizer
 from slim.utils.types import Episode
 
 from .deepscaler import get_deepscaler_rule_based_reward
@@ -17,8 +16,6 @@ from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
 _shared_session: aiohttp.ClientSession | None = None
-_tokenizer = None
-_tokenizer_path: str | None = None
 
 
 def _get_shared_session() -> aiohttp.ClientSession:
@@ -33,25 +30,11 @@ def _get_shared_session() -> aiohttp.ClientSession:
     return _shared_session
 
 
-def _get_tokenizer(args):
-    global _tokenizer, _tokenizer_path
-    if _tokenizer is None or _tokenizer_path != args.hf_checkpoint:
-        _tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-        _tokenizer_path = args.hf_checkpoint
-    return _tokenizer
-
-
-def _decode_generated_text(args, episode: Episode) -> str:
-    gen_ids = episode.get_generated_token_ids()
-    if not gen_ids:
-        return ""
-    return _get_tokenizer(args).decode(gen_ids)
-
-
 async def remote_rm(args, episode: Episode, max_retries: int = 10):
     payload = {
         "prompt": episode.example.get("prompt", ""),
-        "response": _decode_generated_text(args, episode),
+        "response": episode.generated_text or "",
+        "text": episode.text or "",
         "label": episode.example.get("label"),
     }
     session = _get_shared_session()
@@ -79,8 +62,7 @@ async def async_rm(args, episode: Episode, **kwargs):
         import json
         metadata = json.loads(metadata)
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
-    response = _decode_generated_text(args, episode)
-    episode.generated_text = response
+    response = episode.generated_text or ""
     label = episode.example.get("label")
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""

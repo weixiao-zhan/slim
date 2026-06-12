@@ -704,7 +704,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if dist.get_rank() == 0:
             logger.info(f"rollout {rollout_id}: {log_dict}")
             log_dict["rollout/step"] = compute_rollout_step(self.args, rollout_id)
-            logging_utils.log(self.args, log_dict, step_key="rollout/step")
+            logging_utils.log(self.args, log_dict)
 
     def _train_core(
         self,
@@ -903,7 +903,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
             logger.info(f"{log_prefix} step {self.global_step}: {log_dict}")
             log_dict[f"{log_prefix}/step"] = self.global_step
-            logging_utils.log(self.args, log_dict, step_key=f"{log_prefix}/step")
+            logging_utils.log(self.args, log_dict)
 
         self.global_step += 1
 
