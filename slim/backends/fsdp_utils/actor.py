@@ -23,7 +23,6 @@ from slim.utils.metric_utils import compute_rollout_step
 from slim.utils.ppo_utils import (
     compute_approx_kl,
     compute_gspo_kl,
-    compute_opsm_mask,
     compute_policy_loss,
     compute_value_loss,
     vanilla_gae,
@@ -432,7 +431,7 @@ class FSDPTrainRayActor(TrainRayActor):
         or to the paired actor Ray actor (for critic role)."""
         self.critic_handle = critic_handle
 
-    def compute_values(self, rollout_id: int, rollout_data_refs: list) -> list[torch.Tensor]:
+    def compute_values(self, rollout_id: int, rollout_data_ref: list) -> list[torch.Tensor]:
         """Compute per-token value predictions for all episodes (critic only).
 
         Returns:
@@ -443,7 +442,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             self.wake_up()
 
-        episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+        episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
 
         _init_dummy_advantages(episodes)
 
@@ -478,31 +477,30 @@ class FSDPTrainRayActor(TrainRayActor):
 
         return all_values
 
-    def compute_log_probs(self, rollout_id: int, rollout_data_refs: list) -> None:
+    def compute_log_probs(self, rollout_id: int, rollout_data_ref: list) -> None:
         """Pre-compute log-probs and cache packed batches for the upcoming train() call.
 
-        Packs episodes and computes ref/actor log-probs as needed. When
-        use_rollout_logprobs is True, actor log-probs are skipped (rollout
-        log-probs serve as the old baseline). The packed batches are stored
-        on self for reuse in train(), avoiding redundant packing and forward passes.
+        Packs episodes and computes ref/actor-old log-probs as needed. The
+        packed batches are stored on self for reuse in train(), avoiding
+        redundant packing and forward passes.
         """
         assert not self._is_critic, "compute_log_probs should only be called on the actor"
 
-        episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+        episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
 
         _init_dummy_advantages(episodes)
 
         packed_batches, grad_accum = self._packed_data(episodes)
 
-        needs_forward = self.ref_model is not None or not self.args.use_rollout_logprobs
+        needs_forward = self.ref_model is not None or self._needs_actor_old_log_probs()
         if needs_forward:
             if self.args.offload_train:
                 self.wake_up()
 
             if self.ref_model is not None:
                 self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
-            if not self.args.use_rollout_logprobs:
-                self._compute_log_prob("actor", packed_batches)
+            if self._needs_actor_old_log_probs():
+                self._compute_log_prob("actor", packed_batches, store_prefix="actor_old_")
             self._deactivate_routing_replay()
 
             if self.args.offload_train:
@@ -512,6 +510,13 @@ class FSDPTrainRayActor(TrainRayActor):
         self._pending_episodes = episodes
         self._pending_packed_batches = packed_batches
         self._pending_grad_accum = grad_accum
+
+    def _needs_actor_old_log_probs(self) -> bool:
+        return (
+            self.args.old_logprob_source == "actor"
+            or self.args.mismatch_correction != "none"
+            or self.args.get_mismatch_metrics
+        )
 
     def _compute_log_prob(
         self,
@@ -565,7 +570,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         target_tokens=batch["tokens"],
                         allow_compile=True,
                         temperature=self.args.rollout_temperature,
-                        need_full_log_probs=store_prefix == "" and self.args.use_rollout_entropy,
+                        need_full_log_probs=False,
                         cu_seqlens=batch["cu_seqlens"],
                     )
                     batch[f"{store_prefix}log_probs"] = log_probs_result
@@ -630,16 +635,16 @@ class FSDPTrainRayActor(TrainRayActor):
 
         return packed_batches, grad_accum
 
-    def train(self, rollout_id: int, rollout_data_refs: list, values_refs: list | None = None) -> None:
+    def train(self, rollout_id: int, rollout_data_ref: list, values_refs: list | None = None) -> None:
         """Run one training update over a rollout batch.
 
         Parameters:
             rollout_id: Monotonic id for logging.
-            rollout_data_refs: List of Ray ObjectRefs, one per DP rank,
+            rollout_data_ref: List of Ray ObjectRefs, one per DP rank,
                 each containing a list[Episode] partition.
             values_refs: Optional list of Ray ObjectRefs containing per-sample
                 value predictions from the critic (one ref per DP rank).
-                Required when advantage_estimator=="ppo".
+                Required when advantage_estimator=="ppo_gae".
         """
         if self.args.offload_train:
             self.wake_up()
@@ -654,7 +659,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 self._pending_packed_batches = None
                 self._pending_grad_accum = None
             else:
-                episodes = process_rollout_data(self.args, rollout_data_refs, self.dp_rank, self.dp_size)
+                episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
                 packed_batches = None
                 grad_accum = None
 
@@ -684,7 +689,7 @@ class FSDPTrainRayActor(TrainRayActor):
             raw_rewards = [getattr(ep, "raw_reward", ep.reward) for ep in episodes]
             log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
 
-        for metric_key in ["log_probs", "rollout_log_probs", "ref_log_probs", "advantages", "returns"]:
+        for metric_key in ["actor_old_log_probs", "rollout_log_probs", "ref_log_probs", "advantages", "returns"]:
             if metric_key not in packed_batches[0]:
                 continue
             val = torch.tensor([0.0], device=torch.cuda.current_device())
@@ -719,7 +724,7 @@ class FSDPTrainRayActor(TrainRayActor):
             for ep in episodes:
                 ep._advantages = [ep.reward] * ep.num_edges
                 ep._returns = ep._advantages
-        elif self.args.advantage_estimator == "ppo":
+        elif self.args.advantage_estimator == "ppo_gae":
             assert values is not None, "PPO requires value predictions from critic"
             self._compute_ppo_advantages(episodes, values)
         else:
@@ -739,11 +744,10 @@ class FSDPTrainRayActor(TrainRayActor):
             self._critic_train_loop(rollout_id, packed_batches, grad_accum)
         else:
             # Compute log-probs if not pre-computed
-            if "log_probs" not in packed_batches[0] and "ref_log_probs" not in packed_batches[0]:
-                if self.ref_model is not None:
-                    self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
-                if not self.args.use_rollout_logprobs:
-                    self._compute_log_prob("actor", packed_batches)
+            if self.ref_model is not None and "ref_log_probs" not in packed_batches[0]:
+                self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+            if self._needs_actor_old_log_probs() and "actor_old_log_probs" not in packed_batches[0]:
+                self._compute_log_prob("actor", packed_batches, store_prefix="actor_old_")
 
             self._log_rollout_data(rollout_id, episodes, packed_batches)
 
@@ -928,16 +932,20 @@ class FSDPTrainRayActor(TrainRayActor):
 
         unpacked_batches = unpack_sequences(packed_batch)
 
-        old_log_prob_key = "rollout_log_probs" if self.args.use_rollout_logprobs else "log_probs"
+        old_log_prob_key = "actor_old_log_probs" if self.args.old_logprob_source == "actor" else "rollout_log_probs"
         missing_old_log_probs = [
             idx
             for idx, batch in enumerate(unpacked_batches)
-            if old_log_prob_key not in batch or not isinstance(batch[old_log_prob_key], torch.Tensor)
+            if (
+                old_log_prob_key not in batch
+                or not isinstance(batch[old_log_prob_key], torch.Tensor)
+                or batch[old_log_prob_key].numel() == 0
+            )
         ]
         if missing_old_log_probs:
             raise KeyError(
                 f"{old_log_prob_key} must be provided as torch.Tensor for all microbatches when "
-                f"use_rollout_logprobs is set to {self.args.use_rollout_logprobs}. Missing in batches: {missing_old_log_probs}"
+                f"old_logprob_source={self.args.old_logprob_source}. Missing in batches: {missing_old_log_probs}"
             )
         old_log_probs = torch.cat([batch[old_log_prob_key] for batch in unpacked_batches], dim=0)
         log_probs = torch.cat([batch["cur_log_probs"] for batch in unpacked_batches], dim=0)
@@ -949,15 +957,6 @@ class FSDPTrainRayActor(TrainRayActor):
         old_log_probs = old_log_probs.to(device=log_probs.device)
         ppo_kl = old_log_probs - log_probs
 
-        if self.args.use_opsm:
-            opsm_mask, opsm_clipfrac = compute_opsm_mask(
-                args=self.args,
-                full_log_probs=[batch["cur_log_probs"] for batch in unpacked_batches],
-                full_old_log_probs=[batch[old_log_prob_key] for batch in unpacked_batches],
-                advantages=[batch["advantages"] for batch in unpacked_batches],
-                loss_masks=loss_masks,
-            )
-
         if self.args.advantage_estimator == "gspo":
             ppo_kl = compute_gspo_kl(
                 full_log_probs=[batch["cur_log_probs"] for batch in unpacked_batches],
@@ -966,10 +965,15 @@ class FSDPTrainRayActor(TrainRayActor):
                 loss_masks=loss_masks,
             )
 
-        pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, self.args.eps_clip, self.args.eps_clip_high)
-
-        if self.args.use_opsm:
-            pg_loss = pg_loss * opsm_mask
+        pg_loss, pg_clipfrac = compute_policy_loss(
+            ppo_kl,
+            log_probs,
+            advantages,
+            self.args.eps_clip,
+            self.args.eps_clip_high,
+            self.args.policy_surrogate,
+            self.args.eps_clip_c,
+        )
 
         def _has_rollout_log_probs(batch) -> bool:
             rollout_tensor = batch.get("rollout_log_probs")
@@ -982,42 +986,56 @@ class FSDPTrainRayActor(TrainRayActor):
             else None
         )
 
-        # Off-policy correction via TIS/MIS
-        tis_loss_masks = loss_masks
-        if self.args.use_tis and has_rollout_log_probs:
-            from slim.utils.tis import compute_tis_weights
+        def _has_actor_old_log_probs(batch) -> bool:
+            actor_old_tensor = batch.get("actor_old_log_probs")
+            return isinstance(actor_old_tensor, torch.Tensor) and actor_old_tensor.numel() > 0
 
-            if self.args.custom_tis_function_path is not None:
+        has_actor_old_log_probs = all(_has_actor_old_log_probs(batch) for batch in unpacked_batches)
+        actor_old_log_probs = (
+            torch.cat([batch["actor_old_log_probs"] for batch in unpacked_batches], dim=0)
+            if has_actor_old_log_probs
+            else None
+        )
+
+        mismatch_loss_masks = loss_masks
+        mismatch_metrics = {}
+        run_mismatch = self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics
+        if run_mismatch:
+            if not has_rollout_log_probs or not has_actor_old_log_probs:
+                raise KeyError("mismatch correction requires rollout_log_probs and actor_old_log_probs.")
+            from slim.utils.mismatch import compute_mismatch_metrics
+
+            if self.args.custom_mismatch_correction_function_path is not None:
                 from slim.utils.misc import load_function
 
-                tis_func = load_function(self.args.custom_tis_function_path)
+                mismatch_func = load_function(self.args.custom_mismatch_correction_function_path)
             else:
-                tis_func = compute_tis_weights
+                mismatch_func = compute_mismatch_metrics
 
-            tis_weights, tis_modified_masks, tis_metrics = tis_func(
+            mismatch_weights, mismatch_modified_masks, mismatch_metrics = mismatch_func(
                 args=self.args,
-                train_log_probs=[batch[old_log_prob_key] for batch in unpacked_batches],
+                train_log_probs=[batch["actor_old_log_probs"] for batch in unpacked_batches],
                 rollout_log_probs=[batch["rollout_log_probs"] for batch in unpacked_batches],
                 loss_masks=loss_masks,
             )
-            if tis_weights is not None:
-                flat_weights = torch.cat(tis_weights, dim=0).to(device=pg_loss.device)
+            if self.args.mismatch_correction != "none" and mismatch_weights is not None:
+                flat_weights = torch.cat(mismatch_weights, dim=0).to(device=pg_loss.device)
                 pg_loss = pg_loss * flat_weights
-            tis_loss_masks = tis_modified_masks
+            if self.args.mismatch_correction != "none":
+                mismatch_loss_masks = mismatch_modified_masks
 
         if self.args.calculate_per_token_loss:
-            pg_loss = sum_of_token(pg_loss, edge_lengths, tis_loss_masks)
+            pg_loss = sum_of_token(pg_loss, edge_lengths, mismatch_loss_masks)
             pg_clipfrac = sum_of_token(pg_clipfrac, edge_lengths, loss_masks)
             ppo_kl = sum_of_token(ppo_kl.abs(), edge_lengths, loss_masks)
         else:
-            pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, tis_loss_masks)
+            pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, mismatch_loss_masks)
             pg_clipfrac = sum_of_sample_mean(pg_clipfrac, edge_lengths, loss_masks)
             ppo_kl = sum_of_sample_mean(ppo_kl.abs(), edge_lengths, loss_masks)
 
-        # Only compare rollout vs. train log probs when they originate from different stages.
         train_rollout_logprob_abs_diff = None
-        if not self.args.use_rollout_logprobs and rollout_log_probs is not None:
-            train_rollout_logprob_abs_diff = (old_log_probs - rollout_log_probs).abs()
+        if actor_old_log_probs is not None and rollout_log_probs is not None:
+            train_rollout_logprob_abs_diff = (actor_old_log_probs.to(device=log_probs.device) - rollout_log_probs).abs()
             train_rollout_logprob_abs_diff = sum_of_sample_mean(
                 train_rollout_logprob_abs_diff, edge_lengths, loss_masks
             ).detach()
@@ -1056,16 +1074,13 @@ class FSDPTrainRayActor(TrainRayActor):
         if train_rollout_logprob_abs_diff is not None:
             reported["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff
 
-        if self.args.use_tis and has_rollout_log_probs:
-            for key, values in tis_metrics.items():
+        if run_mismatch:
+            for key, values in mismatch_metrics.items():
                 flat_v = torch.cat(values, dim=0)
-                reported[f"tis/{key}"] = sum_of_sample_mean(flat_v, edge_lengths, loss_masks).detach()
+                reported[f"mismatch/{key}"] = sum_of_sample_mean(flat_v, edge_lengths, loss_masks).detach()
 
         if self.args.use_kl_loss:
             reported["kl_loss"] = kl_loss.detach()
-
-        if self.args.use_opsm:
-            reported["opsm_clipfrac"] = opsm_clipfrac
 
         loss = loss * self.dp_size / self.args.global_batch_size
         loss.backward()

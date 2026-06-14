@@ -98,14 +98,22 @@ Example data entry:
 --eps-clip-high 0.28
 ```
 
-Also supports: `gspo`, `reinforce_plus_plus`, `reinforce_plus_plus_baseline`, `ppo`.
+Also supports: `gspo`, `ppo_gae`.
 
-### PPO
-
-PPO requires a separate critic model (additional GPU allocation):
+Policy surrogate defaults to PPO clipping:
 
 ```bash
---advantage-estimator ppo
+--policy-surrogate ppo_clip
+```
+
+Also supports: `is`, `tis`, `cis`.
+
+### PPO GAE
+
+PPO GAE requires a separate critic model (additional GPU allocation):
+
+```bash
+--advantage-estimator ppo_gae
 --critic-num-nodes 1
 --critic-num-gpus-per-node 4
 --critic-load /path/to/critic

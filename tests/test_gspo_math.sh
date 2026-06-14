@@ -36,8 +36,8 @@ run_train "
     --max-tokens-per-gpu 32768
 
     --advantage-estimator gspo
-    --disable-grpo-std-normalization
-    --use-rollout-logprobs
+    --disable-rewards-std-normalization
+    --old-logprob-source rollout
     --eps-clip 3e-4
     --eps-clip-high 4e-4
 

@@ -10,7 +10,7 @@ from slim.utils.types import Episode
 
 # Keys sliced by edge offsets (edge-aligned data, length = total_tokens - num_sequences)
 _EDGE_KEYS = frozenset([
-    "log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values",
+    "actor_old_log_probs", "ref_log_probs", "cur_log_probs", "entropy", "cur_values",
     "rollout_log_probs", "loss_masks", "advantages", "returns", "old_values",
     "rollout_routed_experts",
 ])

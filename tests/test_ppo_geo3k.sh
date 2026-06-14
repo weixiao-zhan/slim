@@ -40,7 +40,7 @@ run_train "
     --use-dynamic-batch-size
     --max-tokens-per-gpu 32768
 
-    --advantage-estimator ppo
+    --advantage-estimator ppo_gae
     --gamma 1.0
     --lambd 0.95
     --value-clip 0.2
