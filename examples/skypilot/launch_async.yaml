@@ -171,8 +171,8 @@ run: | # shell
     --max-tokens-per-gpu 16384 \
     \
     --advantage-estimator gspo \
-    --disable-grpo-std-normalization \
-    --use-rollout-logprobs \
+    --disable-rewards-std-normalization \
+    --old-logprob-source rollout \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \
     --entropy-coef 0.00 \

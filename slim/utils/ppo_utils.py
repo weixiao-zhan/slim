@@ -1,8 +1,6 @@
 # Adapt from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/models/utils.py
 # and https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ppo_utils/experience_maker.py
 
-from argparse import Namespace
-
 import torch
 import torch.nn.functional as F
 
@@ -50,47 +48,6 @@ def compute_approx_kl(
     return kl
 
 
-def compute_opsm_mask(
-    args: Namespace,
-    full_log_probs: list[torch.Tensor],
-    full_old_log_probs: list[torch.Tensor],
-    advantages: list[torch.Tensor],
-    loss_masks: list[torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute Off-Policy Sequence Masking (OPSM) mask.
-
-    Args:
-        args: Configuration containing `opsm_delta` threshold.
-        full_log_probs: Current policy log-probs per sample.
-        full_old_log_probs: Old policy log-probs per sample.
-        advantages: Advantage values per sample.
-        loss_masks: Loss masks per sample.
-
-    Returns:
-        Tuple of `(opsm_mask, opsm_clipfrac)` where `opsm_mask` is a
-        concatenated tensor of per-token masks and
-        `opsm_clipfrac` is the count of masked sequences.
-    """
-    opsm_mask_list = []
-    device = advantages[0].device
-    opsm_clipfrac = torch.tensor(0.0, device=device)
-
-    for full_log_prob, full_old_log_prob, advantage, loss_mask in zip(
-        full_log_probs, full_old_log_probs, advantages, loss_masks, strict=False
-    ):
-        # Calculate sequence-level KL
-        seq_kl = ((full_old_log_prob - full_log_prob) * loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
-
-        # Create mask: 0 if (advantage < 0 and seq_kl > delta), else 1
-        mask = ((advantage < 0) & (seq_kl > args.opsm_delta)).float()
-        opsm_clipfrac += mask.sum() / torch.clamp_min(loss_mask.sum(), 1)
-
-        opsm_mask_list.append(1 - mask)
-
-    opsm_mask = torch.cat(opsm_mask_list, dim=0)
-    return opsm_mask, opsm_clipfrac
-
-
 def compute_gspo_kl(
     full_log_probs: list[torch.Tensor],
     full_old_log_probs: list[torch.Tensor],
@@ -121,7 +78,7 @@ def compute_gspo_kl(
 
 
 @torch.compile(dynamic=True)
-def compute_policy_loss(
+def compute_ppo_clip_policy_loss(
     ppo_kl: torch.Tensor,
     advantages: torch.Tensor,
     eps_clip: float,
@@ -145,6 +102,66 @@ def compute_policy_loss(
         pg_losses = clip_pg_losses1
 
     return pg_losses, clipfrac
+
+
+@torch.compile(dynamic=True)
+def compute_is_policy_loss(
+    ppo_kl: torch.Tensor,
+    advantages: torch.Tensor,
+):
+    ratio = (-ppo_kl).exp()
+    pg_losses = -ratio * advantages
+    clipfrac = torch.zeros_like(pg_losses)
+    return pg_losses, clipfrac
+
+
+@torch.compile(dynamic=True)
+def compute_tis_policy_loss(
+    ppo_kl: torch.Tensor,
+    advantages: torch.Tensor,
+    eps_clip: float,
+    eps_clip_high: float,
+):
+    ratio = (-ppo_kl).exp()
+    clipped_ratio = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
+    pg_losses = -clipped_ratio * advantages
+    clipfrac = ((ratio < 1 - eps_clip) | (ratio > 1 + eps_clip_high)).float()
+    return pg_losses, clipfrac
+
+
+@torch.compile(dynamic=True)
+def compute_cis_policy_loss(
+    ppo_kl: torch.Tensor,
+    log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    eps_clip: float,
+    eps_clip_high: float,
+):
+    ratio = (-ppo_kl).exp()
+    weight = ratio.clamp(1 - eps_clip, 1 + eps_clip_high).detach()
+    pg_losses = -weight * advantages * log_probs
+    clipfrac = ((ratio < 1 - eps_clip) | (ratio > 1 + eps_clip_high)).float()
+    return pg_losses, clipfrac
+
+
+def compute_policy_loss(
+    ppo_kl: torch.Tensor,
+    log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    eps_clip: float,
+    eps_clip_high: float,
+    policy_surrogate: str,
+    eps_clip_c: float | None = None,
+):
+    if policy_surrogate == "ppo_clip":
+        return compute_ppo_clip_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, eps_clip_c)
+    if policy_surrogate == "is":
+        return compute_is_policy_loss(ppo_kl, advantages)
+    if policy_surrogate == "tis":
+        return compute_tis_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high)
+    if policy_surrogate == "cis":
+        return compute_cis_policy_loss(ppo_kl, log_probs, advantages, eps_clip, eps_clip_high)
+    raise ValueError(f"Unsupported policy_surrogate: {policy_surrogate}")
 
 
 def compute_value_loss(
@@ -182,36 +199,6 @@ def get_grpo_returns(
     for i in range(len(rewards)):
         returns.append(torch.ones_like(kl[i]) * rewards[i])
     return returns
-
-
-def get_reinforce_plus_plus_baseline_advantages(
-    rewards: torch.Tensor,
-    kl: list[torch.Tensor],
-    loss_masks: list[torch.Tensor],
-    kl_coef: float,
-) -> list[torch.Tensor]:
-    """
-    Calculates the unwhitened advantages for the REINFORCE++-baseline algorithm.
-    Broadcasting the scalar (reward - group_baseline) to each token.
-
-    Args:
-        rewards (Tensor): A tensor of scalar rewards, where the group-wise
-                                baseline has already been subtracted.
-        kl (list[Tensor]): A list of per-token KL divergence tensors. Used to
-                                 get the shape for broadcasting.
-        loss_masks (list[Tensor]): A list of per-token loss masks.
-        kl_coef (float): Coefficient for the KL penalty.
-
-    Returns:
-        list[Tensor]: A list of tensors containing the unwhitened advantages.
-    """
-    # Broadcast to get unwhitened advantages
-    unwhitened_advantages = [
-        torch.ones_like(kl_tensor) * reward_val - kl_coef * kl_tensor
-        for kl_tensor, reward_val in zip(kl, rewards, strict=False)
-    ]
-
-    return unwhitened_advantages
 
 
 def vanilla_gae(

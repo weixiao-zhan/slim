@@ -16,7 +16,7 @@ Below is a summary of all available customization interfaces and their purposes.
 | [`--rollout-all-samples-process-path`](#6-rollout-all-samples-process---rollout-all-samples-process-path) | Process all episodes (including filtered ones) after rollout. |
 | [`--rollout-data-postprocess-path`](#7-rollout-data-postprocess---rollout-data-postprocess-path) | Post-process rollout data after log probs are computed. |
 | [`--custom-loss-function-path`](#8-custom-loss-function---custom-loss-function-path) | Implement custom training loss computation. |
-| [`--custom-tis-function-path`](#9-custom-tisrs-function---custom-tis-function-path) | Implement custom importance sampling for off-policy correction. |
+| [`--custom-mismatch-correction-function-path`](#9-custom-mismatch-correction-function---custom-mismatch-correction-function-path) | Implement custom importance sampling for train-inference mismatch correction. |
 | [`--custom-pg-loss-reducer-function-path`](#10-custom-pg-loss-reducer---custom-pg-loss-reducer-function-path) | Customize pg_loss reduction (e.g., for Dr.GRPO). |
 | [`--custom-reward-post-process-path`](#11-reward-post-processing---custom-reward-post-process-path) | Custom post-processing of rewards before advantage computation. |
 | [`--custom-rollout-log-function-path`](#12-logging-functions) | Custom logging for training rollouts. |
@@ -203,17 +203,24 @@ def postprocess_function(args) -> None
 
 ---
 
-### 9. Custom TIS/RS Function (`--custom-tis-function-path`)
+### 9. Custom Mismatch Correction Function (`--custom-mismatch-correction-function-path`)
 
 **Default**: `None`
 
-**Purpose**: Implement custom importance sampling for off-policy correction.
+**Purpose**: Implement custom importance sampling for train-inference mismatch correction.
 
 **Use Cases**:
-- Custom importance sampling ratio computation
-- Advanced off-policy correction methods
+- Custom actor-old / rollout-old ratio computation
+- Advanced train-inference mismatch correction methods
 
-**Example**: Implement a function matching the TIS signature for custom importance sampling.
+**Example**:
+
+```bash
+--mismatch-correction custom
+--custom-mismatch-correction-function-path examples.mismatch.rejection_sampling.compute_rejection_sampling_masks
+```
+
+Tune rejection sampling constants directly in `examples/mismatch/rejection_sampling.py`.
 
 ---
 
@@ -419,4 +426,3 @@ CUSTOM_ARGS=(
     --custom-rm-path your_module.reward_func
 )
 ```
-

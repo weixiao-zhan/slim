@@ -11,7 +11,7 @@ During the development of slim, it is often necessary to check if the model's pr
         * If all parameters are updated correctly and the problem persists, it's possible that some special buffers in SGLang were released during the release process.
         * If you are testing with a pretrained model, you can switch to an instruct version of a model with the same architecture to see if this garbled output is specific to the pretrained model.
 
-    2.  Check the printed rollout stats to see if `log_probs` and `ref_log_probs` are exactly equal (meaning KL divergence is 0 in the first step) and their values are small.
+    2.  Check the printed rollout stats to see if `actor_old_log_probs` and `ref_log_probs` are exactly equal (meaning KL divergence is 0 in the first step) and their values are small.
         * If they are not exactly equal, it may be caused by non-deterministic kernels. Consider enabling true on-policy mode for strict numerical equivalence.
         * If the values are large (e.g., > 1), there are generally two possibilities:
             * If the value is extremely large, there is likely a problem with the training configuration.

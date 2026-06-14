@@ -614,10 +614,7 @@ class RolloutManager:
             self.custom_reward_post_process_func(self.args, episodes)
             return
 
-        if (
-            self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-            and self.args.rewards_normalization
-        ):
+        if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.rewards_normalization:
             rewards = torch.tensor([ep.reward for ep in episodes], dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
@@ -627,7 +624,7 @@ class RolloutManager:
             mean = rewards.mean(dim=-1, keepdim=True)
             rewards = rewards - mean
 
-            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.rewards_std_normalization:
                 std = rewards.std(dim=-1, keepdim=True)
                 rewards = rewards / (std + 1e-6)
 
@@ -1122,7 +1119,7 @@ def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
 
 
 def _compute_zero_std_metrics(args, episodes: list[Episode]):
-    if args.advantage_estimator == "ppo":
+    if args.advantage_estimator == "ppo_gae":
         return {}
 
     n = args.n_samples_per_prompt

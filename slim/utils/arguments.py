@@ -677,7 +677,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 choices=["policy_loss", "sft_loss", "custom_loss"],
                 default="policy_loss",
                 help=(
-                    "Choose loss type, currently support ppo policy_loss or sft_loss, "
+                    "Choose loss type, currently support policy gradient loss or sft_loss, "
                     "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
                 ),
             )
@@ -698,14 +698,19 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Choose KL loss type: kl, k2, k3, low_var_kl",
             )
             parser.add_argument(
+                "--policy-surrogate",
+                type=str,
+                choices=["ppo_clip", "is", "tis", "cis"],
+                default="ppo_clip",
+                help="Policy-gradient surrogate objective.",
+            )
+            parser.add_argument(
                 "--advantage-estimator",
                 type=str,
                 choices=[
                     "grpo",
                     "gspo",
-                    "reinforce_plus_plus",
-                    "reinforce_plus_plus_baseline",
-                    "ppo",
+                    "ppo_gae",
                 ],
                 default="grpo",
                 help="Advantage estimator to use.",
@@ -746,25 +751,16 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
-                "--disable-grpo-std-normalization",
+                "--disable-rewards-std-normalization",
                 action="store_false",
-                dest="grpo_std_normalization",
-                help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
+                dest="rewards_std_normalization",
+                help="Disable reward standard-deviation normalization after group mean centering.",
             )
             parser.add_argument(
                 "--disable-rewards-normalization",
                 action="store_false",
                 dest="rewards_normalization",
                 help="Disable rewards normalization",
-            )
-            parser.add_argument(
-                "--use-rollout-entropy",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to calculate the entropy when calculating the logprobs from actor and reference model. "
-                    "This is useful for doing special loss mask."
-                ),
             )
             parser.add_argument(
                 "--get-mismatch-metrics",
@@ -782,13 +778,11 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--use-rollout-logprobs",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to use the rollout logprobs when calculating the importance sampling ratios. "
-                    "If not set, we will use the logprobs from the actor model."
-                ),
+                "--old-logprob-source",
+                type=str,
+                choices=["actor", "rollout"],
+                default="actor",
+                help="Baseline policy for policy-surrogate ratios.",
             )
             parser.add_argument(
                 "--use-rollout-routing-replay",
@@ -801,30 +795,18 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "expert-selection mismatch on MoE models. Currently wired for Qwen3.5-MoE."
                 ),
             )
-            # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
             parser.add_argument(
-                "--use-tis",
-                action="store_true",
-                default=False,
-                help="Enable TIS from https://fengyao.notion.site/off-policy-rl for off-policy importance sampling.",
+                "--mismatch-correction",
+                type=str,
+                choices=["none", "custom"],
+                default="none",
+                help="Optional actor-old / rollout-old importance correction.",
             )
             parser.add_argument(
-                "--tis-clip",
-                type=float,
-                default=2.0,
-                help="Clipping threshold C for importance sampling ratios to control variance.",
-            )
-            parser.add_argument(
-                "--tis-clip-low",
-                type=float,
-                default=0,
-                help="Lower bound clipping threshold C for importance sampling ratios to control variance.",
-            )
-            parser.add_argument(
-                "--custom-tis-function-path",
+                "--custom-mismatch-correction-function-path",
                 type=str,
                 default=None,
-                help="Path to the custom TIS/RS function (e.g., examples/train_infer_mismatch_helper/mis.py:compute_mis_weights_with_cp).",
+                help="Dotted path to a custom mismatch correction function.",
             )
             parser.add_argument(
                 "--custom-pg-loss-reducer-function-path",
@@ -833,18 +815,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
             )
 
-            parser.add_argument(
-                "--use-opsm",
-                action="store_true",
-                default=False,
-                help="Whether to enable Off-Policy Sequence Masking (OPSM).",
-            )
-            parser.add_argument(
-                "--opsm-delta",
-                type=float,
-                default=1e-4,
-                help="The threshold for Off-Policy Sequence Masking (OPSM).",
-            )
             return parser
 
         def add_router_arguments(parser):
@@ -1249,6 +1219,14 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
 
 
 def slim_validate_args(args):
+    if args.custom_config_path:
+        with open(args.custom_config_path) as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if hasattr(args, k):
+                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
+            setattr(args, k, v)
+
     args.eval_datasets = _resolve_eval_datasets(args)
 
     if args.kl_coef != 0 or args.use_kl_loss:
@@ -1263,24 +1241,16 @@ def slim_validate_args(args):
 
     assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 
-    if args.advantage_estimator in ["reinforce_plus_plus", "reinforce_plus_plus_baseline"]:
-        assert args.normalize_advantages, (
-            "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
-            "require advantage normalization. Please add `--normalize-advantages` to your command."
+    if args.mismatch_correction != "none" and args.old_logprob_source != "actor":
+        raise ValueError("--mismatch-correction requires --old-logprob-source actor.")
+
+    if args.mismatch_correction == "custom" and args.custom_mismatch_correction_function_path is None:
+        raise ValueError("--mismatch-correction custom requires --custom-mismatch-correction-function-path.")
+
+    if args.get_mismatch_metrics and args.old_logprob_source == "rollout":
+        logger.info(
+            "get_mismatch_metrics is set; actor-old log probs will be computed by the training engine."
         )
-
-    if args.use_rollout_logprobs:
-        assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
-
-    if args.get_mismatch_metrics:
-        assert (
-            args.custom_tis_function_path is not None
-        ), "custom_tis_function_path must be set when get_mismatch_metrics is set"
-
-        if args.use_rollout_logprobs:
-            logger.info(
-                "get_mismatch_metrics is set; For metrics calculation, the log probs will still be recomputed by training engine. One more forward pass will be applied."
-            )
 
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
@@ -1304,10 +1274,10 @@ def slim_validate_args(args):
         )
         args.debug_train_only = True
 
-    args.use_critic = args.advantage_estimator == "ppo"
+    args.use_critic = args.advantage_estimator == "ppo_gae"
     if args.critic_train_only:
         if not args.use_critic:
-            raise ValueError("--critic-train-only requires --use-critic (or --advantage-estimator ppo).")
+            raise ValueError("--critic-train-only requires --use-critic (or --advantage-estimator ppo_gae).")
         if args.actor_num_nodes != 0 or args.actor_num_gpus_per_node != 0:
             raise ValueError(
                 "--critic-train-only requires --actor-num-nodes 0 --actor-num-gpus-per-node 0, "
@@ -1377,8 +1347,8 @@ def slim_validate_args(args):
         args.global_batch_size = global_batch_size
 
     if args.n_samples_per_prompt == 1:
-        args.grpo_std_normalization = False
-        logger.info("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
+        args.rewards_std_normalization = False
+        logger.info("n_samples_per_prompt is set to 1, rewards_std_normalization will be set to False.")
 
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
@@ -1404,14 +1374,6 @@ def slim_validate_args(args):
 
     if args.enable_mtp_training:
         assert args.mtp_num_layers, "mtp_num_layers must be set when enable_mtp_training is set"
-
-    if args.custom_config_path:
-        with open(args.custom_config_path) as f:
-            data = yaml.safe_load(f) or {}
-        for k, v in data.items():
-            if hasattr(args, k):
-                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
-            setattr(args, k, v)
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")

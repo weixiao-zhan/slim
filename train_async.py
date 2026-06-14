@@ -9,6 +9,8 @@ from slim.utils.misc import should_run_periodic_action
 # The framework supports other asynchronous approaches such as fully async (which is shown in examples/full_async).
 def train(args):
     assert not args.colocate, "Colocation is not supported for async training."
+    if args.use_critic:
+        raise NotImplementedError("async training does not support --advantage-estimator ppo_gae yet.")
     configure_logger()
     # allocate the GPUs
     pgs = create_placement_groups(args)

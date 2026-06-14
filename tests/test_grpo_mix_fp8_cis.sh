@@ -4,7 +4,7 @@ source "$(dirname "$0")/common.sh"
 BF16_MODEL_DIR="${BF16_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
 FP8_MODEL_DIR="${FP8_MODEL_DIR:-$HOME/models/Qwen3.5-2B-FP8}"
 DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/mixed}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/grpo-mix-qwen35-2b-fp8}"
+SAVE_DIR="${SAVE_DIR:-$HOME/outputs/grpo-mix-cis-qwen35-2b-fp8}"
 
 start_ray
 run_train "
@@ -44,11 +44,11 @@ run_train "
     --max-tokens-per-gpu 12288
 
     --advantage-estimator grpo
-    --disable-grpo-std-normalization
-    --use-tis
-    --custom-config-path examples/tis/mis.yaml
-    --eps-clip 0.2
-    --eps-clip-high 0.28
+    --disable-rewards-std-normalization
+    --policy-surrogate cis
+    --old-logprob-source rollout
+    --eps-clip 1
+    --eps-clip-high 1
 
     --optimizer adam
     --lr 3e-6
@@ -62,5 +62,5 @@ run_train "
     --load $BF16_MODEL_DIR
     --save $SAVE_DIR
 
-    $(wandb_args grpo-mix-qwen35-2b-fp8)
+    $(wandb_args grpo-mix-cis-qwen35-2b-fp8)
 "
