@@ -2,7 +2,7 @@
 # Reference: https://fengyao.notion.site/off-policy-rl
 # Usage: --use-tis --custom-config-path examples/tis/mis.yaml
 use_tis: true
-use_rs: true
+use_rs: false
 
 # Aggregation level: token, sequence, or geometric
 tis_level: "token"

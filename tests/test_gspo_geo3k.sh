@@ -11,7 +11,7 @@ run_train "
     --num-rollout 50
     --rollout-batch-size 16
     --n-samples-per-prompt 16
-    --max-context-len 4096
+    --max-context-len 16384
     --rollout-temperature 1
     --num-steps-per-rollout 1
 
@@ -25,27 +25,25 @@ run_train "
     --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.6
-    --sglang-attention-backend flashinfer
-    --sglang-mm-enable-dp-encoder
-    --sglang-mamba-scheduler-strategy extra_buffer 
+    --sglang-mem-fraction-static 0.8
+    --sglang-attention-backend fa3
+    --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
     --rollout-fault-tolerance
+    --colocate
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 1
-    --attn-implementation sdpa
+    --attn-implementation flash_attention_3
+    --master-weight-dtype fp32
+    --compute-dtype bf16
     --gradient-checkpointing
-    --colocate
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 6144
+    --max-tokens-per-gpu 32768
 
     --advantage-estimator gspo
     --disable-grpo-std-normalization
-    --kl-loss-coef 0.00
-    --kl-loss-type low_var_kl
-    --kl-coef 0.00
-    --entropy-coef 0.00
+    --use-rollout-logprobs
     --eps-clip 3e-4
     --eps-clip-high 4e-4
 
