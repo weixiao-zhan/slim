@@ -160,13 +160,16 @@ class QuantizerFP8(Quantizer):
 
     @classmethod
     def from_quant_config(cls, qc):
-        if not qc.get("weight_block_size"):
-            return None
-        assert qc.get("scale_fmt") != "ue8m0", (
-            "UE8M0 scale format is unsupported for FP8 weight sync; use a standard fp8 "
-            "block recipe such as the Qwen3.5 official FP8 checkpoints, and ensure the "
-            "rollout engine does not enable DeepGEMM UE8M0."
+        assert qc.get("weight_block_size"), (
+            "FP8 weight sync only support per-block. Sglang has special per-tensor/per-channel transformation."
         )
+        assert qc.get("activation_scheme", "dynamic") == "dynamic", (
+            "FP8 weight sync only support dynamic activation quantization."
+        )
+        # TODO(blackwell)
+        # sglang on Blackwell has to DeepGEMM and Trition backend
+        # DeepGEMM only supports 128x128 + UE8M0 scales
+        # Triton supports other block size + fp32 scale
         return cls(list(qc["weight_block_size"]), list(qc.get("modules_to_not_convert") or []))
 
     def quantize(self, name, param):

@@ -139,11 +139,33 @@ def test_maybe_from_checkpoint_non_fp8_returns_none():
         assert Quantizer.maybe_from_checkpoint(d) is None
 
 
-def test_maybe_from_checkpoint_rejects_ue8m0():
+def test_maybe_from_checkpoint_rejects_non_block_fp8():
+    # Per-tensor FP8 (no weight_block_size) must fail-fast, not silently push BF16:
+    # sglang transposes + requants per-tensor/channel weights at load time, which the
+    # sync path's load_weights does not re-run, so it would desync.
     with tempfile.TemporaryDirectory() as d:
-        _write_config(d, {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"})
+        _write_config(d, {"quant_method": "fp8"})
         with pytest.raises(AssertionError):
             Quantizer.maybe_from_checkpoint(d)
+
+
+def test_maybe_from_checkpoint_rejects_static_activation():
+    with tempfile.TemporaryDirectory() as d:
+        _write_config(
+            d,
+            {"quant_method": "fp8", "weight_block_size": [128, 128], "activation_scheme": "static"},
+        )
+        with pytest.raises(AssertionError):
+            Quantizer.maybe_from_checkpoint(d)
+
+
+def test_maybe_from_checkpoint_accepts_ue8m0_block():
+    # UE8M0 is no longer rejected at config read; the Blackwell caveat is documented in
+    # QuantizerFP8.from_quant_config instead (sync stays correct on Ada/Hopper).
+    with tempfile.TemporaryDirectory() as d:
+        _write_config(d, {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"})
+        qz = Quantizer.maybe_from_checkpoint(d)
+        assert isinstance(qz, QuantizerFP8) and qz.block_size == [128, 128]
 
 
 def test_maybe_from_checkpoint_builds_for_block_fp8():

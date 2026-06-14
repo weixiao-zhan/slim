@@ -11,7 +11,7 @@ run_train "
     --num-rollout 200
     --rollout-batch-size 32
     --n-samples-per-prompt 16
-    --max-context-len 2048
+    --max-context-len 16384
     --rollout-temperature 1
     --num-steps-per-rollout 1
     --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
@@ -26,27 +26,25 @@ run_train "
     --eval-n-samples-per-prompt 1
 
     --rollout-num-gpus-per-engine 1
-    --sglang-mem-fraction-static 0.6
+    --sglang-mem-fraction-static 0.8
     --sglang-attention-backend fa3
-    --sglang-mm-enable-dp-encoder
     --rollout-fault-tolerance
+    --colocate
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node 8
     --attn-implementation flash_attention_3
+    --master-weight-dtype fp32
+    --compute-dtype bf16
     --gradient-checkpointing
-    --colocate
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 16384
+    --max-tokens-per-gpu 32768
     --use-peft
     --peft-config '{\"r\": 128, \"lora_alpha\": 256, \"target_modules\": \"all-linear\"}'
 
     --advantage-estimator gspo
     --disable-grpo-std-normalization
-    --kl-loss-coef 0.00
-    --kl-loss-type low_var_kl
-    --kl-coef 0.00
-    --entropy-coef 0.00
+    --use-rollout-logprobs
     --eps-clip 3e-4
     --eps-clip-high 4e-4
 

@@ -1,27 +1,30 @@
-"""Prepare mixed math (text) + geometry (VLM) dataset for hybrid GRPO training.
+"""Prepare a mixed math (text) + geometry (vision) dataset for hybrid GRPO training.
 
-Combines:
+Combines two well-understood, fast-to-fetch sources:
   - open-r1/DAPO-Math-17k-Processed (English, text-only math)
-  - hiyouga/geometry3k (geometry with images)
+  - hiyouga/geometry3k              (geometry reasoning with images)
 
-All prompts use VLM processor format (content as list of {type, text} dicts).
-Image blocks use {"type": "image", "text": ""} for Arrow schema compatibility;
-the Qwen VL processor produces identical output with or without the text key.
+All prompts use VLM processor format (content as list of {type, text} dicts). Image blocks
+use {"type": "image", "text": ""} for Arrow schema compatibility; the Qwen VL processor
+produces identical output with or without the text key.
 
-Outputs:
-  train.parquet      — mixed text + vision (for training)
-  test_math.parquet  — text-only math (for eval)
-  test_geo3k.parquet — vision geometry (for eval)
+Outputs (the geometry split is the "vision" eval task, so the test scripts' eval keys and
+paths stay unchanged):
+  ~/datasets/mixed/train.parquet        — mixed text + vision (for training)
+  ~/datasets/mixed/test_math.parquet    — text-only math (for eval)
+  ~/datasets/mixed/test_vision.parquet  — geometry vision reasoning (for eval)
 
 Usage:
-    uv run python tests/prepare_mixed_math_vlm.py
+    uv run python tests/prepare_mixed.py
 """
 
 from pathlib import Path
 
-from datasets import Features, Image, Sequence, Value, concatenate_datasets, load_dataset
+from datasets import Image, Sequence, concatenate_datasets, load_dataset
 
-OUT_DIR = Path.home() / "datasets" / "mixed_math_vlm"
+OUT_DIR = Path.home() / "datasets" / "mixed"
+
+N_MATH_TEST = 500  # held-out text-math eval rows; the rest of DAPO is training
 
 
 def transform_dapo(row):
@@ -46,7 +49,7 @@ def transform_dapo(row):
 
 
 def transform_geo3k(row):
-    """Vision math problem with image in VLM format."""
+    """Vision geometry problem with one image in VLM format."""
     text = row["problem"].replace("<image>", "").strip()
     row["prompt"] = [
         {
@@ -70,15 +73,22 @@ def transform_geo3k(row):
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Text-only math — hold out 500 for test
-    dapo_all = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
-    dapo_all = dapo_all.shuffle(seed=42)
+    # ---- Text-only math: DAPO-Math-17k (hold out N_MATH_TEST for eval) ----
+    dapo_all = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train").shuffle(seed=42)
     cols_to_drop = [c for c in dapo_all.column_names if c not in ("prompt", "label", "images")]
-    dapo_test = dapo_all.select(range(500)).map(transform_dapo, remove_columns=cols_to_drop).cast_column("images", Sequence(Image()))
-    dapo_train = dapo_all.select(range(500, len(dapo_all))).map(transform_dapo, remove_columns=cols_to_drop).cast_column("images", Sequence(Image()))
+    dapo_test = (
+        dapo_all.select(range(N_MATH_TEST))
+        .map(transform_dapo, remove_columns=cols_to_drop)
+        .cast_column("images", Sequence(Image()))
+    )
+    dapo_train = (
+        dapo_all.select(range(N_MATH_TEST, len(dapo_all)))
+        .map(transform_dapo, remove_columns=cols_to_drop)
+        .cast_column("images", Sequence(Image()))
+    )
     print(f"DAPO-Math-17k (en): {len(dapo_train)} train, {len(dapo_test)} test")
 
-    # Vision math
+    # ---- Vision geometry: Geometry3K ----
     geo3k = load_dataset("hiyouga/geometry3k")
     geo3k_train = geo3k["train"].map(transform_geo3k).select_columns(["prompt", "label", "images"])
     geo3k_test = geo3k["test"].map(transform_geo3k).select_columns(["prompt", "label", "images"])
@@ -93,8 +103,8 @@ def main():
     dapo_test.to_parquet(OUT_DIR / "test_math.parquet")
     print(f"Wrote test_math.parquet ({len(dapo_test)} rows)")
 
-    geo3k_test.to_parquet(OUT_DIR / "test_geo3k.parquet")
-    print(f"Wrote test_geo3k.parquet ({len(geo3k_test)} rows)")
+    geo3k_test.to_parquet(OUT_DIR / "test_vision.parquet")
+    print(f"Wrote test_vision.parquet ({len(geo3k_test)} rows)")
 
 
 if __name__ == "__main__":
