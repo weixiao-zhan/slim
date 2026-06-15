@@ -12,8 +12,8 @@ def compute_mismatch_metrics(
 
     for train_lp, rollout_lp, lm in zip(train_log_probs, rollout_log_probs, loss_masks, strict=False):
         log_ratio = train_lp - rollout_lp
-        k3_kl = torch.exp(log_ratio) - log_ratio - 1
-        metrics.setdefault("k3_kl", []).append(k3_kl)
+        kl_k3 = torch.exp(log_ratio) - log_ratio - 1
+        metrics.setdefault("kl_k3", []).append(kl_k3)
         metrics.setdefault("log_prob_abs_diff", []).append(log_ratio.abs())
 
     return None, loss_masks, metrics

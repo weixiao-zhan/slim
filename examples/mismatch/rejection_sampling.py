@@ -52,9 +52,6 @@ def compute_rejection_sampling_masks(
             if catastrophic.any():
                 modified_mask = modified_mask * 0.0
 
-        k3_kl = torch.exp(torch.clamp(log_ratio, -SAFETY_BOUND, SAFETY_BOUND)) - log_ratio - 1
-        metrics.setdefault("k3_kl", []).append(k3_kl)
-        metrics.setdefault("log_prob_abs_diff", []).append(log_ratio.abs())
         metrics.setdefault("rs_ratio", []).append(ratio)
         metrics.setdefault("rs_keep", []).append(modified_mask)
         modified_masks.append(modified_mask.detach())

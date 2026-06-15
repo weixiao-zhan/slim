@@ -1045,6 +1045,11 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
             return
 
     log_dict = {**(rollout_extra_metrics or {})}
+    if episodes:
+        raw_rewards = [getattr(ep, "raw_reward", ep.reward) for ep in episodes]
+        log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
+    if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
+        log_dict["rollout/rollout_log_probs"] = rollout_log_probs
     log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), "rollout/")
     log_dict |= dict_add_prefix(_compute_perf_metrics(args, episodes, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")
@@ -1056,15 +1061,20 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
     """Mean over samples of each sample's mean rollout log-prob across response tokens.
 
-    Mirrors the train-side rollout/rollout_log_probs metric (actor._log_rollout_data).
+    This belongs to rollout logging because these log-probs are emitted by the
+    rollout engine before actor-side training diagnostics are computed.
     """
     per_sample_means = []
     for ep in episodes:
         if ep.rollout_log_probs is None:
             continue
-        mask = ep.loss_mask.float()
+        log_probs = torch.as_tensor(ep.rollout_log_probs, dtype=torch.float32)
+        if ep.loss_mask is None:
+            mask = torch.ones_like(log_probs, dtype=torch.float32)
+        else:
+            mask = torch.as_tensor(ep.loss_mask, dtype=torch.float32)
         denom = mask.sum().clamp_min(1)
-        per_sample_means.append(((ep.rollout_log_probs * mask).sum() / denom).item())
+        per_sample_means.append(((log_probs * mask).sum() / denom).item())
     if not per_sample_means:
         return None
     return sum(per_sample_means) / len(per_sample_means)
