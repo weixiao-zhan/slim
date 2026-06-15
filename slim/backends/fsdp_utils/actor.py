@@ -19,7 +19,6 @@ from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.quant import Quantizer
 from slim.utils.logging_utils import init_tracking
 from slim.utils.memory_utils import clear_memory, print_memory
-from slim.utils.metric_utils import compute_rollout_step
 from slim.utils.ppo_utils import (
     compute_approx_kl,
     compute_gspo_kl,
@@ -683,13 +682,9 @@ class FSDPTrainRayActor(TrainRayActor):
             compute_total_fwd_flops=None,
         )
 
-    def _log_rollout_data(self, rollout_id: int, episodes: list[Episode], packed_batches):
+    def _log_actor_train_metrics(self, packed_batches):
         log_dict = {}
-        if dist.get_rank() == 0 and episodes:
-            raw_rewards = [getattr(ep, "raw_reward", ep.reward) for ep in episodes]
-            log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
-
-        for metric_key in ["actor_old_log_probs", "rollout_log_probs", "ref_log_probs", "advantages", "returns"]:
+        for metric_key in ["actor_old_log_probs", "ref_log_probs", "advantages", "returns"]:
             if metric_key not in packed_batches[0]:
                 continue
             val = torch.tensor([0.0], device=torch.cuda.current_device())
@@ -703,12 +698,12 @@ class FSDPTrainRayActor(TrainRayActor):
                     else:
                         val += unpacked_batch[metric_key]
             dist.all_reduce(val, op=dist.ReduceOp.SUM, group=self.dp_group)
-            log_dict[f"rollout/{metric_key}"] = (
+            log_dict[f"train/{metric_key}"] = (
                 val / (self.args.n_samples_per_prompt * self.args.rollout_batch_size)
             ).item()
         if dist.get_rank() == 0:
-            logger.info(f"rollout {rollout_id}: {log_dict}")
-            log_dict["rollout/step"] = compute_rollout_step(self.args, rollout_id)
+            logger.info(f"actor train metrics: {log_dict}")
+            log_dict["train/step"] = self.global_step
             logging_utils.log(self.args, log_dict)
 
     def _train_core(
@@ -749,7 +744,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if self._needs_actor_old_log_probs() and "actor_old_log_probs" not in packed_batches[0]:
                 self._compute_log_prob("actor", packed_batches, store_prefix="actor_old_")
 
-            self._log_rollout_data(rollout_id, episodes, packed_batches)
+            self._log_actor_train_metrics(packed_batches)
 
             with timer("actor_train"):
                 reported_accum: dict[str, list[torch.Tensor]] = {}
@@ -955,18 +950,20 @@ class FSDPTrainRayActor(TrainRayActor):
 
         advantages = advantages.to(device=log_probs.device)
         old_log_probs = old_log_probs.to(device=log_probs.device)
-        ppo_kl = old_log_probs - log_probs
+        pg_kl = old_log_probs - log_probs
 
         if self.args.advantage_estimator == "gspo":
-            ppo_kl = compute_gspo_kl(
+            pg_kl = compute_gspo_kl(
                 full_log_probs=[batch["cur_log_probs"] for batch in unpacked_batches],
                 full_old_log_probs=[batch[old_log_prob_key] for batch in unpacked_batches],
                 local_log_probs=[batch["cur_log_probs"] for batch in unpacked_batches],
                 loss_masks=loss_masks,
             )
 
+        pg_kl_k3 = torch.exp(-pg_kl) + pg_kl - 1
+
         pg_loss, pg_clipfrac = compute_policy_loss(
-            ppo_kl,
+            pg_kl,
             log_probs,
             advantages,
             self.args.eps_clip,
@@ -975,49 +972,45 @@ class FSDPTrainRayActor(TrainRayActor):
             self.args.eps_clip_c,
         )
 
-        def _has_rollout_log_probs(batch) -> bool:
-            rollout_tensor = batch.get("rollout_log_probs")
-            return isinstance(rollout_tensor, torch.Tensor) and rollout_tensor.numel() > 0
+        def _has_nonempty_tensor(batch, key: str) -> bool:
+            tensor = batch.get(key)
+            return isinstance(tensor, torch.Tensor) and tensor.numel() > 0
 
-        has_rollout_log_probs = all(_has_rollout_log_probs(batch) for batch in unpacked_batches)
-        rollout_log_probs = (
-            torch.cat([batch["rollout_log_probs"] for batch in unpacked_batches], dim=0)
-            if has_rollout_log_probs
-            else None
-        )
-
-        def _has_actor_old_log_probs(batch) -> bool:
-            actor_old_tensor = batch.get("actor_old_log_probs")
-            return isinstance(actor_old_tensor, torch.Tensor) and actor_old_tensor.numel() > 0
-
-        has_actor_old_log_probs = all(_has_actor_old_log_probs(batch) for batch in unpacked_batches)
-        actor_old_log_probs = (
-            torch.cat([batch["actor_old_log_probs"] for batch in unpacked_batches], dim=0)
-            if has_actor_old_log_probs
-            else None
-        )
+        has_rollout_log_probs = all(_has_nonempty_tensor(batch, "rollout_log_probs") for batch in unpacked_batches)
+        has_actor_old_log_probs = all(_has_nonempty_tensor(batch, "actor_old_log_probs") for batch in unpacked_batches)
 
         mismatch_loss_masks = loss_masks
+        mismatch_weights = None
+        mismatch_modified_masks = loss_masks
         mismatch_metrics = {}
-        run_mismatch = self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics
-        if run_mismatch:
-            if not has_rollout_log_probs or not has_actor_old_log_probs:
-                raise KeyError("mismatch correction requires rollout_log_probs and actor_old_log_probs.")
+        has_mismatch_log_probs = has_rollout_log_probs and has_actor_old_log_probs
+        if has_mismatch_log_probs:
             from slim.utils.mismatch import compute_mismatch_metrics
 
-            if self.args.custom_mismatch_correction_function_path is not None:
-                from slim.utils.misc import load_function
-
-                mismatch_func = load_function(self.args.custom_mismatch_correction_function_path)
-            else:
-                mismatch_func = compute_mismatch_metrics
-
-            mismatch_weights, mismatch_modified_masks, mismatch_metrics = mismatch_func(
+            _, _, mismatch_metrics = compute_mismatch_metrics(
                 args=self.args,
                 train_log_probs=[batch["actor_old_log_probs"] for batch in unpacked_batches],
                 rollout_log_probs=[batch["rollout_log_probs"] for batch in unpacked_batches],
                 loss_masks=loss_masks,
             )
+
+        run_mismatch = self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics
+        if run_mismatch:
+            if not has_mismatch_log_probs:
+                raise KeyError("mismatch correction requires rollout_log_probs and actor_old_log_probs.")
+
+            if self.args.custom_mismatch_correction_function_path is not None:
+                from slim.utils.misc import load_function
+
+                mismatch_func = load_function(self.args.custom_mismatch_correction_function_path)
+                mismatch_weights, mismatch_modified_masks, custom_mismatch_metrics = mismatch_func(
+                    args=self.args,
+                    train_log_probs=[batch["actor_old_log_probs"] for batch in unpacked_batches],
+                    rollout_log_probs=[batch["rollout_log_probs"] for batch in unpacked_batches],
+                    loss_masks=loss_masks,
+                )
+                if custom_mismatch_metrics:
+                    mismatch_metrics |= custom_mismatch_metrics
             if self.args.mismatch_correction != "none" and mismatch_weights is not None:
                 flat_weights = torch.cat(mismatch_weights, dim=0).to(device=pg_loss.device)
                 pg_loss = pg_loss * flat_weights
@@ -1027,18 +1020,11 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.calculate_per_token_loss:
             pg_loss = sum_of_token(pg_loss, edge_lengths, mismatch_loss_masks)
             pg_clipfrac = sum_of_token(pg_clipfrac, edge_lengths, loss_masks)
-            ppo_kl = sum_of_token(ppo_kl.abs(), edge_lengths, loss_masks)
+            pg_kl_k3 = sum_of_token(pg_kl_k3, edge_lengths, loss_masks)
         else:
             pg_loss = sum_of_sample_mean(pg_loss, edge_lengths, mismatch_loss_masks)
             pg_clipfrac = sum_of_sample_mean(pg_clipfrac, edge_lengths, loss_masks)
-            ppo_kl = sum_of_sample_mean(ppo_kl.abs(), edge_lengths, loss_masks)
-
-        train_rollout_logprob_abs_diff = None
-        if actor_old_log_probs is not None and rollout_log_probs is not None:
-            train_rollout_logprob_abs_diff = (actor_old_log_probs.to(device=log_probs.device) - rollout_log_probs).abs()
-            train_rollout_logprob_abs_diff = sum_of_sample_mean(
-                train_rollout_logprob_abs_diff, edge_lengths, loss_masks
-            ).detach()
+            pg_kl_k3 = sum_of_sample_mean(pg_kl_k3, edge_lengths, loss_masks)
 
         if need_full_log_probs:
             entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
@@ -1067,14 +1053,11 @@ class FSDPTrainRayActor(TrainRayActor):
             "loss": loss.detach(),
             "pg_loss": pg_loss.detach(),
             "pg_clipfrac": pg_clipfrac.detach(),
-            "ppo_kl": ppo_kl.detach(),
+            "pg_kl_k3": pg_kl_k3.detach(),
             "entropy_loss": entropy_loss.detach(),
         }
 
-        if train_rollout_logprob_abs_diff is not None:
-            reported["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff
-
-        if run_mismatch:
+        if mismatch_metrics:
             for key, values in mismatch_metrics.items():
                 flat_v = torch.cat(values, dim=0)
                 reported[f"mismatch/{key}"] = sum_of_sample_mean(flat_v, edge_lengths, loss_masks).detach()

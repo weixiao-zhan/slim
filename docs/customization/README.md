@@ -228,7 +228,7 @@ Tune rejection sampling constants directly in `examples/mismatch/rejection_sampl
 
 **Default**: `None`
 
-**Purpose**: Customize the reduction of pg_loss while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean.
+**Purpose**: Customize the reduction of pg_loss while other metrics (pg_clipfrac, pg_kl_k3, entropy_loss, etc.) still use the default sum_of_sample_mean.
 
 **Signature**:
 ```python
