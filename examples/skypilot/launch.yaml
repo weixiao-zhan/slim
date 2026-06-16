@@ -34,8 +34,8 @@ run: | # shell
   if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
     uv run hf download "Qwen/${MODEL_NAME}" --local-dir "${HOME}/models/${MODEL_NAME}"
   fi
-  if [ ! -f "${HOME}/datasets/mixed_math_vlm/train.parquet" ]; then
-    uv run python tests/prepare_mixed_math_vlm.py
+  if [ ! -f "${HOME}/datasets/mixed/train.parquet" ]; then
+    uv run python tests/prepare_mixed.py
   fi
 
   # =========================================================================
@@ -112,7 +112,7 @@ run: | # shell
   # Head node: submit training job
   # =========================================================================
   MODEL_DIR="${HOME}/models/${MODEL_NAME}"
-  DATASET_DIR="${HOME}/datasets/mixed_math_vlm"
+  DATASET_DIR="${HOME}/datasets/mixed"
   OUTPUT_DIR="${HOME}/outputs/grpo-mixed-math-vlm-${MODEL_NAME,,}"
 
   # Wandb args (only if WANDB_API_KEY is set)
@@ -153,7 +153,7 @@ run: | # shell
     --rollout-shuffle \
     --eval-log-passrate \
     --eval-interval 20 \
-    --eval-prompt-data math ${DATASET_DIR}/test_math.parquet geo3k ${DATASET_DIR}/test_geo3k.parquet \
+    --eval-prompt-data math ${DATASET_DIR}/test_math.parquet vision ${DATASET_DIR}/test_vision.parquet \
     --eval-n-samples-per-prompt 1 \
     \
     --rollout-num-gpus-per-engine 1 \

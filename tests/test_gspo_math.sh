@@ -2,27 +2,25 @@
 # GSPO on math (DAPO-17k). 8 actor GPUs colocated with rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${LLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
-DATASET_DIR="${LLM_DATASET_DIR:-$HOME/datasets/dapo17k}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-dapo17k-qwen35-2b}"
+MODEL_DIR="$HOME/models/Qwen3.5-4B"
+DATASET_DIR="$HOME/datasets/dapo17k"
+SAVE_DIR="$HOME/outputs/gspo-dapo17k-qwen35-4b"
 
 start_ray
 run_train "
     --num-rollout 200
-    --rollout-batch-size 16
-    --n-samples-per-prompt 16
-    --max-context-len 16384
+    --rollout-batch-size 64
+    --n-samples-per-prompt 8
+    --max-context-len 8192
     --rollout-temperature 1
     --num-steps-per-rollout 1
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
-    --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.8
-    --sglang-attention-backend fa3
     --rollout-fault-tolerance
     --colocate
 
@@ -33,7 +31,7 @@ run_train "
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 32768
+    --max-tokens-per-gpu 16384
 
     --advantage-estimator gspo
     --disable-rewards-std-normalization
@@ -42,7 +40,7 @@ run_train "
     --eps-clip-high 4e-4
 
     --optimizer adam
-    --lr 1e-5
+    --lr 3e-6
     --lr-warmup-iters 10
     --lr-decay-style constant
     --weight-decay 0.1
@@ -53,5 +51,5 @@ run_train "
     --save $SAVE_DIR
     --save-interval 20
 
-    $(wandb_args gspo-dapo17k-qwen35-2b)
+    $(wandb_args gspo-dapo17k-qwen35-4b)
 "

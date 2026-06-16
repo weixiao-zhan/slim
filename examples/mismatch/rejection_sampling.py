@@ -1,3 +1,7 @@
+# Enable with:
+#   --mismatch-correction custom --custom-mismatch-correction-function-path \
+#     examples.mismatch.rejection_sampling.compute_rejection_sampling_masks
+# (requires --old-logprob-source actor; tune the RS_* constants below).
 import torch
 
 

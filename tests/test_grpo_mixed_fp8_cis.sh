@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-$HOME/models/Qwen3.5-4B-Base}"
-DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/mixed}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/grpo-mix-cis-qwen35-4b}"
+BF16_MODEL_DIR="$HOME/models/Qwen3.5-4B"
+FP8_MODEL_DIR="$HOME/models/Qwen3.5-4B-FP8"
+DATASET_DIR="$HOME/datasets/mixed"
+SAVE_DIR="$HOME/outputs/grpo-mixed-cis-qwen35-4b-fp8"
 
 start_ray
 run_train "
-    --num-rollout 20
+    --num-rollout 40
     --rollout-batch-size 64
     --n-samples-per-prompt 8
-    --max-context-len 32768
+    --max-context-len 8192
+    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
     --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
@@ -19,16 +21,14 @@ run_train "
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
+
     --eval-log-passrate
     --eval-interval 20
     --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
-    --eval-n-samples-per-prompt 2
+    --eval-n-samples-per-prompt 1
 
     --rollout-num-gpus-per-engine 1
-    --rollout-concurrency-per-engine 64
     --sglang-mem-fraction-static 0.8
-    --sglang-max-running-requests 48
-    --sglang-attention-backend fa3
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
     --rollout-fault-tolerance
@@ -41,7 +41,7 @@ run_train "
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 32768
+    --max-tokens-per-gpu 16384
 
     --advantage-estimator grpo
     --disable-rewards-std-normalization
@@ -58,8 +58,10 @@ run_train "
     --adam-beta1 0.9
     --adam-beta2 0.98
 
-    --hf-checkpoint $MODEL_DIR
+    --hf-checkpoint $FP8_MODEL_DIR
+    --load $BF16_MODEL_DIR
     --save $SAVE_DIR
+    --save-interval 10
 
-    $(wandb_args grpo-mix-cis-qwen35-4b)
+    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8)
 "
