@@ -207,6 +207,53 @@ def patch_sglang_base_processor(base_processor: Path) -> bool:
     )
 
 
+def _install_configs(src_root: Path, dst_root: Path, label: str) -> int:
+    """Mirror every *.json under `src_root` into `dst_root`, preserving subdirs.
+
+    Idempotent: a destination file is written only if missing or differing. Returns
+    the number of files copied.
+    """
+    import shutil
+
+    if not src_root.is_dir():
+        return 0
+    copied = 0
+    for src in src_root.rglob("*.json"):
+        dst = dst_root / src.relative_to(src_root)
+        if dst.exists() and dst.read_bytes() == src.read_bytes():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        copied += 1
+    if copied:
+        print(f"  Applied: installed {copied} {label} config(s) into sglang")
+    else:
+        print(f"  Skipped: {label} configs already installed")
+    return copied
+
+
+def install_triton_configs(sglang_dir: Path) -> None:
+    """Copy in-repo tuned Triton configs into sglang's kernel config dirs.
+
+    Source of truth is two in-repo dirs (version controlled, survive sglang upgrades):
+      - tools/triton_moe_configs/triton_<ver>/E=*.json -> moe_runner triton_utils configs
+        (fused-MoE kernel, keyed by triton version dir)
+      - tools/triton_fp8_configs/N=*.json              -> quantization configs (flat)
+        (block-FP8 W8A8 GEMM; loader has no env override, so the file must live there)
+    """
+    repo_root = Path(__file__).resolve().parent
+    _install_configs(
+        repo_root / "tools" / "triton_moe_configs",
+        sglang_dir / "srt" / "layers" / "moe" / "moe_runner" / "triton_utils" / "configs",
+        "Triton MoE",
+    )
+    _install_configs(
+        repo_root / "tools" / "triton_fp8_configs",
+        sglang_dir / "srt" / "layers" / "quantization" / "configs",
+        "Triton FP8 GEMM",
+    )
+
+
 def relax_ptrace_scope() -> None:
     """Set kernel.yama.ptrace_scope=0 (needed for Torch CUDA IPC weight sync).
 
@@ -240,6 +287,7 @@ def main() -> int:
     patch_transformers_flash_attention()
     patch_sglang_qwen_vl(qwen_vl)
     patch_sglang_base_processor(base_processor)
+    install_triton_configs(sglang_dir)
 
     py_compile.compile(str(base_processor), doraise=True)
     py_compile.compile(str(qwen_vl), doraise=True)
