@@ -118,7 +118,6 @@ class ServerGroup:
             env_vars = get_nvidia_ld_library_path() | {name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST} | {
                 key: os.environ.get(key, default_val)
                 for key, default_val in {
-                    "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "false",
                     "SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK": "false",
                     "SGLANG_MEMORY_SAVER_CUDA_GRAPH": "true",
                     "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_FALLBACK_VARIANT": "true",

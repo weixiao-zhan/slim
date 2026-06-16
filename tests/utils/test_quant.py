@@ -19,15 +19,14 @@ from slim.utils.quant import (
     make_keep_predicate,
     module_path_match,
     parse_quant_recipe,
-    quant_fp8,
 )
 
 
 def test_online_matches_offline_bit_identical():
-    """QuantizerFP8.quantize == quant_fp8/block_fp8, bit-for-bit."""
+    """QuantizerFP8.quantize == block_fp8, bit-for-bit (fp32 scales)."""
     torch.manual_seed(0)
     w = torch.randn(384, 256, dtype=torch.bfloat16)
-    q_off, s_off = quant_fp8(w, "block", [128, 128])
+    q_off, s_off = block_fp8(w, [128, 128])
 
     qz = QuantizerFP8([128, 128], ["lm_head", "linear_attn", "visual"])
     out = qz.quantize("model.language_model.layers.5.self_attn.o_proj.weight", w)
@@ -57,6 +56,26 @@ def test_block_fp8_handles_non_128_multiple_via_padding():
     w = torch.randn(130, 100, dtype=torch.bfloat16)
     q, s = block_fp8(w, [128, 128])
     assert q.shape == (130, 100) and s.shape == (2, 1)
+
+
+def test_block_fp8_ue8m0_scales_are_powers_of_two():
+    """ue8m0 scales are float32 powers of two; weights stay e4m3, same shape as fp32 path."""
+    w = torch.randn(256, 384, dtype=torch.bfloat16)
+    q, s = block_fp8(w, [128, 128], scale_fmt="ue8m0")
+    assert q.shape == (256, 384) and q.dtype == torch.float8_e4m3fn
+    assert s.shape == (2, 3) and s.dtype == torch.float32
+    # every scale is exactly 2**k: mantissa bits are zero
+    bits = s.view(torch.int32)
+    assert torch.equal(bits & 0x7FFFFF, torch.zeros_like(bits))
+    deq = (q.to(torch.float32).reshape(2, 128, 3, 128) * s.reshape(2, 1, 3, 1)).reshape(256, 384)
+    rel = (deq - w.float()).abs().max() / w.float().abs().max()
+    assert rel < 0.2  # power-of-two rounding is lossier than fp32 scales
+
+
+def test_block_fp8_ue8m0_requires_128_blocks():
+    w = torch.randn(256, 256, dtype=torch.bfloat16)
+    with pytest.raises(ValueError):
+        block_fp8(w, [64, 128], scale_fmt="ue8m0")
 
 
 @pytest.mark.parametrize(
@@ -122,8 +141,9 @@ def test_parse_quant_recipe_fp8_block():
             "modules_to_not_convert": ["lm_head"],
         }
     )
-    assert recipe["strategy"] == "block" and recipe["block_size"] == [128, 128]
+    assert recipe["block_size"] == [128, 128]
     assert recipe["keep_patterns"] == ["lm_head"]
+    assert recipe["scale_fmt"] is None
 
 
 def _write_config(d, quantization_config):
@@ -166,6 +186,7 @@ def test_maybe_from_checkpoint_accepts_ue8m0_block():
         _write_config(d, {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"})
         qz = Quantizer.maybe_from_checkpoint(d)
         assert isinstance(qz, QuantizerFP8) and qz.block_size == [128, 128]
+        assert qz.scale_fmt == "ue8m0"
 
 
 def test_maybe_from_checkpoint_builds_for_block_fp8():

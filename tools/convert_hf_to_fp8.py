@@ -1,14 +1,17 @@
-"""Quantize a BF16 HF safetensors model to FP8, mimicking a reference recipe.
+"""Quantize a BF16 HF safetensors model to block-FP8, mimicking a reference recipe.
 
-The recipe (strategy, block size, activation_scheme, scale_fmt, and the exact
+The recipe (block size, activation_scheme, scale_fmt, and the exact
 `modules_to_not_convert` keep-list) is always read from a reference FP8 model's
 `quantization_config` via --ref-config, so the produced checkpoint matches the
-target FP8 model's layer selection exactly. Explicit --strategy / --block-size /
---scale-fmt override the corresponding values derived from the reference config.
+target FP8 model's layer selection exactly. Explicit --block-size / --scale-fmt
+override the corresponding values derived from the reference config.
+
+Only block-FP8 is supported (e4m3, NxK blocks, per-block `*.weight_scale_inv`),
+matching slim's online rollout weight-sync. Per-tensor / per-channel FP8 are not
+supported.
 
 python tools/convert_hf_to_fp8.py --model-dir MODEL_DIR --save-dir SAVE_DIR --ref-config REF_CONFIG
-                           [--strategy {block,channel,tensor}] [--block-size [BLOCK_SIZE ...]]
-                           [--scale-fmt {ue8m0}] [--max-workers MAX_WORKERS]
+                           [--block-size [BLOCK_SIZE ...]] [--scale-fmt {ue8m0}] [--max-workers MAX_WORKERS]
 
 options:
   -h, --help            show this help message and exit
@@ -18,9 +21,9 @@ options:
   --ref-config REF_CONFIG
                         Reference FP8 model dir (or its config.json) whose
                         `quantization_config` defines the recipe and keep-list. Required.
-  --strategy {block,channel,tensor}
   --block-size [BLOCK_SIZE ...]
                         eg. --block-size 128 128
+  --scale-fmt {ue8m0}   Round per-block scales up to a power of two (DeepGEMM style).
   --max-workers MAX_WORKERS
                         Number of worker threads for parallel processing
 """
@@ -38,7 +41,7 @@ import safetensors.torch
 import torch
 from tqdm import tqdm
 
-from slim.utils.quant import make_keep_predicate, module_name_of, parse_quant_recipe, quant_fp8
+from slim.utils.quant import block_fp8, make_keep_predicate, module_name_of, parse_quant_recipe
 
 
 def load_quant_recipe(ref_config):
@@ -68,7 +71,7 @@ class ConversionResult:
             self.modules_to_not_convert.extend(module_names)
 
 
-def process_file(input_path, output_path, filename, strategy, block_size, is_kept, result_collector):
+def process_file(input_path, output_path, filename, block_size, scale_fmt, is_kept, result_collector):
     if not filename.endswith(".safetensors"):
         return
 
@@ -88,13 +91,9 @@ def process_file(input_path, output_path, filename, strategy, block_size, is_kep
         do_quant = key.endswith(".weight") and weight.dim() == 2 and not is_kept(module_name)
 
         if do_quant:
-            qw, s = quant_fp8(weight, strategy, block_size)
+            qw, s = block_fp8(weight, block_size, scale_fmt=scale_fmt)
             q_weights[key] = qw
-            if strategy == "block":
-                scale_name = key.replace(".weight", ".weight_scale_inv")
-            else:
-                scale_name = key.replace(".weight", ".weight_scale")
-            q_weights[scale_name] = s
+            q_weights[key.replace(".weight", ".weight_scale_inv")] = s
         else:
             if key.endswith(".weight"):
                 modules_to_not_convert.append(module_name)
@@ -108,8 +107,7 @@ def process_file(input_path, output_path, filename, strategy, block_size, is_kep
 def convert_fp8(
     input_path,
     output_path,
-    strategy,
-    block_size=None,
+    block_size,
     max_workers=4,
     scale_fmt=None,
     keep_patterns=(),
@@ -133,7 +131,7 @@ def convert_fp8(
         futures = []
         for filename in safetensors_files:
             future = executor.submit(
-                process_file, input_path, output_path, filename, strategy, block_size, is_kept, result_collector
+                process_file, input_path, output_path, filename, block_size, scale_fmt, is_kept, result_collector
             )
             futures.append(future)
 
@@ -146,56 +144,16 @@ def convert_fp8(
     kept_modules = sorted(set(result_collector.modules_to_not_convert) | set(keep_patterns))
     print(f"  Kept {len(result_collector.modules_to_not_convert)} source modules in source dtype; quantized the rest.")
 
-    if strategy == "block" or strategy == "tensor":
-        quantization_config = {
-            "activation_scheme": activation_scheme,
-            "fmt": fmt,
-            "quant_method": "fp8",
-        }
-        if strategy == "block":
-            quantization_config["weight_block_size"] = block_size
-            if scale_fmt is not None:
-                quantization_config["scale_fmt"] = scale_fmt
-        if len(kept_modules) > 0:
-            quantization_config["modules_to_not_convert"] = kept_modules
-    else:
-        quant_group = {
-            "group_0": {
-                "input_activations": {
-                    "actorder": None,
-                    "block_structure": None,
-                    "dynamic": True,
-                    "group_size": None,
-                    "num_bits": 8,
-                    "observer": None,
-                    "observer_kwargs": {},
-                    "strategy": "token",
-                    "symmetric": True,
-                    "type": "float",
-                },
-                "output_activations": None,
-                "targets": ["Linear"],
-                "weights": {
-                    "actorder": None,
-                    "block_structure": None,
-                    "dynamic": False,
-                    "group_size": None,
-                    "num_bits": 8,
-                    "observer": "minmax",
-                    "observer_kwargs": {},
-                    "strategy": strategy,
-                    "symmetric": True,
-                    "type": "float",
-                },
-            },
-        }
-        quantization_config = {
-            "config_groups": quant_group,
-            "format": "float-quantized",
-            "ignore": kept_modules,
-            "quant_method": "compressed-tensors",
-            "quantization_status": "compressed",
-        }
+    quantization_config = {
+        "activation_scheme": activation_scheme,
+        "fmt": fmt,
+        "quant_method": "fp8",
+        "weight_block_size": block_size,
+    }
+    if scale_fmt is not None:
+        quantization_config["scale_fmt"] = scale_fmt
+    if len(kept_modules) > 0:
+        quantization_config["modules_to_not_convert"] = kept_modules
 
     config_path = os.path.join(input_path, "config.json")
     if os.path.exists(config_path):
@@ -216,7 +174,6 @@ if __name__ == "__main__":
     parser.add_argument("--save-dir", type=str, help="Path to the directory to save the converted model.")
     parser.add_argument("--ref-config", type=str, required=True,
                         help="Reference FP8 model dir or config.json whose quantization_config defines the recipe and keep-list.")
-    parser.add_argument("--strategy", type=str, default=None, choices=["block", "channel", "tensor"])
     parser.add_argument("--block-size", type=int, nargs="*", default=None, help="eg. --block-size 128 128")
     parser.add_argument("--max-workers", type=int, default=1, help="Number of worker threads for parallel processing")
     parser.add_argument("--scale-fmt", type=str, default=None, choices=["ue8m0"])
@@ -225,18 +182,19 @@ if __name__ == "__main__":
     recipe = load_quant_recipe(args.ref_config)
 
     # Resolve recipe parameters: explicit CLI flags override the reference config.
-    strategy = args.strategy or recipe["strategy"]
     block_size = args.block_size if args.block_size is not None else recipe["block_size"]
     scale_fmt = args.scale_fmt or recipe.get("scale_fmt")
     keep_patterns = recipe["keep_patterns"]
     activation_scheme = recipe["activation_scheme"]
     fmt = recipe["fmt"]
 
-    if strategy == "block" and not block_size:
-        raise ValueError("Block strategy requires --block-size (or a reference config with weight_block_size).")
+    if not block_size:
+        raise ValueError("Block-FP8 requires --block-size (or a reference config with weight_block_size).")
+    if scale_fmt == "ue8m0" and list(block_size) != [128, 128]:
+        raise ValueError("ue8m0 scales require 128x128 blocks (DeepGEMM constraint).")
 
     print(
-        f"Recipe from {args.ref_config}: strategy={strategy} block_size={block_size} "
+        f"Recipe from {args.ref_config}: block_size={block_size} "
         f"scale_fmt={scale_fmt} keep={len(keep_patterns)} modules"
     )
 
@@ -249,8 +207,7 @@ if __name__ == "__main__":
     convert_fp8(
         args.model_dir,
         args.save_dir,
-        strategy,
-        block_size=block_size,
+        block_size,
         max_workers=args.max_workers,
         scale_fmt=scale_fmt,
         keep_patterns=keep_patterns,
