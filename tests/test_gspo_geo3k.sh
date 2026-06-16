@@ -2,16 +2,16 @@
 # GSPO on Geo3K VLM
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-$HOME/models/Qwen3.5-2B}"
-DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/geo3k}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/gspo-geo3k-qwen35-2b}"
+MODEL_DIR="$HOME/models/Qwen3.5-4B"
+DATASET_DIR="$HOME/datasets/geo3k"
+SAVE_DIR="$HOME/outputs/gspo-geo3k-qwen35-4b"
 
 start_ray
 run_train "
     --num-rollout 50
-    --rollout-batch-size 16
-    --n-samples-per-prompt 16
-    --max-context-len 16384
+    --rollout-batch-size 64
+    --n-samples-per-prompt 8
+    --max-context-len 8192
     --rollout-temperature 1
     --num-steps-per-rollout 1
 
@@ -22,11 +22,9 @@ run_train "
     --eval-interval 20
     --eval-prompt-data geo3k $DATASET_DIR/test.parquet
     --eval-n-samples-per-prompt 1
-    --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.8
-    --sglang-attention-backend fa3
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
     --rollout-fault-tolerance
@@ -39,7 +37,7 @@ run_train "
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 32768
+    --max-tokens-per-gpu 16384
 
     --advantage-estimator gspo
     --disable-rewards-std-normalization
@@ -48,7 +46,7 @@ run_train "
     --eps-clip-high 4e-4
 
     --optimizer adam
-    --lr 1e-5
+    --lr 3e-6
     --lr-warmup-iters 10
     --lr-decay-style constant
     --weight-decay 0.1
@@ -58,5 +56,5 @@ run_train "
     --hf-checkpoint $MODEL_DIR
     --save $SAVE_DIR
 
-    $(wandb_args gspo-geo3k-qwen35-2b)
+    $(wandb_args gspo-geo3k-qwen35-4b)
 "

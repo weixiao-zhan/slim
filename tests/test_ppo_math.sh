@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
-# PPO on math (GSM8K). 4 actor + 4 critic GPUs colocated with 8 rollout.
+# PPO on math (DAPO-17k). 4 actor + 4 critic GPUs colocated with 8 rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${LLM_MODEL_DIR:-$HOME/models/Qwen3-1.7B-Base}"
-DATASET_DIR="${LLM_DATASET_DIR:-$HOME/datasets}"
-SAVE_DIR="${SAVE_DIR:-$HOME/outputs/ppo-gsm8k-qwen3-1.7b}"
+MODEL_DIR="$HOME/models/Qwen3.5-4B"
+DATASET_DIR="$HOME/datasets/dapo17k"
+SAVE_DIR="$HOME/outputs/ppo-dapo17k-qwen35-4b"
 
 start_ray
 run_train "
     --num-rollout 200
-    --rollout-batch-size 32
-    --n-samples-per-prompt 16
-    --max-context-len 16384
+    --rollout-batch-size 64
+    --n-samples-per-prompt 8
+    --max-context-len 8192
     --rollout-temperature 1
     --num-steps-per-rollout 1
 
-    --prompt-data $DATASET_DIR/gsm8k/train.parquet
+    --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
-    --eval-log-passrate
-    --eval-interval 20
-    --eval-prompt-data gsm8k_test $DATASET_DIR/gsm8k/test.parquet
-    --eval-n-samples-per-prompt 1
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.8
-    --sglang-attention-backend fa3
     --rollout-fault-tolerance
     --colocate
 
@@ -38,7 +33,7 @@ run_train "
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 32768
+    --max-tokens-per-gpu 16384
 
     --advantage-estimator ppo_gae
     --gamma 1.0
@@ -50,7 +45,7 @@ run_train "
     --eps-clip-high 0.28
 
     --optimizer adam
-    --lr 1e-5
+    --lr 3e-6
     --critic-lr 5e-5
     --lr-warmup-iters 10
     --lr-decay-style constant
@@ -62,5 +57,5 @@ run_train "
     --save $SAVE_DIR
     --save-interval 20
 
-    $(wandb_args ppo-gsm8k-qwen3-1.7b)
+    $(wandb_args ppo-dapo17k-qwen35-4b)
 "

@@ -6,8 +6,8 @@
 # Toggle replay via: ROUTING_REPLAY=1 (default) | 0
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="${VLM_MODEL_DIR:-/opt/dlami/nvme/models/Qwen3.6-35B-A3B}"
-DATASET_DIR="${VLM_DATASET_DIR:-$HOME/datasets/geo3k}"
+MODEL_DIR="/opt/dlami/nvme/models/Qwen3.6-35B-A3B"
+DATASET_DIR="$HOME/datasets/geo3k"
 ROUTING_REPLAY="${ROUTING_REPLAY:-1}"
 TAG_SUFFIX=$([ "$ROUTING_REPLAY" = "1" ] && echo "replay" || echo "baseline")
 DUMP_DIR="${DUMP_DIR:-$HOME/outputs/routing-replay-qwen35moe-$TAG_SUFFIX}"
