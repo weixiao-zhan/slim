@@ -1,29 +1,26 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8-fp32-profile"
+PROFILE_DIR="$REPO_DIR/outputs/profiles"
 
 start_ray
 run_train "
-    --num-rollout 20
-    --rollout-batch-size 64
-    --n-samples-per-prompt 8
+    --num-rollout 3
+    --rollout-batch-size 8
+    --n-samples-per-prompt 2
     --max-context-len 8192
     --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-    --over-sampling-batch-size 96
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
-    --eval-log-passrate
-    --eval-interval 20
-    --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
-    --eval-n-samples-per-prompt 1
+    --skip-eval-before-train
 
     --rollout-num-gpus-per-engine 1
     --sglang-mem-fraction-static 0.8
@@ -34,12 +31,18 @@ run_train "
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node $NUM_GPUS
-    --attn-implementation flash_attention_3
+    --attn-implementation sdpa
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 16384
+
+    --use-pytorch-profiler
+    --profile-target train_actor
+    --profile-step-start 0
+    --profile-step-end 2
+    --profile-dir $PROFILE_DIR
 
     --advantage-estimator grpo
     --disable-rewards-std-normalization
@@ -50,14 +53,16 @@ run_train "
 
     --optimizer adam
     --lr 3e-6
-    --lr-warmup-iters 10
+    --lr-warmup-iters 1
     --lr-decay-style constant
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.98
 
-    --hf-checkpoint $MODEL_DIR
+    --hf-checkpoint $FP8_MODEL_DIR
+    --load $BF16_MODEL_DIR
     --save $SAVE_DIR
+    --save-interval 100
 
-    $(wandb_args grpo-mixed-cis-qwen35-4b)
+    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8-fp32-profile)
 "

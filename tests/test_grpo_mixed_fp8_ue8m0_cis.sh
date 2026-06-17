@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8-ue8m0"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8-ue8m0"
 
 start_ray
 run_train "
-    --num-rollout 20
+    --num-rollout 40
     --rollout-batch-size 64
     --n-samples-per-prompt 8
     --max-context-len 8192
@@ -20,6 +21,7 @@ run_train "
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
+
     --eval-log-passrate
     --eval-interval 20
     --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
@@ -34,7 +36,7 @@ run_train "
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node $NUM_GPUS
-    --attn-implementation flash_attention_3
+    --attn-implementation sdpa
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
@@ -56,8 +58,10 @@ run_train "
     --adam-beta1 0.9
     --adam-beta2 0.98
 
-    --hf-checkpoint $MODEL_DIR
+    --hf-checkpoint $FP8_MODEL_DIR
+    --load $BF16_MODEL_DIR
     --save $SAVE_DIR
+    --save-interval 10
 
-    $(wandb_args grpo-mixed-cis-qwen35-4b)
+    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8-ue8m0)
 "

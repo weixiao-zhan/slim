@@ -2,9 +2,9 @@
 # GSPO on math (DAPO-17k). 8 actor GPUs colocated with rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$HOME/models/Qwen3.5-4B"
-DATASET_DIR="$HOME/datasets/dapo17k"
-SAVE_DIR="$HOME/outputs/gspo-dapo17k-qwen35-4b"
+MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+DATASET_DIR="$REPO_DIR/datasets/dapo17k"
+SAVE_DIR="$REPO_DIR/outputs/gspo-dapo17k-qwen35-4b"
 
 start_ray
 run_train "
