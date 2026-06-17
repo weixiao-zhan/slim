@@ -62,13 +62,29 @@ ROLLOUT_ARGS=(
 )
 ```
 
-The default rollout path expects canonical dataset rows with a finite supported schema:
-- Required: `prompt`
-- Optional: `label`, `images`, `tools`, `metadata`, `multimodal_inputs`
-
-Avoid adding arbitrary extra top-level dataset columns. Put task-specific auxiliary fields inside `metadata` instead.
-
 The rollout-train constraint: **`(rollout-batch-size x n-samples-per-prompt) = (global-batch-size x num-steps-per-rollout)`**
+
+## Data Format
+
+Datasets are loaded through HuggingFace `datasets`. A `.jsonl` or `.parquet` file is loaded via `load_dataset`, and a directory is loaded as a saved HF dataset via `load_from_disk`. Use `path:split` to pick a split and `@[start:end]` to slice rows, e.g. `path/to/ds:train@[0:100]`.
+
+slim imposes no schema on a row/example and stores the entire row/example verbatim in `episode.example`. The rollout function receives it untouched and decides how to interpret it. So a custom generate / reward function can read whatever columns your task needs.
+
+The **default** generate function (`slim.rollout.sglang_rollout`) looks for these fields in `episode.example`:
+- `prompt` (required) — a plain string (tokenized directly) or a list of chat messages (`apply_chat_template` is applied automatically).
+- `tools` — tool/function definitions passed to the chat template.
+- `images`, `videos`, `audios` — top-level multimodal fields, forwarded to the processor (requires a multimodal checkpoint).
+
+The default reward path additionally reads `label` and `metadata`.
+
+Example data entry:
+```json
+{
+  "prompt": [{"role": "user", "content": "Solve: ..."}],
+  "label": "34",
+  "metadata": {"source": "custom-dataset"}
+}
+```
 
 ## Dynamic Sampling
 
@@ -101,3 +117,4 @@ EVAL_ARGS=(
 - [Speculative Decoding](speculative-decoding.md) -- MTP-based draft model acceleration
 - [Fault Tolerance](fault-tolerance.md) -- Heartbeat-based rollout recovery
 - [PD Disaggregation](pd-disaggregation.md) -- Prefill-decode separation
+- [Low Precision Inference](low-precision.md) -- FP8 rollout

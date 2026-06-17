@@ -376,7 +376,7 @@ slim supports complex agent scenarios (multi-turn interaction, tool calling) by 
 
 ### Three Steps
 
-1. **Data Preparation**: `Episode.from_example(row)` stores the entire dataset row in `episode.example`. The default rollout/reward paths expect columns named `prompt`, `label`, `metadata`, `tools`, and `multimodal_inputs` (see [Episode docs](../README.md#dataset-columns-and-episodeexample)). Custom generate/reward functions can read any column from `episode.example` — there is no fixed schema, so you can use whatever column names your task needs (e.g. `ground_truth` instead of `label`).
+1. **Data Preparation**: `Episode.from_example(row)` stores the entire dataset row in `episode.example`. The default rollout/reward paths read `prompt`, `label`, `metadata`, `tools`, and the top-level multimodal fields `images` / `videos` / `audios` (see [Episode docs](../README.md#dataset-columns-and-episodeexample)). Custom generate/reward functions can read any column from `episode.example` — there is no fixed schema, so you can use whatever column names your task needs (e.g. `ground_truth` instead of `label`).
 
 2. **Custom Generation Function** (`--custom-generate-function-path`):
    ```python

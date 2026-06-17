@@ -32,7 +32,7 @@ The `Episode` class (`slim.utils.types.Episode`) is the single data record that 
 | `prompt` | `str \| list[dict]` | yes | Raw string or chat-format messages. |
 | `label` | `str \| None` | no | Ground-truth label for built-in reward functions. |
 | `tools` | `list[dict] \| None` | no | Tool/function definitions for chat template. |
-| `multimodal_inputs` | `dict \| None` | no | e.g. `{"images": [...]}`. |
+| `images` / `videos` / `audios` | `list \| None` | no | Top-level multimodal fields, forwarded to the processor. |
 | `metadata` | `dict \| None` | no | Passed through to reward functions (e.g. `rm_type`). |
 
 Custom generate/reward functions can read any column from `episode.example` — there is no fixed schema. For example, a BAP reward function reads `episode.example["ground_truth"]` instead of `"label"`.
@@ -47,10 +47,10 @@ SGLang setup, parameter pass-through, rollout args, dynamic sampling, partial ro
 - [Speculative Decoding](rollout/speculative-decoding.md) -- MTP draft model acceleration
 - [Fault Tolerance](rollout/fault-tolerance.md) -- Heartbeat-based recovery
 - [PD Disaggregation](rollout/pd-disaggregation.md) -- Prefill-decode separation
+- [Low Precision Inference](rollout/low-precision.md) -- FP8 rollout
 
 ## [Training](training/README.md)
 Installation, GPU allocation, checkpoints, data format, RL algorithms (GRPO/PPO), multi-node, FAQ.
-- [Low Precision](training/low-precision.md) -- FP8 inference, INT4 QAT
 - [Reproducibility](training/reproducibility.md) -- Deterministic bitwise training
 - [Debugging](training/debug.md) -- Precision alignment, separate debugging
 - [Profiling](training/profiling.md) -- Rollout performance analysis
