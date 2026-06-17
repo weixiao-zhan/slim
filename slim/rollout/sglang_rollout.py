@@ -376,7 +376,7 @@ async def generate_rollout_async(
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
 
     while len(kept_groups) < target_data_size:
-        refill = args.over_sampling_batch_size - len(state.pendings)
+        refill = args.over_sampling_batch_size - len(state.pendings) if args.over_sampling_batch_size else target_data_size - next_group_index
         if refill > 0:
             examples = get_examples(refill)
             groups = _examples_to_rollout_groups(examples, args)

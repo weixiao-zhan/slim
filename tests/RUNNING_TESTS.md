@@ -3,8 +3,12 @@
 ## Prerequisites
 
 ```bash
-# Install dependencies
-uv sync --extra dev
+# Install dependencies.
+# --extra fla: flash-linear-attention + causal-conv1d, required for Qwen3.5/3.6 training (all tests use Qwen3.5-4B).
+# Training-side attention extras (pick per GPU; otherwise --attn-implementation sdpa works everywhere):
+#   --extra fa2  FlashAttention-2 (Ampere/Ada, e.g. A100/L40s). Builds from source (nvcc, ~10-30 min).
+#   --extra fa3  FlashAttention-3 (Hopper only; not usable on SM120/Blackwell).
+uv sync --extra dev --extra fla        # add --extra fa2 (A100/L40s) or --extra fa3 (Hopper) as needed
 ```
 
 ## Models

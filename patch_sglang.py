@@ -43,100 +43,25 @@ def patch_file(
     return True
 
 
-def patch_transformers_flash_attention() -> bool:
-    """Guard s_aux against None in flash_attention_forward.
-
-    transformers 5.6 vision encoder attention doesn't pass s_aux, so it arrives
-    as None and crashes the .to(query.dtype) call.
-
-    Fixed upstream in transformers#45589, released in v5.6.2; can deprecate this
-    patch once we upgrade to transformers>=5.6.2 (blocked by sglang's
-    transformers==5.6.0 pin).
-    """
-    import transformers
-
-    return patch_file(
-        Path(transformers.__file__).resolve().parent / "integrations" / "flash_attention.py",
-        [
-            (
-                "s_aux=s_aux.to(query.dtype),",
-                "s_aux=s_aux.to(query.dtype) if s_aux is not None else None,",
-            ),
-        ],
-        log_reason="flash_attention.py s_aux None guard",
-    )
-
-
-def patch_sglang_qwen_vl(qwen_vl: Path) -> bool:
-    """Force legacy mm-load path + adapt to processor_output payloads.
-
-    The legacy path is required when input_ids already contain expanded vision
-    tokens (token-in/token-out rollout sending image_data as PNG data URLs).
-    The processor_output branch below remains active for envelope-encoded
-    payloads, so both rollout styles are supported.
-    """
-    return patch_file(
-        qwen_vl,
-        [
-            (
-                "base_output = self.load_mm_data(",
-                "base_output = self.legacy_load_mm_data(",
-            ),
-            (
-         '''image_grid_thw = None
-        if hasattr(ret, "image_grid_thw"):
-            image_grid_thw = ret.image_grid_thw
-
-        if image_grid_thw is None and image_data and isinstance(image_data[0], dict):
-            image_grid_thw = image_data[0].get("image_grid_thw")
-
-        video_grid_thw = None
-        if hasattr(ret, "video_grid_thw"):
-            video_grid_thw = ret.video_grid_thw
-
-        if video_grid_thw is None and request_obj.video_data:
-            first_video = request_obj.video_data[0]
-            if isinstance(first_video, dict):
-                video_grid_thw = first_video.get("video_grid_thw")''',
-         '''processor_output_dict = None
-        for mm_data in (image_data, request_obj.video_data, request_obj.audio_data):
-            if mm_data and isinstance(mm_data[0], dict) and mm_data[0].get("format") == "processor_output":
-                processor_output_dict = mm_data[0]
-                break
-
-        image_grid_thw = None
-        if hasattr(ret, "image_grid_thw"):
-            image_grid_thw = ret.image_grid_thw
-        if image_grid_thw is None and processor_output_dict is not None:
-            image_grid_thw = processor_output_dict.get("image_grid_thw")
-
-        video_grid_thw = None
-        if hasattr(ret, "video_grid_thw"):
-            video_grid_thw = ret.video_grid_thw
-        if video_grid_thw is None and processor_output_dict is not None:
-            video_grid_thw = processor_output_dict.get("video_grid_thw")''',
-            ),
-            (
-         '''input_ids=input_ids.unsqueeze(0),
-            image_grid_thw=getattr(ret, "image_grid_thw", None),
-            video_grid_thw=getattr(ret, "video_grid_thw", None),
-            second_per_grid_ts=second_per_grid_ts,''',
-         '''input_ids=input_ids.unsqueeze(0),
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,''',
-            ),
-        ],
-        log_reason="qwen_vl.py legacy mm-load + processor_output adapter",
-    )
-
-
 def patch_sglang_base_processor(base_processor: Path) -> bool:
-    """Accept processor_output envelope + suppress spurious mismatch warnings.
+    """Decode our base64-enveloped tensors back into real tensors.
 
-    The mismatch warnings fire under processor_output because a single dict
-    carries data for all expanded vision-token blocks; the iterator
-    legitimately exhausts before all tokens resolve.
+    slim's VLM rollout ships token-in/token-out processor outputs to the engine
+    via `image_data = [{"format": "processor_output", ...}]`, with each tensor
+    base64-enveloped (`encode_tensor_to_b64_envelope`) to survive the Rust
+    router's JSON layer. Upstream SGLang has no base64 transport concept, so the
+    decode is still our job: it must happen *before*
+    `collect_mm_items_from_processor_output`, which assumes real tensors.
+
+    As of SGLang 0.5.13 the multimodal path was refactored: token-in/token-out
+    is native (`SGLANG_MM_AVOID_RETOKENIZE` + fast-path early return for
+    preprocessed data), `image_grid_thw`/MRoPE are extracted natively, and the
+    spurious mismatch warnings no longer fire (the preprocessed payload skips
+    `submit_data_loading_tasks`). So the old qwen_vl legacy/grid_thw patches and
+    the warning-suppression patches are gone; only this transport decode remains.
+
+    The dispatch branch now keys on the `MultimodalInputFormat.PROCESSOR_OUTPUT`
+    enum (was the `"processor_output"` string in 0.5.12).
     """
     return patch_file(
         base_processor,
@@ -146,12 +71,12 @@ def patch_sglang_base_processor(base_processor: Path) -> bool:
                 "import concurrent\nimport pybase64\n",
             ),
             (
-         '''if input_format == "processor_output":
+         '''if input_format == MultimodalInputFormat.PROCESSOR_OUTPUT:
                 items = self.collect_mm_items_from_processor_output(dict_item)
                 for item in items:
                     item.format = MultimodalInputFormat.PROCESSOR_OUTPUT
                 all_collected_items.extend(items)''',
-         '''if input_format == "processor_output":
+         '''if input_format == MultimodalInputFormat.PROCESSOR_OUTPUT:
                 for key, value in list(dict_item.items()):
                     if key == "format":
                         continue
@@ -173,37 +98,8 @@ def patch_sglang_base_processor(base_processor: Path) -> bool:
                     item.format = MultimodalInputFormat.PROCESSOR_OUTPUT
                 all_collected_items.extend(items)''',
             ),
-            (
-         '''except StopIteration:
-                    logger.warning(
-                        f"Mismatch: More \'{modality.name}\' tokens found than corresponding data provided."
-                    )
-                    return futures, task_info''',
-         '''except StopIteration:
-                    # Suppressed: with processor_output format a single dict
-                    # carries data for all expanded vision-token blocks, so the
-                    # iterator legitimately exhausts before all tokens resolve.
-                    return futures, task_info''',
-            ),
-            (
-         '''try:
-                next(iterator)
-                logger.warning(
-                    f"Warning: More {modality.name.lower()} data items provided than corresponding tokens found in the prompt."
-                )
-            except StopIteration:
-                pass
-            except Exception:
-                pass''',
-         '''try:
-                next(iterator)
-            except StopIteration:
-                pass
-            except Exception:
-                pass''',
-            ),
         ],
-        log_reason="base_processor.py pybase64 + processor_output unpack + warning suppression",
+        log_reason="base_processor.py pybase64 + processor_output b64 decode",
     )
 
 
@@ -282,15 +178,11 @@ def main() -> int:
 
     sglang_dir = Path(sglang.__file__).resolve().parent
     base_processor = sglang_dir / "srt" / "multimodal" / "processors" / "base_processor.py"
-    qwen_vl = sglang_dir / "srt" / "multimodal" / "processors" / "qwen_vl.py"
 
-    patch_transformers_flash_attention()
-    patch_sglang_qwen_vl(qwen_vl)
     patch_sglang_base_processor(base_processor)
     install_triton_configs(sglang_dir)
 
     py_compile.compile(str(base_processor), doraise=True)
-    py_compile.compile(str(qwen_vl), doraise=True)
 
     relax_ptrace_scope()
     return 0
