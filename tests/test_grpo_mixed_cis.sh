@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-
 MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b"

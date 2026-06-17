@@ -42,6 +42,7 @@ dev = [
     "memray",
     "pre-commit",
     "pytest",
+    "viztracer",
 ]
 [build-system]
 requires = ["hatchling"]
