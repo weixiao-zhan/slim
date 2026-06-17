@@ -277,8 +277,9 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Target size of the in-flight rollout group pool. The rollout loop tops up to this "
-                    "number on every iteration. Set larger than rollout_batch_size to oversample. "
-                    "If None, defaults to rollout_batch_size."
+                    "number on every iteration. Set larger than rollout_batch_size to oversample, or smaller "
+                    "to cap rollout concurrency. If None and no rollout-group-filter-path: dispatch exactly "
+                    "rollout_batch_size groups once and drain them all (no re-top-up). "
                 ),
             )
             parser.add_argument(
@@ -1363,12 +1364,11 @@ def slim_validate_args(args):
         args.rewards_std_normalization = False
         logger.info("n_samples_per_prompt is set to 1, rewards_std_normalization will be set to False.")
 
-    if args.over_sampling_batch_size is None:
+    if args.rollout_group_filter_path and not args.over_sampling_batch_size:
         args.over_sampling_batch_size = args.rollout_batch_size
 
-    assert args.over_sampling_batch_size >= args.rollout_batch_size, (
-        f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
-        f"rollout_batch_size {args.rollout_batch_size}"
+    assert args.over_sampling_batch_size is None or args.over_sampling_batch_size > 0, (
+        f"over_sampling_batch_size must be a positive int or None, got {args.over_sampling_batch_size}"
     )
 
     if args.num_epoch is not None:

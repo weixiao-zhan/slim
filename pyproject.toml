@@ -5,12 +5,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "accelerate",
     "aiohttp",
-    "causal-conv1d",
     "datasets>=3.2.0",
-    "flash-attn-3",
-    "flash-linear-attention",
     "httpx[http2]",
-    "kernels==0.14.0", # transformers 5.6.0's hub_kernels.py builds LayerRepository with no revision/version, which only the 0.14.0 lazy-resolve API tolerates
     "liger-kernel",
     "omegaconf",
     "packaging",
@@ -22,12 +18,12 @@ dependencies = [
     "qwen_vl_utils",
     "ray[default]",
     "requests",
-    "sglang==0.5.12",
+    "sglang==0.5.13.post1",
     "sglang-router==0.3.2",
     "sympy",
     "torch==2.11.0",
     "tqdm",
-    "transformers==5.6.0",
+    "transformers==5.8.1",
     "wandb",
 ]
 classifiers = [
@@ -44,6 +40,16 @@ dev = [
     "pytest",
     "viztracer",
 ]
+fa2 = [
+    "flash-attn",
+]
+fa3 = [
+    "flash-attn-3",
+]
+fla = [
+    "causal-conv1d",
+    "flash-linear-attention",
+]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -55,6 +61,7 @@ packages = ["slim"]
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 torchaudio = { index = "pytorch-cu130" }
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_x86_64.whl" }
 flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.05.11-5e0e3b1/flash_attn_3-3.0.0%2B20260511.cu130torch2110cxx11abitrue.ab6632-cp39-abi3-linux_x86_64.whl" }
 causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1%2Bcu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 
