@@ -939,29 +939,40 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
-            # use together with --record-memory-history and --memory-snapshot-path
+            # --- Performance profiler (torch.profiler for train_* targets; VizTracer for `rollout`) ---
             parser.add_argument(
-                "--memory-snapshot-dir",
+                "--profile-target",
                 type=str,
-                default=".",
+                choices=["rollout", "train_log_probs", "train_pg", "train_overall"],
+                default=[],
+                nargs="+",
+                help="What to profile (empty = off). "
+                "`rollout` uses VizTracer to trace whole step's async generate_rm calls."
+                "`train_log_probs`, `train_pg`, and `train_overall` use torch.profiler. "
+            )
+            parser.add_argument("--profile-step-start", type=int, default=10)
+            parser.add_argument("--profile-step-end", type=int, default=12)
+            parser.add_argument(
+                "--profile-dir",
+                type=str,
+                default="./profiles",
+                help="Output dir for all profiler artifacts (chrome traces, memory snapshots).",
+            )
+            # --- Memory recorder ---
+            parser.add_argument(
+                "--memory-recorder",
+                type=str,
+                choices=["torch", "memray"],
+                default=[],
+                nargs="+",
+                help="Which memory recorder(s) to run (empty = off); may pass both. torch = GPU/CUDA "
+                "allocator history (CUDA OOM); memray = host/CPU RAM allocations (host OOM).",
             )
             parser.add_argument(
                 "--memory-snapshot-num-steps",
                 type=int,
                 default=None,
-            )
-            parser.add_argument(
-                "--profile-target",
-                type=str,
-                choices=["train_overall", "train_actor", "train_log_probs"],
-                default=["train_overall"],
-                nargs="+",
-            )
-            parser.add_argument(
-                "--memory-recorder",
-                type=str,
-                choices=["torch", "memray"],
-                default="torch",
+                help="Stop recording and dump the snapshot after this many rollouts (required for memray).",
             )
             parser.add_argument("--check-weight-update-equal", action="store_true")
             return parser

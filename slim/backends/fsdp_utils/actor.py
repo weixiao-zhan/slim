@@ -749,7 +749,7 @@ class FSDPTrainRayActor(TrainRayActor):
             with timer("actor_train"):
                 reported_accum: dict[str, list[torch.Tensor]] = {}
                 self.optimizer.zero_grad(set_to_none=True)
-                for mbs_id, packed_batch in self.prof.iterate_train_actor(
+                for mbs_id, packed_batch in self.prof.iterate_train_pg(
                     enumerate(tqdm(packed_batches, desc="actor_train", disable=dist.get_rank() != 0))
                 ):
                     self._train_step(

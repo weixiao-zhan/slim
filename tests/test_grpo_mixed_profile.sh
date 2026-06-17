@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-
 BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
-FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8-fp32-profile"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-profile"
 PROFILE_DIR="$REPO_DIR/outputs/profiles"
 
 start_ray
@@ -31,17 +29,16 @@ run_train "
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node $NUM_GPUS
-    --attn-implementation sdpa
+    --attn-implementation flash_attention_3
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 16384
 
-    --use-pytorch-profiler
-    --profile-target train_actor
+    --profile-target train_pg rollout
     --profile-step-start 0
-    --profile-step-end 2
+    --profile-step-end 1
     --profile-dir $PROFILE_DIR
 
     --advantage-estimator grpo
@@ -53,16 +50,14 @@ run_train "
 
     --optimizer adam
     --lr 3e-6
-    --lr-warmup-iters 1
+    --lr-warmup-iters 0
     --lr-decay-style constant
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.98
 
     --hf-checkpoint $FP8_MODEL_DIR
-    --load $BF16_MODEL_DIR
     --save $SAVE_DIR
-    --save-interval 100
 
     $(wandb_args grpo-mixed-cis-qwen35-4b-fp8-fp32-profile)
 "

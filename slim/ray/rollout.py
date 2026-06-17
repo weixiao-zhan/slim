@@ -29,6 +29,7 @@ from slim.utils.metric_utils import (
     dict_add_prefix,
 )
 from slim.utils.misc import group_by, load_function
+from slim.utils.profile_utils import profile_rollout
 from slim.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slim.utils.types import Episode
 
@@ -544,7 +545,8 @@ class RolloutManager:
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def _get_rollout_episodes(self, rollout_id) -> tuple[list[Episode], dict | None]:
-        result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+        with profile_rollout(self.args, rollout_id):
+            result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
         metrics = result.metrics
         episodes = result.episodes
 
