@@ -586,7 +586,8 @@ def _compute_server_args(
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
         # cuda graph must cover the max concurrent batch size to avoid eager fallback.
-        "cuda_graph_max_bs": int(args.rollout_concurrency_per_engine * 1.5),
+        "cuda_graph_max_bs": int(args.rollout_concurrency_per_engine),
+        "max_running_requests": int(args.rollout_concurrency_per_engine),
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.

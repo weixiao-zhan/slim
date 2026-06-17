@@ -10,6 +10,8 @@ from datasets import load_dataset
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "geo3k"
 
+N_EVAL = 100 
+
 
 def transform(row):
     text = row["problem"].replace("<image>", "").strip()
@@ -36,8 +38,12 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ds = load_dataset("hiyouga/geometry3k")
     for split in ds:
-        ds[split].map(transform).select_columns(["prompt", "label", "images"]).to_parquet(OUT_DIR / f"{split}.parquet")
-        print(f"Wrote {split}.parquet")
+        split_ds = ds[split]
+        # Cap the eval (test) split at N_EVAL examples; keep train split intact.
+        if split == "test":
+            split_ds = split_ds.select(range(min(N_EVAL, len(split_ds))))
+        split_ds.map(transform).select_columns(["prompt", "label", "images"]).to_parquet(OUT_DIR / f"{split}.parquet")
+        print(f"Wrote {split}.parquet ({len(split_ds)} rows)")
 
 
 if __name__ == "__main__":
