@@ -2,9 +2,9 @@
 # PPO on Geo3K VLM. 4 actor + 4 critic GPUs colocated with 8 rollout.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$HOME/models/Qwen3.5-4B"
-DATASET_DIR="$HOME/datasets/geo3k"
-SAVE_DIR="$HOME/outputs/ppo-geo3k-qwen35-4b"
+MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+DATASET_DIR="$REPO_DIR/datasets/geo3k"
+SAVE_DIR="$REPO_DIR/outputs/ppo-geo3k-qwen35-4b"
 
 start_ray
 run_train "

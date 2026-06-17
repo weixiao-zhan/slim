@@ -8,15 +8,19 @@ uv sync --extra dev
 ```
 
 ## Models
+
+Models, datasets, and outputs all live under the repo root. 
+The test scripts resolve these via `$REPO_DIR`.
+
 ```bash
-hf download Qwen/Qwen3.5-4B --local-dir $HOME/models/Qwen3.5-4B
+hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 ```
 
 Forge FP8 if needed
 ```bash
 uv run python tools/convert_hf_to_fp8.py \
-    --model-dir $HOME/models/Qwen3.5-4B \
-    --save-dir $HOME/models/Qwen3.5-4B-FP8 \
+    --model-dir models/Qwen3.5-4B \
+    --save-dir models/Qwen3.5-4B-FP8 \
     --ref-config tools/fp8_recipes/qwen35_official.json
 ```
 
@@ -27,15 +31,15 @@ plus a **mixed** set derived from both.
 
 ```bash
 # DAPO-17k (math tests): open-r1/DAPO-Math-17k-Processed
-# -> ~/datasets/dapo17k/train.parquet
+# -> datasets/dapo17k/train.parquet
 uv run python tests/prepare_dapo17k_tokenizer_ready.py
 
 # Geo3K (vision tests): hiyouga/geometry3k
-# -> ~/datasets/geo3k/{train,test}.parquet
+# -> datasets/geo3k/{train,test}.parquet
 uv run python tests/prepare_geo3k_processor_ready.py
 
 # Mixed (GRPO mixed tests): DAPO-Math-17k (text) + geometry3k (vision)
-# -> ~/datasets/mixed/{train,test_math,test_vision}.parquet
+# -> datasets/mixed/{train,test_math,test_vision}.parquet
 uv run python tests/prepare_mixed.py
 ```
 

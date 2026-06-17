@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-BF16_MODEL_DIR="$HOME/models/Qwen3.5-4B"
-FP8_MODEL_DIR="$HOME/models/Qwen3.5-4B-FP8"
-DATASET_DIR="$HOME/datasets/mixed"
-SAVE_DIR="$HOME/outputs/grpo-mixed-cis-qwen35-4b-fp8"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
+DATASET_DIR="$REPO_DIR/datasets/mixed"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8"
 
 start_ray
 run_train "

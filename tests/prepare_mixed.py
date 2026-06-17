@@ -10,9 +10,9 @@ produces identical output with or without the text key.
 
 Outputs (the geometry split is the "vision" eval task, so the test scripts' eval keys and
 paths stay unchanged):
-  ~/datasets/mixed/train.parquet        — mixed text + vision (for training)
-  ~/datasets/mixed/test_math.parquet    — text-only math (for eval)
-  ~/datasets/mixed/test_vision.parquet  — geometry vision reasoning (for eval)
+  <repo>/datasets/mixed/train.parquet        — mixed text + vision (for training)
+  <repo>/datasets/mixed/test_math.parquet    — text-only math (for eval)
+  <repo>/datasets/mixed/test_vision.parquet  — geometry vision reasoning (for eval)
 
 Usage:
     uv run python tests/prepare_mixed.py
@@ -22,7 +22,8 @@ from pathlib import Path
 
 from datasets import Image, Sequence, concatenate_datasets, load_dataset
 
-OUT_DIR = Path.home() / "datasets" / "mixed"
+# Write into the repo's own datasets/ dir (this file lives in <repo>/tests/).
+OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "mixed"
 
 N_MATH_TEST = 500  # held-out text-math eval rows; the rest of DAPO is training
 
