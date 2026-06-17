@@ -25,8 +25,7 @@ from datasets import Image, Sequence, concatenate_datasets, load_dataset
 # Write into the repo's own datasets/ dir (this file lives in <repo>/tests/).
 OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "mixed"
 
-N_MATH_TEST = 500  # held-out text-math eval rows; the rest of DAPO is training
-
+N_EVAL = 100
 
 def transform_dapo(row):
     """Pure-text math problem in VLM format."""
@@ -74,25 +73,27 @@ def transform_geo3k(row):
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ---- Text-only math: DAPO-Math-17k (hold out N_MATH_TEST for eval) ----
+    # ---- Text-only math: DAPO-Math-17k (hold out N_EVAL for eval) ----
     dapo_all = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train").shuffle(seed=42)
     cols_to_drop = [c for c in dapo_all.column_names if c not in ("prompt", "label", "images")]
     dapo_test = (
-        dapo_all.select(range(N_MATH_TEST))
+        dapo_all.select(range(N_EVAL))
         .map(transform_dapo, remove_columns=cols_to_drop)
         .cast_column("images", Sequence(Image()))
     )
     dapo_train = (
-        dapo_all.select(range(N_MATH_TEST, len(dapo_all)))
+        dapo_all.select(range(N_EVAL, len(dapo_all)))
         .map(transform_dapo, remove_columns=cols_to_drop)
         .cast_column("images", Sequence(Image()))
     )
     print(f"DAPO-Math-17k (en): {len(dapo_train)} train, {len(dapo_test)} test")
 
-    # ---- Vision geometry: Geometry3K ----
+    # ---- Vision geometry: Geometry3K (cap test split at N_EVAL) ----
     geo3k = load_dataset("hiyouga/geometry3k")
     geo3k_train = geo3k["train"].map(transform_geo3k).select_columns(["prompt", "label", "images"])
-    geo3k_test = geo3k["test"].map(transform_geo3k).select_columns(["prompt", "label", "images"])
+    geo3k_test = (
+        geo3k["test"].select(range(N_EVAL)).map(transform_geo3k).select_columns(["prompt", "label", "images"])
+    )
     print(f"Geometry3K: {len(geo3k_train)} train, {len(geo3k_test)} test")
 
     # Train set — mixed, same schema so concat works
