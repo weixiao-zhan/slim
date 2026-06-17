@@ -51,30 +51,10 @@ python tools/convert_fsdp_to_hf.py \
   --origin-hf-dir /root/Model
 ```
 
-## Data Format
+## Precision
 
-slim supports `.jsonl` and `.parquet` formats. Row slicing: `path/to/data.jsonl@[start:end]`.
-
-Each row should use the supported finite column set:
-- Required: `prompt`
-- Optional: `label`, `images`, `tools`, `metadata`
-
-For other multimodal inputs (e.g. videos), place them inside a `multimodal_inputs` dict rather than as top-level columns.
-
-The default loaders and rollout path expect this fixed schema rather than arbitrary extra top-level columns.
-If you need to carry additional per-row information, place it under `metadata`.
-
-When the prompt is a list of chat messages, `apply_chat_template` is called automatically.
-When the prompt is a plain string, it is tokenized directly.
-
-Example data entry:
-```json
-{
-  "prompt": [{"role": "user", "content": "Solve: ...", "step_loss_mask": 1}],
-  "label": "34",
-  "metadata": {"source": "custom-dataset"}
-}
-```
+- `--master-weight-dtype fp32` promotes all weights and optimizer states to fp32 at load time (standard mixed-precision practice). Leave unset to use checkpoint's dtypes for weigths and optimzier states.
+- `--compute-dtype bf16` (or `fp16`) runs forward/backward in that dtype via the FSDP2 `MixedPrecisionPolicy`, while gradient reduction stays in fp32. Leave unset to compute in the storage dtype.
 
 ## Performance
 
@@ -162,7 +142,6 @@ ray job submit --address="http://127.0.0.1:8265" \
 
 ## Further Reading
 
-- [Low Precision](low-precision.md) -- FP8 inference, INT4 QAT
 - [Reproducibility](reproducibility.md) -- Deterministic bitwise training
 - [Debugging](debug.md) -- Precision alignment, separate debugging
 - [Profiling](profiling.md) -- Rollout performance analysis
