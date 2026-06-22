@@ -342,12 +342,12 @@ async def abort(args: Namespace) -> list[dict]:
         response = await get(f"http://{args.router_ip}:{args.router_port}/workers")
         urls = [worker["url"] for worker in response["workers"]]
 
-    logger.info(f"Abort request for {urls}")
-    await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
-
-    # make sure all the pending tasks are finished
     while state.pendings:
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+        logger.info(f"Abort request for {urls}")
+        await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
+        done, state.pendings = await asyncio.wait(
+            state.pendings, return_when=asyncio.ALL_COMPLETED, timeout=1
+        )
 
         # Recycle aborted/incomplete groups back to the data buffer so they
         # can be retried in a later rollout.  Only groups explicitly rejected
