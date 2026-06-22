@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
 
-BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
-FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-Base"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-Base-FP8"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-base-fp8"
 
 start_ray
 run_train "
     --num-rollout 40
-    --rollout-batch-size 64
+    --rollout-batch-size 3
+    --rollout-concurrency-per-engine 48
     --n-samples-per-prompt 8
     --max-context-len 8192
-    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
     --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
@@ -23,6 +23,7 @@ run_train "
     --rollout-shuffle
 
     --eval-log-passrate
+    --skip-eval-before-train
     --eval-interval 20
     --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
     --eval-n-samples-per-prompt 1
@@ -31,17 +32,20 @@ run_train "
     --sglang-mem-fraction-static 0.8
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
+    --sglang-fp8-gemm-backend triton
+    --sglang-enable-metrics
     --rollout-fault-tolerance
     --colocate
 
     --actor-num-nodes 1
     --actor-num-gpus-per-node $NUM_GPUS
-    --attn-implementation flash_attention_3
+    --attn-implementation sdpa
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
+    --fsdp-cpu-offload
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 16384
+    --max-tokens-per-gpu 32768
 
     --advantage-estimator grpo
     --disable-rewards-std-normalization
@@ -63,5 +67,5 @@ run_train "
     --save $SAVE_DIR
     --save-interval 10
 
-    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8)
+    $(wandb_args grpo-mixed-cis-qwen35-4b-base-fp8)
 "
