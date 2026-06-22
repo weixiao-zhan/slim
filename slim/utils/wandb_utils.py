@@ -97,7 +97,7 @@ def _compute_config_for_logging(args):
 
 
 # https://docs.wandb.ai/guides/track/log/distributed-training/#track-all-processes-to-a-single-run
-def init_wandb_secondary(args, router_addr=None):
+def init_wandb_secondary(args, metrics_endpoints=None):
     wandb_run_id = getattr(args, "wandb_run_id", None)
     if wandb_run_id is None:
         return
@@ -121,15 +121,11 @@ def init_wandb_secondary(args, router_addr=None):
             x_update_finish_state=False,
         )
 
-    if getattr(args, "sglang_enable_metrics", False) and router_addr is not None:
-        logger.info(f"Forward SGLang metrics at {router_addr} to WandB.")
+    if metrics_endpoints:
+        logger.info(f"Forward SGLang metrics to WandB: {metrics_endpoints}")
         settings_kwargs |= dict(
-            x_stats_open_metrics_endpoints={
-                "sgl_engine": f"{router_addr}/engine_metrics",
-            },
-            x_stats_open_metrics_filters={
-                "sgl_engine.*": {},
-            },
+            x_stats_open_metrics_endpoints=dict(metrics_endpoints),
+            x_stats_open_metrics_filters={f"{name}.*": {} for name in metrics_endpoints},
         )
 
     init_kwargs = {

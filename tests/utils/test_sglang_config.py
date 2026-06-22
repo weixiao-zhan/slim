@@ -92,8 +92,8 @@ class TestGetModelUrl:
         from slim.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            sglang_router_ip="10.0.0.1",
-            sglang_router_port=3000,
+            router_ip="10.0.0.1",
+            router_port=3000,
             sglang_model_routers={
                 "actor": ("10.0.0.1", 3000),
                 "ref": ("10.0.0.1", 3001),
@@ -110,8 +110,8 @@ class TestGetModelUrl:
         from slim.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            sglang_router_ip="10.0.0.1",
-            sglang_router_port=3000,
+            router_ip="10.0.0.1",
+            router_port=3000,
             sglang_model_routers={"actor": ("10.0.0.1", 3000)},
         )
         assert get_model_url(args, "unknown") == "http://10.0.0.1:3000/generate"
@@ -123,8 +123,8 @@ class TestGetModelUrl:
         from slim.rollout.sglang_rollout import get_model_url
 
         args = Namespace(
-            sglang_router_ip="10.0.0.1",
-            sglang_router_port=3000,
+            router_ip="10.0.0.1",
+            router_port=3000,
         )
         assert get_model_url(args, "anything") == "http://10.0.0.1:3000/generate"
 

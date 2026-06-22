@@ -32,7 +32,7 @@ def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate")
     if routers and model_name in routers:
         ip, port = routers[model_name]
         return f"http://{ip}:{port}{endpoint}"
-    return f"http://{args.sglang_router_ip}:{args.sglang_router_port}{endpoint}"
+    return f"http://{args.router_ip}:{args.router_port}{endpoint}"
 
 
 @dataclass
@@ -231,7 +231,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:
         headers = {"X-SMG-Routing-Key": episode.session_id}
 
-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    url = f"http://{args.router_ip}:{args.router_port}/generate"
     output = await post(url, payload, headers=headers)
 
     meta_info = output["meta_info"]
@@ -336,10 +336,10 @@ async def abort(args: Namespace) -> list[dict]:
     state.aborted = True
 
     if parse(sglang_router.__version__) <= parse("0.2.1"):
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
+        response = await get(f"http://{args.router_ip}:{args.router_port}/list_workers")
         urls = response["urls"]
     else:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
+        response = await get(f"http://{args.router_ip}:{args.router_port}/workers")
         urls = [worker["url"] for worker in response["workers"]]
 
     logger.info(f"Abort request for {urls}")
