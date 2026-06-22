@@ -12,7 +12,6 @@ run_train "
     --rollout-batch-size 64
     --n-samples-per-prompt 8
     --max-context-len 8192
-    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
     --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std

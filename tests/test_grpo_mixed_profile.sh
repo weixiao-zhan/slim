@@ -11,7 +11,6 @@ run_train "
     --rollout-batch-size 8
     --n-samples-per-prompt 2
     --max-context-len 8192
-    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
 

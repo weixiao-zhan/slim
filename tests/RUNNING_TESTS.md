@@ -64,7 +64,7 @@ bash tests/test_grpo_mixed_fp8_cis.sh
 SM120 need following treatment:
 
 - **Training attention:** FA3/FA2 have no SM120 kernel. Using sdpa as training-side attention `--attn-implementation flash_attention_3` → `--attn-implementation sdpa`
-- **Rollout gemm:** SGL default to DeepGEMM when runing fp8 on backwell, which expects ue8m0 scales. To use fp32 block scales: use `--sglang-fp8-gemm-backend triton` in (`test_grpo_mixed_fp8_cis.sh`)
+- **Rollout gemm:** SGL default to DeepGEMM when runing fp8 on backwell, which expects ue8m0 scales. To use fp32 block scales: use `--sglang-fp8-gemm-backend triton` in (`test_grpo_mixed_fp8_cis.sh`). slim forwards any unknown `--sglang-*` flag straight through to sglang's `ServerArgs` (stripping the `--sglang-` prefix), so `--sglang-fp8-gemm-backend` maps to sglang's `--fp8-gemm-backend`.
 
 ## Available Tests
 
