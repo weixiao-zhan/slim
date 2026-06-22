@@ -40,6 +40,24 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 
 logger = logging.getLogger(__name__)
 
+# For Vision/audio encoder module paths.
+# These are replicated (not FSDP-sharded) and frozen for mixed modality batches
+# Matched as substrings of module names.
+_REPLICATED_FROZEN_MODULE_KEYWORDS = ("visual", "vision_tower", "vision_model", "audio", "speech")
+
+
+def _get_replicated_frozen_module_roots(model):
+    """Top-level replicated+frozen modules.
+
+    Returns a name -> module dict of the outermost matches.
+    """
+    roots = {}
+    for name, module in model.named_modules():
+        if any(kw in name for kw in _REPLICATED_FROZEN_MODULE_KEYWORDS):
+            if not any(name.startswith(f"{r}.") for r in roots):
+                roots[name] = module
+    return roots
+
 
 class FSDPTrainRayActor(TrainRayActor):
     """Simplified TrainRayActor for pure HF+FSDP training.
@@ -146,13 +164,9 @@ class FSDPTrainRayActor(TrainRayActor):
             with init_context():
                 model = self.get_model_cls().from_pretrained(hf_checkpoint, **self._load_kwargs)
 
-        # Frozen vision/audio encoders stay in bf16: FA3 only accepts fp16/bf16/fp8,
-        # and they're not trained so fp32 master weights aren't needed. Must run before
-        # state_dict() capture so the bf16 cast survives _fsdp2_load_full_state_dict.
-        # Keep keywords in sync with apply_fsdp2's _REPLICATED_PATH_KEYWORDS.
-        for name, module in model.named_modules():
-            if any(kw in name for kw in ("visual", "vision_tower", "vision_model", "audio", "speech")):
-                module.to(torch.bfloat16)
+        # Frozen modules stay in bf16, fp32 master weights aren't needed.
+        for module in _get_replicated_frozen_module_roots(model).values():
+            module.to(torch.bfloat16)
 
         # Apply PEFT adapter if --use-peft is set (after critic head swap, before FSDP)
         model = self._maybe_apply_peft(model)
@@ -168,6 +182,9 @@ class FSDPTrainRayActor(TrainRayActor):
         )
 
         self.model = model
+
+        if self.fsdp_cpu_offload:
+            self._register_replicated_frozen_module_offload_hooks(self.model)
 
         if self._routing_replay_adapter is not None:
             n_routers = self._routing_replay_adapter.register_layer_indices(self.model)
@@ -383,6 +400,26 @@ class FSDPTrainRayActor(TrainRayActor):
                 buf.data = buf.data.to(torch.cuda.current_device())
 
         return model
+
+    def _register_replicated_frozen_module_offload_hooks(self, model) -> None:
+        """Stage frozen replicated modules GPU<->CPU around their forward.
+
+        These modules are ``ignored_params`` so ``CPUOffloadPolicy`` never stages them. 
+        The pre-forward hook copies params to GPU; the post-forward hook copies them back.
+        No backward_hook since they are frozen.
+        """
+        device = torch.cuda.current_device()
+
+        def _to(module, target):
+            for p in module.parameters(recurse=True):
+                p.data = p.data.to(target, non_blocking=True)
+            for b in module.buffers(recurse=True):
+                b.data = b.data.to(target, non_blocking=True)
+
+        for name, module in _get_replicated_frozen_module_roots(model).items():
+            module.register_forward_pre_hook(lambda m, _args: _to(m, device))
+            module.register_forward_hook(lambda m, _args, _out: _to(m, "cpu"))
+            logger.info(f"[cpu-offload] on-demand GPU staging for: '{name}'")
 
     @timer
     def sleep(self) -> None:
@@ -1156,12 +1193,9 @@ class FSDPTrainRayActor(TrainRayActor):
             with init_context():
                 ref_model = self.get_model_cls().from_pretrained(ref_load_path, **self._load_kwargs)
 
-            # Frozen vision/audio encoders stay in bf16 (mirror the actor); must run
-            # before state_dict() capture so the cast survives _fsdp2_load_full_state_dict.
-            # Keep keywords in sync with apply_fsdp2's _REPLICATED_PATH_KEYWORDS.
-            for name, module in ref_model.named_modules():
-                if any(kw in name for kw in ("visual", "vision_tower", "vision_model", "audio", "speech")):
-                    module.to(torch.bfloat16)
+            # Frozen modules stay in bf16 (mirror the actor)
+            for module in _get_replicated_frozen_module_roots(ref_model).values():
+                module.to(torch.bfloat16)
 
             # Apply PEFT to ref model (fresh adapters, no checkpoint resume)
             ref_model = self._maybe_apply_peft(ref_model)
@@ -1541,13 +1575,10 @@ def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
     assert layer_cls_to_wrap and next(iter(layer_cls_to_wrap)) is not None
     model_config = getattr(base_hf, "config", model.config)
 
-    # Vision/audio encoder modules are replicated and frozen for mm - text mixed dataset
-    _REPLICATED_PATH_KEYWORDS = ("visual", "vision_tower", "vision_model", "audio", "speech")
-
     modules = []
     ignored_params = set()
     for name, m in model.named_modules():
-        replicated = any(kw in name for kw in _REPLICATED_PATH_KEYWORDS)
+        replicated = any(kw in name for kw in _REPLICATED_FROZEN_MODULE_KEYWORDS)
         if replicated:
             for p in m.parameters():
                 p.requires_grad_(False)
