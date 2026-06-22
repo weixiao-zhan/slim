@@ -19,7 +19,7 @@ from slim.utils import logging_utils
 from slim.utils.env_utils import get_nvidia_ld_library_path
 from slim.utils.health_monitor import RolloutHealthMonitor
 from slim.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
-from slim.utils.logging_utils import configure_logger, init_tracking
+from slim.utils.logging_utils import build_sglang_metrics_endpoints, configure_logger, init_tracking
 from slim.utils.metric_utils import (
     compute_consensus,
     compute_majority_vote,
@@ -223,6 +223,7 @@ class RolloutServer:
     server_groups: list[ServerGroup]
     router_ip: str | None = None
     router_port: int | None = None
+    router_prometheus_port: int | None = None
     model_name: str = "default"
     update_weights: bool = True
 
@@ -360,8 +361,6 @@ class RolloutManager:
         self.pg = pg
         self.args = args
 
-        init_tracking(args, primary=False)
-
         data_source_cls = load_function(self.args.data_source_path)
         self.data_source = data_source_cls(args)
 
@@ -378,6 +377,10 @@ class RolloutManager:
         else:
             init_http_client(args)
             self.servers = start_rollout_servers(args, pg)
+
+        # Init W&B after servers start so the router/engine Prometheus
+        # endpoints are known and can be registered for scraping.
+        init_tracking(args, primary=False, metrics_endpoints=build_sglang_metrics_endpoints(args, self.servers))
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
 
@@ -761,23 +764,28 @@ def _allocate_rollout_engine_addr_and_ports_normal(
     return addr_and_ports, node_port_cursor
 
 
-def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int]:
-    """Start sgl router and return (router_ip, router_port).
+def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool = False) -> tuple[str, int, int | None]:
+    """Start sgl router and return (router_ip, router_port, prometheus_port).
 
-    If ``args.sglang_router_ip`` is already set (e.g. by the user) and
+    If ``args.router_ip`` is already set (e.g. by the user) and
     ``force_new`` is False, skip launching and return the existing values.
     When ``force_new`` is True (multi-model), always allocate a fresh port.
+
+    ``prometheus_port`` is the port the router exposes ``/metrics`` on; it is
+    ``None`` for an externally-managed router (we did not launch it).
     """
-    if not force_new and args.sglang_router_ip is not None:
-        return args.sglang_router_ip, args.sglang_router_port
+    if not force_new and args.router_ip is not None:
+        return args.router_ip, args.router_port, None
 
     router_ip = _wrap_ipv6(get_host_info()[1])
     if force_new:
         router_port = find_available_port(random.randint(3000, 4000))
     else:
-        router_port = args.sglang_router_port
+        router_port = args.router_port
         if router_port is None:
             router_port = find_available_port(random.randint(3000, 4000))
+
+    prometheus_port = find_available_port(random.randint(4000, 5000))
 
     from sglang_router.launch_router import RouterArgs
 
@@ -786,9 +794,9 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
     router_args.host = router_ip
     router_args.port = router_port
-    router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
+    router_args.prometheus_port = prometheus_port
     router_args.log_level = "warn"
-    router_args.request_timeout_secs = args.sglang_router_request_timeout_secs
+    router_args.request_timeout_secs = args.router_request_timeout_secs
 
     if has_pd_disaggregation:
         router_args.pd_disaggregation = True
@@ -804,8 +812,8 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     # Wait 3 seconds
     time.sleep(3)
     assert process.is_alive()
-    logger.info(f"Router launched at {router_ip}:{router_port}")
-    return router_ip, router_port
+    logger.info(f"Router launched at {router_ip}:{router_port} (prometheus_port={prometheus_port})")
+    return router_ip, router_port, prometheus_port
 
 
 def _compute_rollout_offset(args) -> int:
@@ -859,12 +867,14 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
         model_cfg.resolve(args)
 
         has_pd = model_cfg.has_pd_disaggregation
-        router_ip, router_port = _start_router(args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0))
+        router_ip, router_port, router_prometheus_port = _start_router(
+            args, has_pd_disaggregation=has_pd, force_new=(model_idx > 0)
+        )
 
         # Write back for backward compat (first model only).
         if model_idx == 0:
-            args.sglang_router_ip = router_ip
-            args.sglang_router_port = router_port
+            args.router_ip = router_ip
+            args.router_port = router_port
 
         server_groups: list[ServerGroup] = []
         port_cursors: dict[int, int] = {}
@@ -957,6 +967,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
             server_groups=server_groups,
             router_ip=router_ip,
             router_port=router_port,
+            router_prometheus_port=router_prometheus_port,
             model_name=model_cfg.name,
             update_weights=model_cfg.update_weights,
         )

@@ -30,7 +30,7 @@ Resource scheduling parameters are set by slim directly:
 
 ### Router
 
-slim uses [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) to load-balance across SGLang servers. Configure with `--sglang-router-ip` and `--sglang-router-port`, or let slim start one automatically.
+slim uses [sglang-router](https://github.com/sgl-project/sglang/tree/main/sgl-model-gateway) to load-balance across SGLang servers. Configure with `--router-ip` and `--router-port`, or let slim start one automatically.
 
 Pass sgl-router parameters with a `router` prefix: e.g., `--router-balance-abs-threshold 0`.
 

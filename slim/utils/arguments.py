@@ -822,6 +822,20 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
         def add_router_arguments(parser):
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
+            parser.set_defaults(router_balance_abs_threshold=10, router_balance_rel_threshold=1.2)
+            # slim-specific router connection args (RouterArgs excludes host/port).
+            parser.add_argument(
+                "--router-ip",
+                type=str,
+                default=None,
+                help="IP address of the SGLang router",
+            )
+            parser.add_argument(
+                "--router-port",
+                type=int,
+                default=None,
+                help="Port of the SGLang router",
+            )
             return parser
 
         # wandb

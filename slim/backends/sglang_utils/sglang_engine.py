@@ -173,8 +173,8 @@ class SGLangEngine(RayActor):
         router_ip=None,
         router_port=None,
     ):
-        self.router_ip = router_ip if router_ip is not None else self.args.sglang_router_ip
-        self.router_port = router_port if router_port is not None else self.args.sglang_router_port
+        self.router_ip = router_ip if router_ip is not None else self.args.router_ip
+        self.router_port = router_port if router_port is not None else self.args.router_port
 
         host = host or get_host_info()[1]
 
