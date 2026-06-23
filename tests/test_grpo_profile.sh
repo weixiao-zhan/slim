@@ -1,47 +1,45 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/common.sh"
-
 BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
-FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-fp8"
+SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-profile"
+PROFILE_DIR="$REPO_DIR/outputs/profiles"
+LOG="$SAVE_DIR/run.log"
+mkdir -p "$SAVE_DIR"
 
 start_ray
+set +e
 run_train "
-    --num-rollout 40
-    --rollout-batch-size 64
-    --n-samples-per-prompt 8
+    --num-rollout 3
+    --rollout-batch-size 8
+    --n-samples-per-prompt 4
     --max-context-len 8192
-    --apply-chat-template-kwargs {\"enable_thinking\":false}
     --rollout-temperature 1
     --num-steps-per-rollout 1
-    --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
-    --over-sampling-batch-size 96
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
     --rollout-shuffle
+    --skip-eval-before-train
 
-    --eval-log-passrate
-    --eval-interval 20
-    --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
-    --eval-n-samples-per-prompt 1
-
-    --rollout-num-gpus-per-engine 1
+    --rollout-num-gpus-per-replica 1
     --sglang-mem-fraction-static 0.8
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
-    --rollout-fault-tolerance
-    --colocate
+    --rollout-colocate
 
-    --actor-num-nodes 1
-    --actor-num-gpus-per-node $NUM_GPUS
+    --actor-num-gpus $NUM_GPUS
     --attn-implementation flash_attention_3
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 16384
+    --max-tokens-per-gpu 8192
+
+    --profile-target train_pg rollout
+    --profile-step-start 0
+    --profile-step-end 1
+    --profile-dir $PROFILE_DIR
 
     --advantage-estimator grpo
     --disable-rewards-std-normalization
@@ -52,16 +50,20 @@ run_train "
 
     --optimizer adam
     --lr 3e-6
-    --lr-warmup-iters 10
+    --lr-warmup-iters 0
     --lr-decay-style constant
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.98
 
-    --hf-checkpoint $FP8_MODEL_DIR
-    --load $BF16_MODEL_DIR
+    --hf-checkpoint $BF16_MODEL_DIR
     --save $SAVE_DIR
-    --save-interval 10
 
-    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8)
-"
+    $(wandb_args grpo-mixed-cis-qwen35-4b-fp8-fp32-profile)
+" 2>&1 | tee "$LOG"
+set -e
+
+cleanup
+verdict="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$LOG" 1 0)"
+echo "RESULT: $verdict"
+[[ "$verdict" == PASS* ]]

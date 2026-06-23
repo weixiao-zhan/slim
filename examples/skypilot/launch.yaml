@@ -162,7 +162,6 @@ run: | # shell
     --sglang-mm-enable-dp-encoder \
     --sglang-mamba-scheduler-strategy extra_buffer \
     --sglang-page-size 64 \
-    --rollout-fault-tolerance \
     --rollout-colocate \
     \
     --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
