@@ -25,7 +25,7 @@ slim forwards SGLang parameters with the `--sglang-` prefix:
 ```
 
 Resource scheduling parameters are set by slim directly:
-- `--tp-size` is set via `--rollout-num-gpus-per-engine`
+- `--tp-size` is set via `--rollout-num-gpus-per-replica`
 - `--model-path` is set via `--hf-checkpoint`
 
 ### Router
@@ -38,7 +38,7 @@ Pass sgl-router parameters with a `router` prefix: e.g., `--router-balance-abs-t
 
 ```bash
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 2
+   --rollout-num-gpus-per-replica 2
 )
 ```
 

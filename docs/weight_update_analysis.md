@@ -5,20 +5,19 @@
 | Axis | Values |
 |------|--------|
 | Nodes | **Single node** vs **Multi node** |
-| GPU sharing | **Colocate** (`--colocate`, sync `train.py`) vs **Separate** (async `train_async.py` or sync `train.py` without `--colocate`) |
+| GPU sharing | **Colocate** (`--rollout-colocate`, sync `train.py`) vs **Separate** (async `train_async.py` or sync `train.py` without `--rollout-colocate`) |
 | GPUs per engine | **=1** (1 GPU per engine) vs **>1** (multiple GPUs per engine) |
 
-> **Note**: slim treats each sglang engine as an opaque unit of `num_gpus_per_engine` GPUs.
+> **Note**: slim treats each sglang engine as an opaque unit of `num_gpus_per_replica` GPUs.
 > How sglang internally splits those GPUs into TP/PP/DP/EP is configured via sglang args
 > (`--sglang-pp-size`, `--sglang-tp-size`, `--sglang-ep-size`) and is transparent to the
 
 ## Weight Updater Selection
 
 ```python
-# actor.py:207-211
 self.weight_updater = (
     UpdateWeightFromTensor(self.args, self.model)    # Colocate
-    if self.args.colocate
+    if self.args.rollout_colocate
     else UpdateWeightFromDistributed(self.args, self.model)  # Separate
 )
 ```
