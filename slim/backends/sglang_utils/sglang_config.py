@@ -21,8 +21,8 @@ class ServerGroupConfig:
                      are started first and their URLs are automatically
                      injected into prefill groups as ``encoder_urls``.
         num_gpus: Total number of GPUs for this group.
-        num_gpus_per_engine: GPUs per engine for this group.  Overrides the
-                             model-level or global ``--rollout-num-gpus-per-engine``.
+        num_gpus_per_replica: GPUs per engine for this group.  Overrides the
+                             model-level or global ``--rollout-num-gpus-per-replica``.
         overrides: Optional dict of SGLang ``ServerArgs`` field overrides.
                    These are applied on top of the base CLI ``--sglang-*``
                    arguments in ``_compute_server_args``.
@@ -30,7 +30,7 @@ class ServerGroupConfig:
 
     worker_type: str
     num_gpus: int
-    num_gpus_per_engine: int | None = None
+    num_gpus_per_replica: int | None = None
     overrides: dict = dataclasses.field(default_factory=dict)
 
     def __post_init__(self):
@@ -48,7 +48,7 @@ class ModelConfig:
     Attributes:
         name: Unique name for this model (e.g. "actor", "reward").
         model_path: HF checkpoint path.  Falls back to ``args.hf_checkpoint``.
-        num_gpus_per_engine: Default GPUs per engine for all groups in this
+        num_gpus_per_replica: Default GPUs per engine for all groups in this
                              model.  Individual groups can override.
         server_groups: Server group configurations for this model.
         update_weights: Whether this model receives weight updates from
@@ -61,17 +61,17 @@ class ModelConfig:
 
     name: str
     model_path: str | None = None
-    num_gpus_per_engine: int | None = None
+    num_gpus_per_replica: int | None = None
     server_groups: list[ServerGroupConfig] = dataclasses.field(default_factory=list)
     update_weights: bool | None = None
 
     def resolve(self, args) -> None:
         """Resolve per-group defaults from model-level then args-level values."""
-        default_gpus_per_engine = self.num_gpus_per_engine or args.rollout_num_gpus_per_engine
+        default_gpus_per_replica = self.num_gpus_per_replica or args.rollout_num_gpus_per_replica
         default_model_path = self.model_path or args.hf_checkpoint
         for g in self.server_groups:
-            if g.num_gpus_per_engine is None:
-                g.num_gpus_per_engine = default_gpus_per_engine
+            if g.num_gpus_per_replica is None:
+                g.num_gpus_per_replica = default_gpus_per_replica
             # Inject model_path into overrides so _compute_server_args picks it up.
             if "model_path" not in g.overrides:
                 g.overrides["model_path"] = default_model_path
@@ -124,14 +124,14 @@ class SglangConfig:
           - name: actor
             model_path: /path/to/actor
             update_weights: true          # receives training weight updates (default)
-            num_gpus_per_engine: 2
+            num_gpus_per_replica: 2
             server_groups:
               - worker_type: prefill
                 num_gpus: 4
-                num_gpus_per_engine: 2
+                num_gpus_per_replica: 2
               - worker_type: decode
                 num_gpus: 8
-                num_gpus_per_engine: 4
+                num_gpus_per_replica: 4
           - name: ref
             model_path: /path/to/ref
             update_weights: false          # frozen, no weight updates
@@ -172,7 +172,7 @@ class SglangConfig:
                 ModelConfig(
                     name=m["name"],
                     model_path=m.get("model_path"),
-                    num_gpus_per_engine=m.get("num_gpus_per_engine"),
+                    num_gpus_per_replica=m.get("num_gpus_per_replica"),
                     server_groups=groups,
                     update_weights=m.get("update_weights", True),
                 )
@@ -183,7 +183,7 @@ class SglangConfig:
     def from_prefill_num_servers(args) -> "SglangConfig":
         """Build a config equivalent to the legacy --prefill-num-servers flag."""
         total_gpus = args.rollout_num_gpus
-        prefill_gpus = args.prefill_num_servers * args.rollout_num_gpus_per_engine
+        prefill_gpus = args.prefill_num_servers * args.rollout_num_gpus_per_replica
         decode_gpus = total_gpus - prefill_gpus
         assert decode_gpus > 0, f"No decode GPUs: total {total_gpus}, prefill {prefill_gpus}"
         return SglangConfig(

@@ -4,7 +4,7 @@
 
 ```bash
 # Install dependencies.
-# --extra fla: flash-linear-attention + causal-conv1d, required for Qwen3.5/3.6 training (all tests use Qwen3.5-4B).
+# --extra fla: flash-linear-attention + causal-conv1d, required for Qwen3.5/3.6 training.
 # Training-side attention extras (pick per GPU; otherwise --attn-implementation sdpa works everywhere):
 #   --extra fa2  FlashAttention-2 (Ampere/Ada, e.g. A100/L40s). Builds from source (nvcc, ~10-30 min).
 #   --extra fa3  FlashAttention-3 (Hopper only; not usable on SM120/Blackwell).
@@ -20,12 +20,22 @@ The test scripts resolve these via `$REPO_DIR`.
 hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 ```
 
-Forge FP8 if needed
+### FP8 checkpoints (prerequisite for `sweep_fp8.sh`)
+
+`sweep_fp8.sh` needs two pre-forged FP8 copies of the base model alongside the bf16 one:
+
 ```bash
+# fp32 block scales
 uv run python tools/convert_hf_to_fp8.py \
-    --model-dir models/Qwen3.5-4B \
-    --save-dir models/Qwen3.5-4B-FP8 \
+    --model-dir models/Qwen3.5-2B \
+    --save-dir models/Qwen3.5-2B-FP8 \
     --ref-config tools/fp8_recipes/qwen35_official.json
+
+# ue8m0 (power-of-two) block scales
+uv run python tools/convert_hf_to_fp8.py \
+    --model-dir models/Qwen3.5-2B \
+    --save-dir models/Qwen3.5-2B-FP8-ue8m0 \
+    --ref-config tools/fp8_recipes/qwen35_ue8m0.json
 ```
 
 ## Datasets
@@ -51,12 +61,16 @@ uv run python tests/prepare_mixed.py
 
 ```bash
 # Run a test (pick one) — each script handles ray start/stop
-bash tests/test_gspo_math.sh
-bash tests/test_gspo_geo3k.sh
-bash tests/test_ppo_geo3k.sh
-bash tests/test_lora_gspo_geo3k.sh
-bash tests/test_grpo_mixed_cis.sh
-bash tests/test_grpo_mixed_fp8_cis.sh
+bash tests/test_ppo_lora.sh
+bash tests/test_grpo_profile.sh
+
+# Sweeps run a matrix of combos and print a PASS/FAIL summary (see below)
+bash tests/sweep_placement.sh
+bash tests/sweep_dataset.sh
+bash tests/sweep_algo.sh
+bash tests/sweep_surrogate.sh
+bash tests/sweep_fp8.sh
+bash tests/sweep_moe_rollout.sh
 ```
 
 ### on Blackwell (SM120)
@@ -64,21 +78,55 @@ bash tests/test_grpo_mixed_fp8_cis.sh
 SM120 need following treatment:
 
 - **Training attention:** FA3/FA2 have no SM120 kernel. Using sdpa as training-side attention `--attn-implementation flash_attention_3` → `--attn-implementation sdpa`
-- **Rollout gemm:** SGL default to DeepGEMM when runing fp8 on backwell, which expects ue8m0 scales. To use fp32 block scales: use `--sglang-fp8-gemm-backend triton` in (`test_grpo_mixed_fp8_cis.sh`)
+- **Rollout gemm:** SGL default to DeepGEMM when runing fp8 on backwell, which expects ue8m0 scales. To use fp32 block scales: use `--sglang-fp8-gemm-backend triton` in (`sweep_fp8.sh`)
 
 ## Available Tests
 
-All tests use **Qwen3.5-4B** (`test_grpo_mixed_fp8_cis.sh` additionally uses an
-FP8-forged copy as the rollout checkpoint).
+Two kinds of tests live here:
 
-| Test | Algorithm | Dataset | Notes |
-|------|-----------|---------|-------|
-| `test_ppo_geo3k.sh` | PPO | Geo3K | 4 actor + 4 critic, VLM |
-| `test_gspo_math.sh` | GSPO | DAPO-17k | 8 actor GPUs colocated |
-| `test_gspo_geo3k.sh` | GSPO | Geo3K | 1 actor GPU, VLM |
-| `test_lora_gspo_geo3k.sh` | GSPO + LoRA | Geo3K | LoRA r=128, PEFT, VLM |
-| `test_grpo_mixed_cis.sh` | GRPO + CIS | Mixed (math+vision) | colocated |
-| `test_grpo_mixed_fp8_cis.sh` | GRPO + CIS | Mixed (math+vision) | colocated, FP8 weight sync |
+- **Sweeps** (`sweep_*.sh`) — each runs a matrix of combos along one axis on a
+  single 8-GPU node, grades every run with `tests/sanity_check.py` (job
+  success, finite actor/critic losses, non-degenerate rollout reward, ≥2 weight
+  updates), and prints a PASS/FAIL summary table. All combos share one
+  `COMMON_ARGS` block sized to **3 rollout steps × 8 prompts × 4 samples**,
+  `max-context-len 8192`, `max-tokens-per-gpu 8192`, FA3. Run all combos with no
+  args, or a subset by passing combo names.
+- **Standalone tests** — single runs that exercise an orthogonal axis (precision,
+  PEFT, profiling) not covered by a sweep.
+
+### Sweeps
+
+| Sweep | Axis | Combos | Model |
+|-------|------|--------|-------|
+| `sweep_placement.sh` | (rollout-colocate, critic-colocate) placement | 6 PPO combos + HSDP control | Qwen3.5-2B |
+| `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-2B |
+| `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-2B |
+| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-2B |
+| `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32`, `fp8_ue8m0` | Qwen3.5-2B (+ FP8 forges) |
+| `sweep_moe_rollout.sh` | MoE rollout parallelism (R3 on) | `tp1`, `tp4`, `tp4_ep4` | Qwen3.6-35B-A3B (MoE) |
+
+```bash
+hf download Qwen/Qwen3.5-2B --local-dir models/Qwen3.5-2B
+uv run python tests/prepare_mixed.py
+bash tests/sweep_placement.sh                       # all combos
+bash tests/sweep_placement.sh colocate_critic       # a single combo
+bash tests/sweep_surrogate.sh cis                   # just the CIS combo
+```
+
+The non-MoE sweeps use **Qwen3.5-2B**. `sweep_moe_rollout.sh` runs on the
+**Qwen3.6-35B-A3B** MoE checkpoint, which lives on the NVMe disk and is referenced
+through the `models/<name>` symlink convention (`models/Qwen3.6-35B-A3B ->
+/opt/dlami/nvme/models/Qwen3.6-35B-A3B`). All sweeps use `flash_attention_3`
+(Hopper); on A100/L40s switch to `flash_attention_2`, on Blackwell/SM120 use `sdpa`.
+
+### Standalone tests
+
+Tests default to the **mixed** (math+vision) dataset unless noted.
+
+| Test | Algorithm | Notes |
+|------|-----------|-------|
+| `test_ppo_lora.sh` | PPO + LoRA | LoRA r=128 PEFT on both actor and critic |
+| `test_grpo_profile.sh` | GRPO + CIS | torch profiler harness |
 
 ## Environment Variables
 

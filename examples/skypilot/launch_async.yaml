@@ -158,13 +158,13 @@ run: | # shell
     --eval-n-samples-per-prompt 1 \
     \
     --rollout-num-gpus 6 \
-    --rollout-num-gpus-per-engine 1 \
+    --rollout-num-gpus-per-replica 1 \
     --sglang-mem-fraction-static 0.6 \
     --sglang-attention-backend fa3 \
-    --rollout-fault-tolerance \
     \
-    --actor-num-nodes 2 \
-    --actor-num-gpus-per-node 1 \
+    --actor-num-gpus 2 \
+    --actor-num-gpus-per-replica 1 \
+    --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
     --use-dynamic-batch-size \
