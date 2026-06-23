@@ -8,9 +8,7 @@ from slim.utils.misc import should_run_periodic_action
 
 # The framework supports other asynchronous approaches such as fully async (which is shown in examples/full_async).
 def train(args):
-    assert not args.colocate, "Colocation is not supported for async training."
-    if args.use_critic:
-        raise NotImplementedError("async training does not support --advantage-estimator ppo_gae yet.")
+    assert not args.rollout_colocate, "Rollout colocation is not supported for async training."
     configure_logger()
     # allocate the GPUs
     pgs = create_placement_groups(args)
@@ -42,10 +40,22 @@ def train(args):
             rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
 
         if args.use_critic:
-            critic_train_handle = critic_model.async_train(rollout_id, rollout_data_curr_ref)
-            if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
-            ray.get(critic_train_handle)
+            should_train_actor = rollout_id >= args.num_critic_only_steps and not args.critic_train_only
+            if args.critic_colocate:
+                values_refs = critic_model.compute_values(rollout_id, rollout_data_curr_ref)
+                ray.get(values_refs)
+                ray.get(critic_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
+                if should_train_actor:
+                    ray.get(actor_model.compute_log_probs(rollout_id, rollout_data_curr_ref))
+                    ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
+            else:
+                values_refs = critic_model.compute_values(rollout_id, rollout_data_curr_ref)
+                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_curr_ref) if should_train_actor else []
+                ray.get(values_refs + logprobs_refs)  # wait for both to finish
+                critic_train_handle = critic_model.async_train(rollout_id, rollout_data_curr_ref, values_refs)
+                if should_train_actor:
+                    ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
+                ray.get(critic_train_handle)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
 

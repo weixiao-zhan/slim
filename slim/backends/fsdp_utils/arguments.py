@@ -47,7 +47,6 @@ class FSDPArgs:
     compute_dtype: str | None = None  # None | "bf16" | "fp16"
 
     # FSDP configuration
-    fsdp_strategy: str = "hybrid"  # "hybrid" (shard intra-node, replicate inter-node) or "full" (shard all GPUs)
     fsdp_state_dict_cpu_offload: bool = True  # If True, offload full state dict to CPU during collection.
     fsdp_cpu_offload: bool = (
         False  # If True, offload parameters, gradients, and optimizer states to CPU (optimizer runs on CPU)
@@ -100,7 +99,7 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
             if not hasattr(args, k):
                 setattr(args, k, v)
     args.rank = 0  # Primary process rank for wandb initialization
-    args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+    args.world_size = args.actor_num_gpus
 
     valid_master = (None, "fp32")
     if args.master_weight_dtype not in valid_master:
@@ -112,10 +111,6 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
         raise ValueError(
             f"--compute-dtype must be one of {valid_compute}, got {args.compute_dtype!r}"
         )
-    # Hybrid sharding fall back to full shard on single node.
-    if args.fsdp_strategy == "hybrid" and args.actor_num_nodes <= 1:
-        args.fsdp_strategy = "full"
-
     if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "use_peft", False):
         logger.warning(
             "--fsdp-cpu-offload and --use-peft would cause "

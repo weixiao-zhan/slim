@@ -15,8 +15,7 @@ class RayTrainGroup:
 
     Args:
         args (Namespace): Arguments for the actor group.
-        num_nodes (int): Number of nodes for this actor group.
-        num_gpus_per_node (int): Number of gpus for this actor group.
+        num_gpus (int): Total number of GPUs (world size) for this actor group.
         pg (PlacementGroup, optional): Placement group to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
@@ -30,22 +29,20 @@ class RayTrainGroup:
     def __init__(
         self,
         args,
-        num_nodes,
-        num_gpus_per_node,
+        num_gpus,
         pg: tuple[PlacementGroup, list[int], list[int]],
         num_gpus_per_actor: float = 1,
         role: str = "actor",
     ) -> None:
         self.args = args
-        self._num_nodes = num_nodes
-        self._num_gpus_per_node = num_gpus_per_node
+        self._num_gpus = num_gpus
         self.role = role
 
         # Allocate the GPUs for actors w/o instantiating them
         self._allocate_gpus_for_actor(pg, num_gpus_per_actor)
 
     def _allocate_gpus_for_actor(self, pg, num_gpus_per_actor):
-        world_size = self._num_nodes * self._num_gpus_per_node
+        world_size = self._num_gpus
 
         # Use placement group to lock resources for models of same type
         assert pg is not None

@@ -31,11 +31,11 @@ sglang:
   - name: <model_name>              # Required. Unique identifier for this model.
     model_path: <path>              # Optional. HF checkpoint path. Defaults to --hf-checkpoint.
     update_weights: <bool>          # Optional. Whether to sync weights from training. Auto-inferred.
-    num_gpus_per_engine: <int>      # Optional. Default TP size for all groups in this model.
+    num_gpus_per_replica: <int>      # Optional. Default TP size for all groups in this model.
     server_groups:                  # Required. List of server group configurations.
       - worker_type: <type>         # Required. One of: regular, prefill, decode, placeholder.
         num_gpus: <int>             # Required. Total GPUs allocated to this group.
-        num_gpus_per_engine: <int>  # Optional. TP size override for this group.
+        num_gpus_per_replica: <int>  # Optional. TP size override for this group.
         overrides: <dict>           # Optional. SGLang ServerArgs field overrides.
 ```
 
@@ -48,7 +48,7 @@ sglang:
 | `name` | `str` | **Required** | Unique name for this model (e.g., `"actor"`, `"ref"`, `"reward"`). Used as the key in `args.sglang_model_routers`. |
 | `model_path` | `str` | `args.hf_checkpoint` | HuggingFace checkpoint path. All server groups within a model must use the same model path. |
 | `update_weights` | `bool` | Auto | Whether this model receives weight updates from training. When not set, automatically inferred: `true` if `model_path` matches `--hf-checkpoint`, `false` otherwise. |
-| `num_gpus_per_engine` | `int` | `args.rollout_num_gpus_per_engine` | Default TP size for server groups in this model. Individual groups can override. |
+| `num_gpus_per_replica` | `int` | `args.rollout_num_gpus_per_replica` | Default TP size for server groups in this model. Individual groups can override. |
 | `server_groups` | `list` | **Required** | List of `ServerGroupConfig` entries defining the engine topology. (`engine_groups` is accepted as a backward-compatible alias.) |
 
 #### Server Group Fields
@@ -57,7 +57,7 @@ sglang:
 |-------|------|---------|-------------|
 | `worker_type` | `str` | **Required** | Engine type: `regular` (standard), `prefill` (PD prefill worker), `decode` (PD decode worker), or `placeholder` (reserve GPU slots without launching engines). |
 | `num_gpus` | `int` | **Required** | Total number of GPUs for this group. Must be > 0. |
-| `num_gpus_per_engine` | `int` | Model's `num_gpus_per_engine` | TP size override. Number of GPUs per engine instance. |
+| `num_gpus_per_replica` | `int` | Model's `num_gpus_per_replica` | TP size override. Number of GPUs per engine instance. |
 | `overrides` | `dict` | `{}` | SGLang `ServerArgs` field overrides. Applied on top of `--sglang-*` CLI args with highest priority. |
 
 ### Worker Types
@@ -90,7 +90,7 @@ sglang:
 python train.py \
   --sglang-config sglang_basic.yaml \
   --rollout-num-gpus 8 \
-  --rollout-num-gpus-per-engine 2 \
+  --rollout-num-gpus-per-replica 2 \
   ...
 ```
 
@@ -107,10 +107,10 @@ sglang:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2    # 2 prefill engines, TP=2
+        num_gpus_per_replica: 2    # 2 prefill engines, TP=2
       - worker_type: decode
         num_gpus: 12
-        num_gpus_per_engine: 4    # 3 decode engines, TP=4
+        num_gpus_per_replica: 4    # 3 decode engines, TP=4
 ```
 
 ```bash
@@ -139,7 +139,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 8
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
 
   - name: ref
     model_path: /path/to/ref_model    # different model checkpoint
@@ -147,7 +147,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 4
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
 
   - name: reward
     model_path: /path/to/reward_model
@@ -155,7 +155,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 4
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
 ```
 
 ```bash
@@ -206,10 +206,10 @@ sglang:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
       - worker_type: decode
         num_gpus: 8
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
 
   - name: ref
     model_path: /path/to/ref_model
@@ -217,7 +217,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 4
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
 ```
 
 ### 5. Placeholder Groups for GPU Reservation
@@ -230,7 +230,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 6
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
       - worker_type: placeholder
         num_gpus: 2                   # reserve 2 GPUs (no engines created)
 ```
@@ -245,7 +245,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 8
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
         overrides:
           mem_fraction_static: 0.85
           context_length: 32768
@@ -319,7 +319,7 @@ slim automatically assigns each sample a unique `session_id` (stored in `sample.
 
 When the config is loaded, slim applies the following resolution cascade:
 
-1. **GPU per engine fallback:** Group `num_gpus_per_engine` → Model `num_gpus_per_engine` → `args.rollout_num_gpus_per_engine`
+1. **GPU per engine fallback:** Group `num_gpus_per_replica` → Model `num_gpus_per_replica` → `args.rollout_num_gpus_per_replica`
 2. **Model path fallback:** Group `overrides.model_path` → Model `model_path` → `args.hf_checkpoint`
 3. **Weight update inference:** If `update_weights` is not set:
    - `true` if the effective model path matches `--hf-checkpoint`
@@ -352,12 +352,12 @@ sglang:
     server_groups:
       - worker_type: prefill
         num_gpus: 4
-        num_gpus_per_engine: 2
+        num_gpus_per_replica: 2
         overrides:
           chunked_prefill_size: 8192
       - worker_type: decode
         num_gpus: 12
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
         overrides:
           mem_fraction_static: 0.88
 
@@ -367,7 +367,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 8
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
 
   - name: reward
     model_path: /data/models/reward-model
@@ -375,7 +375,7 @@ sglang:
     server_groups:
       - worker_type: regular
         num_gpus: 8
-        num_gpus_per_engine: 4
+        num_gpus_per_replica: 4
 ```
 
 **Launch command:**
@@ -437,9 +437,9 @@ async def generate_with_models(state, sample):
 
 No. PD disaggregation requires that a model's server groups are either all prefill/decode pairs or all regular. Mixing `regular` with `prefill`/`decode` in the same model is not supported.
 
-### Q: What happens if `num_gpus` is not divisible by `num_gpus_per_engine`?
+### Q: What happens if `num_gpus` is not divisible by `num_gpus_per_replica`?
 
-For multi-node engines (where `num_gpus_per_engine > num_gpus_per_node`), the division is based on the local GPU count per node. For example, with 8 GPUs/node and `num_gpus_per_engine: 16`, each engine spans 2 nodes.
+For multi-node engines (where `num_gpus_per_replica > num_gpus_per_node`), the division is based on the local GPU count per node. For example, with 8 GPUs/node and `num_gpus_per_replica: 16`, each engine spans 2 nodes.
 
 ### Q: Can different server groups within a model use different model paths?
 

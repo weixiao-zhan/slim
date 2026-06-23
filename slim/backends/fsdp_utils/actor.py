@@ -82,7 +82,6 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.train_parallel_config = {
             "dp_size": self.dp_size,
-            "fsdp_strategy": self.args.fsdp_strategy,
         }
         # Set before the debug_rollout_only guard so methods called from the
         # train loop (update_weights, save_model, async_train) don't AttributeError.
@@ -92,9 +91,9 @@ class FSDPTrainRayActor(TrainRayActor):
             return 0
 
         self.fsdp_cpu_offload = getattr(self.args, "fsdp_cpu_offload", False)
-        # Offload train and fsdp cpu offload cannot be used together, fsdp_cpu_offload is more aggressive
-        if self.args.offload_train and self.fsdp_cpu_offload:
-            self.args.offload_train = False
+        self._need_offload = (
+            self.args.rollout_colocate or self.args.critic_colocate
+        ) and not self.fsdp_cpu_offload
 
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
@@ -241,7 +240,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 logger.info(f"Rollout weight quantization enabled ({type(quantizer).__name__}) from {args.hf_checkpoint}")
             self.weight_updater = (
                 UpdateWeightFromTensor(self.args, self.model, quantizer)
-                if self.args.colocate
+                if self.args.rollout_colocate
                 else UpdateWeightFromDistributed(self.args, self.model, quantizer)
             )
 
@@ -258,8 +257,7 @@ class FSDPTrainRayActor(TrainRayActor):
         # Initialize data packing parameters
         self.max_tokens_per_gpu = args.max_tokens_per_gpu  # From main arguments
 
-        if self.args.offload_train:
-            self.sleep()
+        self.sleep()
 
         self.prof.on_init_end()
 
@@ -277,7 +275,6 @@ class FSDPTrainRayActor(TrainRayActor):
             return AutoModelForCausalLM
 
     def _setup_device_mesh(self) -> None:
-        """Setup device mesh for data parallelism."""
         from torch.distributed.device_mesh import init_device_mesh
 
         world_size = dist.get_world_size()
@@ -286,27 +283,33 @@ class FSDPTrainRayActor(TrainRayActor):
         self.dp_size = world_size
         self.dp_rank = rank
 
-        if self.args.fsdp_strategy == "hybrid":
-            assert world_size == self.args.actor_num_nodes * self.args.actor_num_gpus_per_node, (
-                f"world_size {world_size} != actor_num_nodes {self.args.actor_num_nodes} * "
-                f"actor_num_gpus_per_node {self.args.actor_num_gpus_per_node}"
-            )
-            self.mesh = init_device_mesh(
-                "cuda",
-                mesh_shape=(self.args.actor_num_nodes, self.args.actor_num_gpus_per_node),
-                mesh_dim_names=("replicate", "shard"),
-            )
-            self.dp_mesh = self.mesh
-            self.dp_group = dist.new_group()
-            logger.info(
-                f"[Rank {rank}] Device mesh (2D HSDP): replicate={self.args.actor_num_nodes}, "
-                f"shard={self.args.actor_num_gpus_per_node}, world_size={world_size}"
-            )
+        if self.role == "critic":
+            shard = self.args.critic_num_gpus_per_replica
         else:
+            shard = self.args.actor_num_gpus_per_replica
+        assert world_size % shard == 0, f"world_size {world_size} not divisible by num_gpus_per_replica {shard}"
+        replicate = world_size // shard
+
+        if shard == world_size:
             self.mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=("dp",))
             self.dp_mesh = self.mesh
             self.dp_group = self.mesh.get_group("dp")
             logger.info(f"[Rank {rank}] Device mesh (1D full shard): world_size={world_size}")
+        else:
+            # 2D mesh shards within the last dim and replicates across the first.
+            # shard == 1 -> pure DDP; 1 < shard < world_size -> HSDP.
+            self.mesh = init_device_mesh(
+                "cuda",
+                mesh_shape=(replicate, shard),
+                mesh_dim_names=("replicate", "shard"),
+            )
+            self.dp_mesh = self.mesh
+            self.dp_group = dist.new_group()
+            kind = "DDP" if shard == 1 else "HSDP"
+            logger.info(
+                f"[Rank {rank}] Device mesh (2D {kind}): replicate={replicate}, "
+                f"shard={shard}, world_size={world_size}"
+            )
 
     def _get_init_weight_context_manager(self):
         """Get context manager for model initialization.
@@ -423,8 +426,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
     @timer
     def sleep(self) -> None:
-        """Pause CUDA memory for all tracked tensors."""
-        if not self.args.offload_train:
+        """
+        Offload the trainer to CPU.
+        No-op if not self._need_offload.
+        """
+        if not self._need_offload:
             return
 
         print_memory("before offload model")
@@ -440,8 +446,11 @@ class FSDPTrainRayActor(TrainRayActor):
 
     @timer
     def wake_up(self) -> None:
-        """Resume CUDA memory for all tracked tensors."""
-        if not self.args.offload_train:
+        """
+        Resume the trainer onto GPU; Inverse of ``sleep``.
+        No-op if not self._need_offload.
+        """
+        if not self._need_offload:
             return
 
         self.model.cuda()
@@ -475,8 +484,7 @@ class FSDPTrainRayActor(TrainRayActor):
         """
         assert self._is_critic, "compute_values should only be called on the critic"
 
-        if self.args.offload_train:
-            self.wake_up()
+        self.wake_up()
 
         episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
 
@@ -494,9 +502,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 batch["cur_values"] = strip_cross_boundary(values[:-1], batch["cu_seqlens"])
 
         self.model.train()
-
-        if self.args.offload_train:
-            self.sleep()
 
         # Unpack and reorder values back to original episode order
         all_values = [None] * len(episodes)
@@ -530,17 +535,14 @@ class FSDPTrainRayActor(TrainRayActor):
 
         needs_forward = self.ref_model is not None or self._needs_actor_old_log_probs()
         if needs_forward:
-            if self.args.offload_train:
-                self.wake_up()
+            self.wake_up()
 
             if self.ref_model is not None:
                 self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
             if self._needs_actor_old_log_probs():
                 self._compute_log_prob("actor", packed_batches, store_prefix="actor_old_")
             self._deactivate_routing_replay()
-
-            if self.args.offload_train:
-                self.sleep()
+            # Stay resident; the immediately-following train() reuses the model on GPU.
 
         # Cache for train()
         self._pending_episodes = episodes
@@ -682,8 +684,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 value predictions from the critic (one ref per DP rank).
                 Required when advantage_estimator=="ppo_gae".
         """
-        if self.args.offload_train:
-            self.wake_up()
+        self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"):
             # Use cached data from compute_log_probs / compute_values if available
@@ -718,6 +719,9 @@ class FSDPTrainRayActor(TrainRayActor):
             is_primary_rank=dist.get_rank() == 0,
             compute_total_fwd_flops=None,
         )
+
+        self.sleep()
+        clear_memory()
 
     def _log_actor_train_metrics(self, packed_batches):
         log_dict = {}
@@ -1146,11 +1150,11 @@ class FSDPTrainRayActor(TrainRayActor):
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
         # PEFT weight sync: state_dict() must return merged (base + adapter) weights
-        # colocate (offload_train): sleep() already merged before moving to CPU, wake_up() will unmerge.
-        # separate : model is on GPU, merge/sync/unmerge in place.
+        # colocate: sleep() already merged before moving to CPU, wake_up() will unmerge.
+        # otherwise: model is on GPU, merge/sync/unmerge in place.
         is_peft = hasattr(self.model, "peft_config")
         if is_peft:
-            if self.args.offload_train:
+            if self._need_offload:
                 # Already merged by sleep(), just sync.
                 self.weight_updater.update_weights(peft_remap=True)
             else:

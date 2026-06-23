@@ -32,15 +32,37 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
     def add_slim_arguments(parser):
         # Ray
         def add_cluster_arguments(parser):
-            parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
             parser.add_argument(
-                "--actor-num-gpus-per-node", type=int, default=8, help="Number of gpus per node for training actor"
+                "--actor-num-gpus",
+                type=int,
+                default=8,
+                help="Total number of GPUs for the training actor.",
             )
             parser.add_argument(
-                "--critic-num-nodes", type=int, default=None, help="Number of nodes for training actor"
+                "--actor-num-gpus-per-replica",
+                type=int,
+                default=None,
+                help=(
+                    "Number of GPUs each actor replica spans (the FSDP shard group size). "
+                    "Replica count is actor_num_gpus // actor_num_gpus_per_replica. "
+                    "Equal to actor_num_gpus -> a single full-shard FSDP replica; "
+                    "equal to 1 -> pure DDP; in between -> HSDP. Defaults to actor_num_gpus."
+                ),
             )
             parser.add_argument(
-                "--critic-num-gpus-per-node", type=int, default=None, help="Number of gpus per node for training actor"
+                "--critic-num-gpus",
+                type=int,
+                default=None,
+                help="Total number of GPUs for the critic. Must equal actor_num_gpus. Defaults to actor_num_gpus.",
+            )
+            parser.add_argument(
+                "--critic-num-gpus-per-replica",
+                type=int,
+                default=None,
+                help=(
+                    "Number of GPUs each critic replica spans (the FSDP shard group size). "
+                    "Defaults to critic_num_gpus (single full-shard replica)."
+                ),
             )
 
             parser.add_argument(
@@ -48,55 +70,41 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
-                    "Number of GPUs for inference. Note that when using --colocate, "
-                    "i.e. the training and the inference engines are on the same gpus, this param will be ignored and will be set as "
-                    "actor_num_gpus_per_node * actor_num_nodes."
+                    "Number of GPUs for inference. Note that when using --rollout-colocate, "
+                    "i.e. the training and the inference engines are on the same gpus, this param will be ignored and will be set "
+                    "to the number of training GPUs (actor, plus critic when disaggregated)."
                 ),
             )
             parser.add_argument(
-                "--rollout-num-gpus-per-engine",
+                "--rollout-num-gpus-per-replica",
                 type=int,
                 default=1,
-                help="Number of GPUs per inference engine, just like the tp_size in sglang.",
+                help="Number of GPUs per inference engine (a rollout replica), just like the tp_size in sglang.",
             )
             parser.add_argument(
                 "--num-gpus-per-node",
                 type=int,
                 default=8,
                 help=(
-                    "Number of gpus per node for rollout."
-                    "Notice: If you are going to use less than 8 gpus per node under colocate mode, you should set this number."
+                    "Physical number of GPUs per node, used for packing / NUMA / port layout. "
+                    "Notice: If you are going to use less than 8 gpus per node, you should set this number."
                 ),
             )
             parser.add_argument(
-                "--colocate",
+                "--rollout-colocate",
                 action="store_true",
                 default=False,
                 help=(
-                    "Whether to colocate the inference engines and the actor. "
-                    "Turning this on will also set --offload to true."
+                    "Whether to colocate the inference engines on the training GPUs. "
                 ),
             )
             parser.add_argument(
-                "--offload",
+                "--critic-colocate",
                 action="store_true",
                 default=False,
-                help=("Equivalent to --offload-train + --offload-rollout. "),
-            )
-            parser.add_argument(
-                "--offload-train",
-                action=argparse.BooleanOptionalAction,
                 help=(
-                    "Whether to offload the training actor to CPU during training. "
-                    "This will always be true when --colocate is set."
-                ),
-            )
-            parser.add_argument(
-                "--offload-rollout",
-                action=argparse.BooleanOptionalAction,
-                help=(
-                    "Whether to offload the rollout generator to CPU during training. "
-                    "This will always be true when --colocate is set."
+                    "Whether to colocate the critic on the actor GPUs (time-shared) instead of giving it "
+                    "its own GPUs. Requires critic_num_gpus == actor_num_gpus."
                 ),
             )
 
@@ -262,12 +270,12 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
             # sampling
             parser.add_argument(
-                "--rollout-concurrency-per-engine",
+                "--rollout-concurrency-per-replica",
                 type=int,
                 default=128,
                 help=(
                     "The total in-flight generate concurrency is sized to "
-                    "rollout_concurrency_per_engine * num_rollout_engines. "
+                    "rollout_concurrency_per_replica * num_rollout_engines. "
                     "The router decides how to distribute these requests across engines."
                 ),
             )
@@ -370,10 +378,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
         def add_fault_tolerance_arguments(parser):
             parser.add_argument(
-                "--rollout-fault-tolerance",
-                action="store_true",
-                default=False,
-                help="Whether to enable the fault tolerance function during rollout.",
+                "--rollout-disable-fault-tolerance",
+                action="store_false",
+                dest="rollout_fault_tolerance",
+                help="Disable the fault tolerance function during rollout.",
             )
             parser.add_argument(
                 "--rollout-health-check-interval",
@@ -1306,33 +1314,57 @@ def slim_validate_args(args):
     if args.critic_train_only:
         if not args.use_critic:
             raise ValueError("--critic-train-only requires --use-critic (or --advantage-estimator ppo_gae).")
-        if args.actor_num_nodes != 0 or args.actor_num_gpus_per_node != 0:
+        if args.actor_num_gpus != 0:
             raise ValueError(
-                "--critic-train-only requires --actor-num-nodes 0 --actor-num-gpus-per-node 0, "
-                f"but got actor_num_nodes={args.actor_num_nodes}, actor_num_gpus_per_node={args.actor_num_gpus_per_node}."
+                f"--critic-train-only requires --actor-num-gpus 0, but got actor_num_gpus={args.actor_num_gpus}."
             )
-    if args.critic_num_gpus_per_node is None:
-        args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
-    if args.critic_num_nodes is None:
-        args.critic_num_nodes = args.actor_num_nodes
+    if args.critic_num_gpus is None:
+        args.critic_num_gpus = args.actor_num_gpus
+    if args.actor_num_gpus_per_replica is None:
+        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
+    if args.critic_num_gpus_per_replica is None:
+        args.critic_num_gpus_per_replica = args.critic_num_gpus or 1
     if args.critic_load is None:
         args.critic_load = args.load
     if args.critic_lr is None:
         args.critic_lr = args.lr
 
-    if args.offload:
-        args.offload_train = True
-        args.offload_rollout = True
-    del args.offload
+    # A replica size must evenly divide the role's GPU total.
+    if args.actor_num_gpus:
+        assert args.actor_num_gpus % args.actor_num_gpus_per_replica == 0, (
+            f"actor_num_gpus {args.actor_num_gpus} not divisible by "
+            f"actor_num_gpus_per_replica {args.actor_num_gpus_per_replica}"
+        )
+    if args.use_critic and args.critic_num_gpus:
+        assert args.critic_num_gpus % args.critic_num_gpus_per_replica == 0, (
+            f"critic_num_gpus {args.critic_num_gpus} not divisible by "
+            f"critic_num_gpus_per_replica {args.critic_num_gpus_per_replica}"
+        )
+
+    # Actor and critic share one rollout-data split and pair rank-wise, so their
+    # GPU totals must match (this also satisfies the --critic-colocate C == A rule).
+    if args.use_critic and not args.critic_train_only:
+        assert args.critic_num_gpus == args.actor_num_gpus, (
+            f"critic_num_gpus ({args.critic_num_gpus}) must equal actor_num_gpus ({args.actor_num_gpus})."
+        )
+    if args.critic_colocate:
+        if not args.use_critic:
+            raise ValueError("--critic-colocate requires --advantage-estimator ppo_gae.")
+        if args.critic_train_only:
+            raise ValueError("--critic-colocate is incompatible with --critic-train-only.")
+        assert args.critic_num_gpus == args.actor_num_gpus, (
+            f"--critic-colocate requires critic_num_gpus == actor_num_gpus, "
+            f"got {args.critic_num_gpus} vs {args.actor_num_gpus}."
+        )
 
     if args.debug_rollout_only:
-        if args.colocate and (not args.rollout_num_gpus):
-            args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+        if args.rollout_colocate and (not args.rollout_num_gpus):
+            args.rollout_num_gpus = args.actor_num_gpus
         else:
-            args.actor_num_gpus_per_node = min(8, args.rollout_num_gpus)
-            args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
-        args.colocate = False
-        args.offload_train = args.offload_rollout = False
+            args.actor_num_gpus = args.rollout_num_gpus
+        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
+        args.rollout_colocate = False
+        args.critic_colocate = False
         if args.train_memory_margin_bytes > 0:
             logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
             args.train_memory_margin_bytes = 0
@@ -1341,25 +1373,20 @@ def slim_validate_args(args):
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
     )
 
-    # always true on offload for colocate at the moment.
-    if args.colocate:
-        if args.offload_train is None:
-            args.offload_train = True
-        if args.offload_rollout is None:
-            args.offload_rollout = True
-        if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
+    # Rollout colocate time-shares the training GPUs: size R to the training span.
+    if args.rollout_colocate:
+        if args.critic_train_only:
+            train_span = args.critic_num_gpus
+        elif args.critic_colocate or not args.use_critic:
+            train_span = args.actor_num_gpus
+        else:
+            train_span = args.actor_num_gpus + args.critic_num_gpus
+        if args.rollout_num_gpus != train_span:
             logger.info(
-                f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
-                f"* actor_num_nodes {args.actor_num_nodes}, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes."
+                f"rollout_colocate set: overriding rollout_num_gpus {args.rollout_num_gpus} -> {train_span} "
+                "to fill the training span."
             )
-            args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
-            if args.use_critic:
-                args.rollout_num_gpus += args.critic_num_gpus_per_node * args.critic_num_nodes
-
-    if args.offload_train is None:
-        args.offload_train = False
-    if args.offload_rollout is None:
-        args.offload_rollout = False
+            args.rollout_num_gpus = train_span
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path

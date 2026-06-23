@@ -76,32 +76,50 @@ def _create_placement_group(num_gpus):
     return pg, pg_reordered_bundle_indices, pg_reordered_gpu_ids
 
 
-def create_placement_groups(args):
-    """Create placement groups for actor and rollout engines."""
+def _placement_layout(args):
+    """Compute the placement-group total and per-role bundle offsets.
 
-    num_gpus = 0
-    if args.debug_train_only:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_offset = 0
-        if args.use_critic:
-            num_gpus += args.critic_num_nodes * args.critic_num_gpus_per_node
-            critic_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
-    elif args.debug_rollout_only:
-        num_gpus = args.rollout_num_gpus
-        rollout_offset = 0
-    elif args.colocate:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
-        rollout_offset = 0
-        if args.use_critic:
-            num_gpus += args.critic_num_nodes * args.critic_num_gpus_per_node
-            critic_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
+    Returns ``(pg_total, critic_offset, rollout_offset)`` where the offsets are
+    indices into the sorted bundle list. Layout follows the (rollout_colocate,
+    critic_colocate) matrix:
+
+        train_span     = A           if CC else A + C
+        critic_offset  = 0           if CC else A
+        rollout_offset = 0           if RC else train_span
+        pg_total       = train_span  if RC else train_span + R
+    """
+    A = args.actor_num_gpus
+    C = args.critic_num_gpus if args.use_critic else 0
+    R = args.rollout_num_gpus
+
+    if args.debug_rollout_only:
+        return R, 0, 0
+
+    cc = args.critic_colocate
+    rc = args.rollout_colocate
+
+    if args.critic_train_only:
+        train_span = C
+        critic_offset = 0
+    elif cc or not args.use_critic:
+        train_span = A
+        critic_offset = 0
     else:
-        num_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node + args.rollout_num_gpus
-        rollout_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
-        if args.use_critic:
-            num_gpus += args.critic_num_nodes * args.critic_num_gpus_per_node
-            critic_offset = args.actor_num_nodes * args.actor_num_gpus_per_node
-            rollout_offset += args.critic_num_nodes * args.critic_num_gpus_per_node
+        train_span = A + C
+        critic_offset = A
+
+    if args.debug_train_only:
+        return train_span, critic_offset, train_span
+
+    rollout_offset = 0 if rc else train_span
+    pg_total = train_span if rc else train_span + R
+    return pg_total, critic_offset, rollout_offset
+
+
+def create_placement_groups(args):
+    """Create placement groups for actor, critic, and rollout engines."""
+
+    num_gpus, critic_offset, rollout_offset = _placement_layout(args)
 
     logger.info(f"Creating placement group with {num_gpus} GPUs...")
     pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _create_placement_group(num_gpus)
@@ -119,11 +137,10 @@ def create_placement_groups(args):
     }
 
 
-def allocate_train_group(args, num_nodes, num_gpus_per_node, pg):
+def allocate_train_group(args, num_gpus, pg):
     return RayTrainGroup(
         args=args,
-        num_nodes=num_nodes,
-        num_gpus_per_node=num_gpus_per_node,
+        num_gpus=num_gpus,
         pg=pg,
         num_gpus_per_actor=0.4,
     )
@@ -132,15 +149,13 @@ def allocate_train_group(args, num_nodes, num_gpus_per_node, pg):
 def create_training_models(args, pgs, rollout_manager):
     actor_model = allocate_train_group(
         args=args,
-        num_nodes=args.actor_num_nodes,
-        num_gpus_per_node=args.actor_num_gpus_per_node,
+        num_gpus=args.actor_num_gpus,
         pg=pgs["actor"],
     )
     if args.use_critic:
         critic_model = allocate_train_group(
             args=args,
-            num_nodes=args.critic_num_nodes,
-            num_gpus_per_node=args.critic_num_gpus_per_node,
+            num_gpus=args.critic_num_gpus,
             pg=pgs["critic"],
         )
         critic_init_handle = critic_model.async_init(args, role="critic", with_ref=False)
@@ -194,7 +209,7 @@ def create_rollout_manager(args, pg):
         ray.get(rollout_manager.check_weights.remote(action="snapshot"))
         ray.get(rollout_manager.check_weights.remote(action="reset_tensors"))
 
-    if args.offload_rollout:
+    if args.rollout_colocate:
         ray.get(rollout_manager.offload.remote())
 
     return rollout_manager, num_rollout_per_epoch

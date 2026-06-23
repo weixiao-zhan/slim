@@ -19,7 +19,7 @@ def train(args):
     # create the actor and critic models
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
-    if args.offload_rollout:
+    if args.rollout_colocate:
         ray.get(rollout_manager.onload_weights.remote())
 
     # always update weight first so that sglang has the loaded weights from training.
@@ -29,26 +29,12 @@ def train(args):
         if args.check_weight_update_equal:
             ray.get(rollout_manager.check_weights.remote(action="compare"))
 
-    if args.offload_rollout:
+    if args.rollout_colocate:
         ray.get(rollout_manager.onload_kv.remote())
 
     # special case for eval-only
     if args.num_rollout == 0 and args.eval_interval is not None:
         ray.get(rollout_manager.eval.remote(rollout_id=0))
-
-    def offload_train(rollout_id):
-        if args.offload_train:
-            if args.use_critic:
-                critic_model.offload()
-                if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
-                    actor_model.offload()
-            else:
-                actor_model.offload()
-        else:
-            if args.critic_train_only:
-                critic_model.clear_memory()
-            else:
-                actor_model.clear_memory()
 
     def save(rollout_id):
         if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps and not args.critic_train_only):
@@ -72,35 +58,37 @@ def train(args):
 
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
 
-        if args.offload_rollout:
+        if args.rollout_colocate:
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            # Phase 1: Compute values and log-probs in parallel
-            values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
-            if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
-                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref)
+            should_train_actor = rollout_id >= args.num_critic_only_steps and not args.critic_train_only
+            if args.critic_colocate:
+                values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
+                ray.get(values_refs)
+                ray.get(critic_model.async_train(rollout_id, rollout_data_ref, values_refs))
+                if should_train_actor:
+                    ray.get(actor_model.compute_log_probs(rollout_id, rollout_data_ref))
+                    ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
             else:
-                logprobs_refs = []
-            ray.get(values_refs + logprobs_refs)  # wait for both to finish
-
-            # Phase 2: Train actor and critic concurrently
-            critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
-            if rollout_id >= args.num_critic_only_steps and not args.critic_train_only:
-                ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
-            ray.get(critic_train_handle)
+                values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
+                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref) if should_train_actor else []
+                ray.get(values_refs + logprobs_refs)  # wait for both to finish
+                critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
+                if should_train_actor:
+                    ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
+                ray.get(critic_train_handle)
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             save(rollout_id)
 
-        offload_train(rollout_id)
-        if args.offload_rollout:
+        if args.rollout_colocate:
             ray.get(rollout_manager.onload_weights.remote())
         if not args.critic_train_only:
             actor_model.update_weights()
-        if args.offload_rollout:
+        if args.rollout_colocate:
             ray.get(rollout_manager.onload_kv.remote())
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):

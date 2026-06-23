@@ -143,7 +143,7 @@ class UpdateWeightFromTensor(UpdateWeight):
         self.rollout_engines = rollout_engines
 
         if engine_gpu_counts is None:
-            engine_gpu_counts = [self.args.rollout_num_gpus_per_engine] * len(rollout_engines)
+            engine_gpu_counts = [self.args.rollout_num_gpus_per_replica] * len(rollout_engines)
         if engine_gpu_offsets is None:
             engine_gpu_offsets = []
             offset = 0
@@ -269,7 +269,7 @@ class UpdateWeightFromDistributed(UpdateWeight):
         self._is_src_rank = dist.get_rank() == 0
 
         if engine_gpu_counts is None:
-            engine_gpu_counts = [self.args.rollout_num_gpus_per_engine] * len(rollout_engines)
+            engine_gpu_counts = [self.args.rollout_num_gpus_per_replica] * len(rollout_engines)
 
         if self._is_src_rank:
             self._group_name = "slim"

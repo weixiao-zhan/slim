@@ -15,10 +15,11 @@ Supported hardware: NVIDIA H100/H200, B200 series.
 ## GPU Allocation
 
 ```bash
---actor-num-nodes 1              # nodes for training
---actor-num-gpus-per-node 4      # GPUs per node for training
+--actor-num-gpus 4               # total GPUs for training
+--actor-num-gpus-per-replica 4    # GPUs per FSDP replica (==total: full shard; ==1: DDP; between: HSDP)
+--num-gpus-per-node 8            # physical GPUs per node (packing / ports)
 --rollout-num-gpus 4             # GPUs for inference (SGLang)
---rollout-num-gpus-per-engine 2  # GPUs per SGLang engine (like tp_size)
+--rollout-num-gpus-per-replica 2  # GPUs per SGLang engine (like tp_size)
 ```
 
 ### Colocated Mode
@@ -26,9 +27,8 @@ Supported hardware: NVIDIA H100/H200, B200 series.
 Share GPUs between training and inference with CPU offloading:
 
 ```bash
---actor-num-nodes 1
---actor-num-gpus-per-node 8
---colocate                       # overrides --rollout-num-gpus to match actor GPUs
+--actor-num-gpus 8
+--rollout-colocate               # overrides --rollout-num-gpus to match training GPUs
 ```
 
 ## Checkpoints
@@ -94,9 +94,9 @@ PPO GAE requires a separate critic model (additional GPU allocation):
 
 ```bash
 --advantage-estimator ppo_gae
---critic-num-nodes 1
---critic-num-gpus-per-node 4
+--critic-num-gpus 4              # must equal --actor-num-gpus
 --critic-load /path/to/critic
+# add --critic-colocate to time-share the critic on the actor GPUs
 ```
 
 ### Optimizer
@@ -128,7 +128,7 @@ ray job submit --address="http://127.0.0.1:8265" \
 
 1. **Garbled text during training?** -- Check that `--hf-checkpoint` points to a valid HF checkpoint and that weights were synced correctly from FSDP to SGLang. See [Debugging](debug.md).
 
-2. **Task stuck on Ray submission?** -- Verify total GPU count >= `actor_num_nodes * actor_num_gpus_per_node + rollout_num_gpus` (or just actor GPUs if `--colocate`).
+2. **Task stuck on Ray submission?** -- Verify total GPU count >= `actor_num_gpus + critic_num_gpus + rollout_num_gpus` (drop critic if disaggregated-off, drop rollout if `--rollout-colocate`, drop critic if `--critic-colocate`).
 
 3. **OOM during training?** -- Lower `--max-tokens-per-gpu`. Only active with `--use-dynamic-batch-size`.
 

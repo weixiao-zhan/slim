@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 class ServerGroup:
     """A group of homogeneous SGLang engines with the same configuration.
 
-    All engines in a group share the same tp_size / nodes_per_engine / pg.
+    All engines in a group share the same tp_size / nodes_per_replica / pg.
     A RolloutServer may contain multiple ServerGroups (e.g. prefill vs decode
     in PD disaggregation).
     """
@@ -54,7 +54,7 @@ class ServerGroup:
     args: Any
     pg: Any  # (placement_group, reordered_bundle_indices, reordered_gpu_ids)
     all_engines: list
-    num_gpus_per_engine: int
+    num_gpus_per_replica: int
     num_new_engines: int
     worker_type: str = "regular"  # "regular", "prefill", or "decode"
     rank_offset: int = 0  # cumulative engine count before this group
@@ -66,13 +66,13 @@ class ServerGroup:
     router_port: int | None = None
 
     @property
-    def nodes_per_engine(self):
-        return max(1, self.num_gpus_per_engine // self.args.num_gpus_per_node)
+    def nodes_per_replica(self):
+        return max(1, self.num_gpus_per_replica // self.args.num_gpus_per_node)
 
     @property
     def engines(self):
         """Node-0 engines only (for multi-node serving)."""
-        return self.all_engines[:: self.nodes_per_engine]
+        return self.all_engines[:: self.nodes_per_replica]
 
     def start_engines(self, port_cursors: dict[int, int] | None = None) -> tuple[list, dict[int, int]]:
         """Create Ray actors, allocate ports, and fire ``engine.init()`` without waiting.
@@ -91,7 +91,7 @@ class ServerGroup:
             self.num_new_engines = 0
             return [], port_cursors
 
-        num_gpu_per_engine = min(self.num_gpus_per_engine, self.args.num_gpus_per_node)
+        num_gpus_per_replica = min(self.num_gpus_per_replica, self.args.num_gpus_per_node)
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
 
@@ -107,7 +107,7 @@ class ServerGroup:
             num_cpus = num_gpus
 
             # Get the base GPU ID from placement group using gpu_offset.
-            gpu_index = self.gpu_offset + i * num_gpu_per_engine
+            gpu_index = self.gpu_offset + i * num_gpus_per_replica
             base_gpu_id = int(reordered_gpu_ids[gpu_index])
 
             scheduling_strategy = PlacementGroupSchedulingStrategy(
@@ -140,7 +140,7 @@ class ServerGroup:
                 worker_type=self.worker_type,
                 base_gpu_id=base_gpu_id,
                 sglang_overrides=self.sglang_overrides,
-                num_gpus_per_engine=self.num_gpus_per_engine,
+                num_gpus_per_replica=self.num_gpus_per_replica,
             )
 
             rollout_engines.append((global_rank, rollout_engine))
@@ -163,7 +163,7 @@ class ServerGroup:
                 args=self.args,
                 rollout_engines=rollout_engines,
                 worker_type=self.worker_type,
-                num_gpus_per_engine=self.num_gpus_per_engine,
+                num_gpus_per_replica=self.num_gpus_per_replica,
                 rank_offset=self.rank_offset,
                 base_port=base_port,
             )
@@ -217,7 +217,7 @@ class RolloutServer:
 
     Each RolloutServer represents one model deployed behind a single router.
     A server may contain multiple ServerGroups with different
-    ``num_gpus_per_engine`` (e.g. prefill TP=2, decode TP=4).
+    ``num_gpus_per_replica`` (e.g. prefill TP=2, decode TP=4).
     """
 
     server_groups: list[ServerGroup]
@@ -249,7 +249,7 @@ class RolloutServer:
     @property
     def engine_gpu_counts(self) -> list[int]:
         """Per-engine GPU count for all node-0 engines, parallel to ``engines``."""
-        return [g.num_gpus_per_engine for g in self.server_groups for _ in g.engines]
+        return [g.num_gpus_per_replica for g in self.server_groups for _ in g.engines]
 
     @property
     def engine_gpu_offsets(self) -> list[int]:
@@ -260,15 +260,15 @@ class RolloutServer:
         offsets = []
         for g in self.server_groups:
             for j in range(len(g.engines)):
-                offsets.append(g.gpu_offset + j * g.num_gpus_per_engine)
+                offsets.append(g.gpu_offset + j * g.num_gpus_per_replica)
         return offsets
 
     @property
-    def nodes_per_engine(self):
-        """Nodes per engine.  Only valid when all active groups share the same value."""
-        values = {g.nodes_per_engine for g in self.server_groups}
+    def nodes_per_replica(self):
+        """Nodes per replica.  Only valid when all active groups share the same value."""
+        values = {g.nodes_per_replica for g in self.server_groups}
         if len(values) != 1:
-            raise ValueError(f"Heterogeneous nodes_per_engine across groups: {values}")
+            raise ValueError(f"Heterogeneous nodes_per_replica across groups: {values}")
         return values.pop()
 
     def recover(self):
@@ -680,7 +680,7 @@ def _allocate_rollout_engine_addr_and_ports_normal(
     args,
     rollout_engines,
     worker_type="regular",
-    num_gpus_per_engine=None,
+    num_gpus_per_replica=None,
     rank_offset=0,
     base_port=15000,
 ):
@@ -690,8 +690,8 @@ def _allocate_rollout_engine_addr_and_ports_normal(
     # 2. nccl port
     # 3. dist_init_addr port
     # 4. other ports for dp_attention, which is of size 4 + dp_size
-    _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
-    num_engines_per_node = max(1, args.num_gpus_per_node // _gpus_per_engine)
+    _gpus_per_replica = num_gpus_per_replica or args.rollout_num_gpus_per_replica
+    num_engines_per_node = max(1, args.num_gpus_per_node // _gpus_per_replica)
     addr_and_ports: dict[int, dict] = {}
 
     # Track per-node port cursors so that different server groups (called
@@ -744,12 +744,12 @@ def _allocate_rollout_engine_addr_and_ports_normal(
             if worker_type == "prefill":
                 addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
 
-        if _gpus_per_engine > args.num_gpus_per_node:
-            num_node_per_engine = _gpus_per_engine // args.num_gpus_per_node
-            if local_rank % num_node_per_engine == 0:
+        if _gpus_per_replica > args.num_gpus_per_node:
+            num_nodes_per_replica = _gpus_per_replica // args.num_gpus_per_node
+            if local_rank % num_nodes_per_replica == 0:
                 # this is the first node in the engine, we need to allocate the dist_init_addr port
                 dist_init_addr = f"{get_addr()}:{get_port(30 + args.sglang_dp_size)}"
-                for i in range(num_node_per_engine):
+                for i in range(num_nodes_per_replica):
                     addr_and_ports.setdefault(rank + i, {})
                     addr_and_ports[rank + i]["dist_init_addr"] = dist_init_addr
         else:
@@ -816,28 +816,23 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     return router_ip, router_port, prometheus_port
 
 
-def _compute_rollout_offset(args) -> int:
-    """Offset (in PG bundle slots) where rollout GPUs start."""
-    if args.debug_train_only or args.debug_rollout_only or args.colocate:
-        return 0
-    if args.critic_train_only:
-        return args.critic_num_nodes * args.critic_num_gpus_per_node
-    offset = args.actor_num_nodes * args.actor_num_gpus_per_node
-    if args.use_critic:
-        offset += args.critic_num_nodes * args.critic_num_gpus_per_node
-    return offset
-
-
 def _compute_train_num_gpus(args) -> int:
-    """Total number of training (actor + critic) GPU slots in the placement group."""
+    """Number of training GPU slots the rollout segment may overlap (the train span)."""
     if args.debug_rollout_only:
         return 0
     if args.critic_train_only:
-        return args.critic_num_nodes * args.critic_num_gpus_per_node
-    num = args.actor_num_nodes * args.actor_num_gpus_per_node
-    if args.use_critic:
-        num += args.critic_num_nodes * args.critic_num_gpus_per_node
-    return num
+        return args.critic_num_gpus
+    # Critic-colocate folds the critic onto the actor GPUs, so the span is just A.
+    if args.critic_colocate or not args.use_critic:
+        return args.actor_num_gpus
+    return args.actor_num_gpus + args.critic_num_gpus
+
+
+def _compute_rollout_offset(args) -> int:
+    """Offset (in PG bundle slots) where rollout GPUs start."""
+    if args.debug_train_only or args.debug_rollout_only or args.rollout_colocate:
+        return 0
+    return _compute_train_num_gpus(args)
 
 
 def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
@@ -845,7 +840,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
     Each model defined in the sglang config gets its own router and set
     of server groups.  Server groups within a model may have different
-    ``num_gpus_per_engine`` (e.g. for PD disaggregation where prefill
+    ``num_gpus_per_replica`` (e.g. for PD disaggregation where prefill
     and decode use different TP sizes).
 
     Returns a dict mapping model name → ``RolloutServer``.
@@ -883,17 +878,17 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
         def _make_group(group_cfg, router_ip, router_port, overrides_extra=None):
             nonlocal engine_offset, gpu_offset
-            gpus_per_engine = group_cfg.num_gpus_per_engine
-            num_gpu_per_engine_local = min(gpus_per_engine, args.num_gpus_per_node)
-            num_engines = group_cfg.num_gpus // num_gpu_per_engine_local
+            gpus_per_replica = group_cfg.num_gpus_per_replica
+            num_gpus_per_replica_local = min(gpus_per_replica, args.num_gpus_per_node)
+            num_engines = group_cfg.num_gpus // num_gpus_per_replica_local
 
             group_abs_start = rollout_pg_offset + gpu_offset
-            needs_offload = args.offload_rollout and group_abs_start < train_num_gpus
+            needs_offload = args.rollout_colocate and group_abs_start < train_num_gpus
             overrides = dict(group_cfg.overrides)
             if overrides_extra:
                 for k, v in overrides_extra.items():
                     overrides.setdefault(k, v)
-            if args.offload_rollout and not needs_offload:
+            if args.rollout_colocate and not needs_offload:
                 overrides.setdefault("enable_memory_saver", False)
             logger.info(
                 f"Engine group '{group_cfg.worker_type}' gpu_offset={gpu_offset} "
@@ -904,7 +899,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
                 args=args,
                 pg=pg,
                 all_engines=[None] * num_engines if group_cfg.worker_type != "placeholder" else [],
-                num_gpus_per_engine=gpus_per_engine,
+                num_gpus_per_replica=gpus_per_replica,
                 num_new_engines=0,
                 worker_type=group_cfg.worker_type,
                 rank_offset=engine_offset,
