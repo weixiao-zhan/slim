@@ -20,16 +20,17 @@ logger = logging.getLogger(__name__)
 
 
 def get_base_gpu_id(args, rank):
-    num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_engine)
-    if args.colocate:
-        start_index = (rank * num_gpus) % args.num_gpus_per_node
+    num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_replica)
+    # Rollout engines start after the training span (0 when colocated/rollout-only).
+    if args.debug_rollout_only or args.rollout_colocate:
+        rollout_offset = 0
+    elif args.critic_train_only:
+        rollout_offset = args.critic_num_gpus
+    elif args.critic_colocate or not args.use_critic:
+        rollout_offset = args.actor_num_gpus
     else:
-        num_actor_gpus = 0 if args.debug_rollout_only else args.actor_num_gpus_per_node * args.actor_num_nodes
-        start_index = (num_actor_gpus + rank * num_gpus) % args.num_gpus_per_node
-        if args.use_critic:
-            num_critic_gpus = args.critic_num_gpus_per_node * args.critic_num_nodes
-            start_index = (num_actor_gpus + num_critic_gpus + rank * num_gpus) % args.num_gpus_per_node
-    return start_index
+        rollout_offset = args.actor_num_gpus + args.critic_num_gpus
+    return (rollout_offset + rank * num_gpus) % args.num_gpus_per_node
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
@@ -154,14 +155,14 @@ class SGLangEngine(RayActor):
         worker_type: str = "regular",
         base_gpu_id: int | None = None,
         sglang_overrides: dict | None = None,
-        num_gpus_per_engine: int | None = None,
+        num_gpus_per_replica: int | None = None,
     ):
         self.args = args
         self.rank = rank
         self.worker_type = worker_type
         self.base_gpu_id = base_gpu_id
         self.sglang_overrides = sglang_overrides or {}
-        self.num_gpus_per_engine = num_gpus_per_engine
+        self.num_gpus_per_replica = num_gpus_per_replica
 
     def init(
         self,
@@ -203,7 +204,7 @@ class SGLangEngine(RayActor):
             disaggregation_bootstrap_port,
             base_gpu_id=self.base_gpu_id,
             sglang_overrides=self.sglang_overrides,
-            num_gpus_per_engine=self.num_gpus_per_engine,
+            num_gpus_per_replica=self.num_gpus_per_replica,
         )
 
         self.node_rank = server_args_dict["node_rank"]
@@ -558,10 +559,10 @@ def _compute_server_args(
     disaggregation_bootstrap_port: int | None = None,
     base_gpu_id: int | None = None,
     sglang_overrides: dict | None = None,
-    num_gpus_per_engine: int | None = None,
+    num_gpus_per_replica: int | None = None,
 ):
-    _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
-    nnodes = max(1, _gpus_per_engine // args.num_gpus_per_node)
+    _gpus_per_replica = num_gpus_per_replica or args.rollout_num_gpus_per_replica
+    nnodes = max(1, _gpus_per_replica // args.num_gpus_per_node)
     node_rank = rank % nnodes
     base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
     base = _to_local_gpu_id(base)
@@ -570,7 +571,7 @@ def _compute_server_args(
         "trust_remote_code": True,
         "random_seed": args.seed + rank,
         # memory
-        "enable_memory_saver": args.offload_rollout,
+        "enable_memory_saver": args.rollout_colocate,
         # distributed
         "host": host,
         "port": port,
@@ -581,13 +582,13 @@ def _compute_server_args(
         "gpu_id_step": 1,
         "base_gpu_id": base,
         # parallel
-        "tp_size": _gpus_per_engine // args.sglang_pp_size,
+        "tp_size": _gpus_per_replica // args.sglang_pp_size,
         "dp_size": args.sglang_dp_size,
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
         # cuda graph must cover the max concurrent batch size to avoid eager fallback.
-        "cuda_graph_max_bs": int(args.rollout_concurrency_per_engine),
-        "max_running_requests": int(args.rollout_concurrency_per_engine),
+        "cuda_graph_max_bs": int(args.rollout_concurrency_per_replica),
+        "max_running_requests": int(args.rollout_concurrency_per_replica),
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.

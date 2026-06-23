@@ -228,7 +228,7 @@ def init_http_client(args):
     if not args.rollout_num_gpus:
         return
 
-    _client_concurrency = args.rollout_concurrency_per_engine * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+    _client_concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
     if _http_client is None:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=_client_concurrency),

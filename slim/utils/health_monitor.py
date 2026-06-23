@@ -170,8 +170,8 @@ class RolloutHealthMonitor:
     def _kill_engine(self, rollout_engine_id: int):
         logger.info(f"Killing server group {rollout_engine_id}...")
         for i in range(
-            rollout_engine_id * self._server_group.nodes_per_engine,
-            (rollout_engine_id + 1) * self._server_group.nodes_per_engine,
+            rollout_engine_id * self._server_group.nodes_per_replica,
+            (rollout_engine_id + 1) * self._server_group.nodes_per_replica,
         ):
             engine = self._server_group.all_engines[i]
             if engine:
