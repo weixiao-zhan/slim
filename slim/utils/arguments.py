@@ -378,10 +378,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
 
         def add_fault_tolerance_arguments(parser):
             parser.add_argument(
-                "--rollout-fault-tolerance",
-                action="store_true",
-                default=False,
-                help="Whether to enable the fault tolerance function during rollout.",
+                "--rollout-disable-fault-tolerance",
+                action="store_false",
+                dest="rollout_fault_tolerance",
+                help="Disable the fault tolerance function during rollout.",
             )
             parser.add_argument(
                 "--rollout-health-check-interval",
