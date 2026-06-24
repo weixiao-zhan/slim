@@ -6,11 +6,29 @@ Args:
   --src-dir                    stage-1 run dir to read rollouts from.
   --out-dir                    where to write kl/ outputs.
   --offload-train              CPU-offload params (needed for BF16-35B); --limit caps #samples.
+
+Output: <out-dir>/kl/summary.json (token/seq K3 mean & p99), per_sample.json, and the raw
+per-token / per-sequence K3 arrays as .npy.
 """
+
+import os
+import sys
+
+# Pin the venv's nvidia libs ahead of the system CUDA on LD_LIBRARY_PATH, before `import torch`
+# (the dynamic linker reads LD_LIBRARY_PATH only at process start). Otherwise the loader splits a
+# library family across versions — e.g. main libcudnn.so.9 from the venv (9.19) but its sub-engine
+# libcudnn_graph.so.9 from /usr/local/cuda (9.20.0) — which aborts the VLM tower's patch-embed conv.
+# slim's training pipeline applies the same prepend via Ray runtime_env; here we set it then re-exec
+# once (execv keeps the PID, so it is safe under torchrun).
+if not os.environ.get("_STAGE2_NVIDIA_LD_PINNED"):
+    from slim.utils.env_utils import get_nvidia_ld_library_path
+
+    os.environ.update(get_nvidia_ld_library_path())
+    os.environ["_STAGE2_NVIDIA_LD_PINNED"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -23,9 +41,8 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
                     attn_impl: str = "sdpa"):
     """Construct a full slim args Namespace via slim's own parser, with a synthetic argv.
 
-    Mirrors the test scripts' flags but trimmed to a forward-only actor: debug-train-only skips
-    the sglang side entirely; get-mismatch-metrics + old-logprob-source actor force the actor-old
-    forward (which is the training logprob we compare to rollout).
+    A forward-only actor: --debug-train-only skips sglang; --get-mismatch-metrics +
+    --old-logprob-source actor force the actor-old forward (the training logprob we compare to rollout).
     """
     argv = [
         "--debug-train-only",  # do not parse/launch sglang
@@ -33,20 +50,18 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
         "--load", model_dir,
         "--prompt-data", C.SPLITS["math"][0],  # unused (no rollout), but the parser wants a value
         "--rollout-batch-size", "1",  # required by the parser; unused on the forward-only path
-        "--num-rollout", "1",         # ditto: no rollouts actually run
+        "--num-rollout", "1",
         "--rm-type", "math",
         "--actor-num-nodes", "1",
         "--actor-num-gpus-per-node", "1",
-        # SDPA for the training forward (+ torch.compile on the model below). The rollout-vs-training
-        # KL is set by precision (FP8-served rollout vs BF16 training), not by the attention kernel —
-        # SDPA matches FA4 to bf16 rounding noise (max|Δ|~0.016) — so SDPA is the simple, correct choice.
+        # SDPA for the training forward. The rollout-vs-training KL is set by precision (FP8-served
+        # rollout vs BF16 training), not by the attention kernel: SDPA matches FA4 to bf16 rounding
+        # noise (max|Δ|~0.016).
         "--attn-implementation", attn_impl,
-        # NOTE: --master-weight-dtype is deliberately OMITTED so it stays at slim's default (None =
-        # BF16 native weights, NO fp32 master copy). fp32 master weights exist only to keep backward
-        # + optimizer-state updates numerically stable; this is a forward-only KL probe (no backward,
-        # no optimizer), so fp32 would just double the weight footprint (35B fp32 = 140 GB, won't fit
-        # one GPU) for zero benefit. BF16 native is correct and is the dtype the real forward computes
-        # in. (Valid values are only (None, "fp32"); passing "none" as a string fails validation.)
+        # --master-weight-dtype stays at slim's default (None = BF16 native weights, no fp32 master
+        # copy). fp32 master weights only stabilize backward + optimizer updates; this is a
+        # forward-only probe, so fp32 would just double the weight footprint (35B fp32 = 140 GB, won't
+        # fit one GPU). Valid values are (None, "fp32") only.
         "--compute-dtype", "bf16",
         "--use-dynamic-batch-size",
         "--max-tokens-per-gpu", str(max_tokens_per_gpu),
@@ -90,6 +105,12 @@ def records_to_episodes(d, limit=None):
             arr = C.load_experts(d, rec["sample_idx"])
             if arr is not None:
                 ep.rollout_routed_experts = arr  # [num_gen_edges, L, K]; freeze() -> int32 tensor
+        if rec.get("has_mm"):
+            # Restore the processor-output tensors (pixel_values, image_grid_thw, ...) onto the
+            # episode so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
+            mm = C.load_mm_inputs(d, rec["sample_idx"])
+            if mm is not None:
+                ep.multimodal_inputs = mm  # dict of tensors; freeze() leaves it untouched
         ep.ensure_edge_alignment()
         ep.freeze()
         episodes.append((rec["sample_idx"], rec["num_prompt_tokens"], ep))
@@ -158,10 +179,9 @@ def main():
     actor.master_port = int(os.environ["MASTER_PORT"])
     actor.init(slim_args, role="actor", with_ref=False)
 
-    # NOTE: we deliberately do NOT torch.compile the forward. KL is identical with/without compile
-    # (compile is only a speed optimization), and on the R3 MoE path routing-replay sets a per-layer
-    # guard (`_routing_replay_layer_idx`) that makes dynamo recompile once per MoE layer — GPU util
-    # collapsed to ~0-2% from recompile thrash. Eager SDPA is the simple, fast, correct choice.
+    # The forward is NOT torch.compiled: KL is identical with/without compile, and on the R3 MoE path
+    # routing-replay sets a per-layer guard (`_routing_replay_layer_idx`) that makes dynamo recompile
+    # once per MoE layer, collapsing GPU util to ~0-2%. Eager SDPA is the simple, correct choice.
 
     episodes_meta = records_to_episodes(src_dir, limit=args_cli.limit)
     episodes = [ep for (_, _, ep) in episodes_meta]
@@ -181,15 +201,16 @@ def main():
     # Unpack each packed batch into per-episode edge-aligned tensors (exactly as the actor's
     # _train_core does). With Δ_i = train_logprob_i - rollout_logprob_i on each generated edge i:
     #   per-token K3  : kl_k3_i = exp(Δ_i) - Δ_i - 1           (compute_mismatch_metrics, per edge)
-    #   sequence K3   : Δ_seq = Σ_i Δ_i  (= log P_train(seq) - log P_rollout(seq) over generated
-    #                   edges, the realized-token sequence log-likelihood ratio), then
-    #                   kl_k3_seq = exp(Δ_seq) - Δ_seq - 1     (one value per sequence)
-    # Both are the K3 estimator (exp(x)-x-1); the per-token version measures realized-token
-    # divergence at each step, the sequence version measures whole-rollout divergence.
+    #   sequence K3   : length-NORMALIZED, GSPO-style (slim's compute_gspo_kl averages the
+    #                   log-ratio over the sequence). Let Δ_seq = Σ_i Δ_i over the L generated
+    #                   edges (= log P_train(seq) - log P_rollout(seq)); the mean log-ratio is
+    #                   s_bar = Δ_seq / L, then kl_k3_seq = exp(s_bar) - s_bar - 1 (one per seq).
+    # Both are the K3 estimator (exp(x)-x-1). Normalizing by L keeps the sequence ratio O(1)
+    # regardless of length (the raw Σ_i Δ_i exponentiates an unbounded sum and is tail-explosive).
     from slim.backends.fsdp_utils.data_packing import unpack_sequences
     from slim.utils.mismatch import compute_mismatch_metrics
 
-    all_kl, all_absdiff = [], []      # pooled per-token, across all sequences
+    all_kl = []                       # pooled per-token, across all sequences
     seq_kl, seq_delta = [], []        # one per sequence
     per_sample = []
     for batch in packed_batches:
@@ -202,28 +223,29 @@ def main():
         _, _, m = compute_mismatch_metrics(
             actor.args, train_log_probs=train_lps, rollout_log_probs=rollout_lps, loss_masks=masks
         )
-        for kl_t, ad_t, train_t, roll_t, mask_t in zip(
-            m.get("kl_k3", []), m.get("log_prob_abs_diff", []), train_lps, rollout_lps, masks
+        for kl_t, train_t, roll_t, mask_t in zip(
+            m.get("kl_k3", []), train_lps, rollout_lps, masks
         ):
             sel = mask_t.bool().cpu()
             kl = kl_t.float().cpu()[sel].numpy()
-            ad = ad_t.float().cpu()[sel].numpy()
             if kl.size == 0:
                 continue
             # per-token
             all_kl.append(kl)
-            all_absdiff.append(ad)
-            # sequence-level: sum Δ over this sequence's generated edges, then K3
+            # sequence-level (length-normalized, GSPO-style): mean log-ratio over this
+            # sequence's generated edges, then K3. Normalizing by L keeps it O(1) and
+            # comparable across lengths (raw Σ Δ exponentiates an unbounded sum -> tail explosion).
             delta_seq = float((train_t.float().cpu()[sel] - roll_t.float().cpu()[sel]).sum().item())
-            kl_seq = float(np.exp(delta_seq) - delta_seq - 1.0)
+            s_bar = delta_seq / kl.size  # mean log-ratio; kl.size == # generated edges (L)
+            kl_seq = float(np.exp(s_bar) - s_bar - 1.0)
             seq_delta.append(delta_seq)
             seq_kl.append(kl_seq)
             per_sample.append({
                 "n_tokens": int(kl.size),
                 "kl_k3_token_mean": float(kl.mean()),
-                "abs_diff_mean": float(ad.mean()),
                 "kl_k3_seq": kl_seq,
                 "delta_seq": delta_seq,
+                "mean_log_ratio": s_bar,
             })
 
     out_dir = out_run / "kl"
@@ -231,11 +253,9 @@ def main():
     run_key = out_run.name
     if all_kl:
         flat_kl = np.concatenate(all_kl)
-        flat_ad = np.concatenate(all_absdiff)
         seq_kl_arr = np.asarray(seq_kl, dtype=np.float64)
         seq_delta_arr = np.asarray(seq_delta, dtype=np.float64)
         np.save(out_dir / "kl_k3_per_token.npy", flat_kl)
-        np.save(out_dir / "abs_diff_per_token.npy", flat_ad)
         np.save(out_dir / "kl_k3_per_sequence.npy", seq_kl_arr)
         np.save(out_dir / "delta_per_sequence.npy", seq_delta_arr)
         summary = {
@@ -243,14 +263,13 @@ def main():
             "attn_implementation": slim_args.attn_implementation,
             "n_sequences": int(seq_kl_arr.size),
             "n_tokens": int(flat_kl.size),
-            # per-token (per-step) K3 of the realized tokens
+            # per-token (per-step) K3 of the realized tokens. Heavy-tailed (median ~0, std dominated
+            # by rare outliers), so we report mean (headline) + p99 (tail), not std.
             "kl_k3_token_mean": float(flat_kl.mean()),
-            "kl_k3_token_median": float(np.median(flat_kl)),
             "kl_k3_token_p99": float(np.percentile(flat_kl, 99)),
-            "abs_diff_token_mean": float(flat_ad.mean()),
-            # sequence-level K3 (whole-rollout log-likelihood ratio)
+            # sequence-level K3 (length-normalized mean log-ratio, GSPO-style); now O(1), unlike
+            # the old un-normalized form. Reported as mean (headline) + p99 (tail).
             "kl_k3_seq_mean": float(seq_kl_arr.mean()),
-            "kl_k3_seq_median": float(np.median(seq_kl_arr)),
             "kl_k3_seq_p99": float(np.percentile(seq_kl_arr, 99)),
             "delta_seq_mean": float(seq_delta_arr.mean()),
         }

@@ -101,13 +101,10 @@ def main():
     ap.add_argument("--precision", choices=["bf16", "fp8"], required=True)
     ap.add_argument("--split", choices=list(C.SPLITS), required=True)
     ap.add_argument("--r3", action="store_true", help="rollout routing replay (MoE only; capture expert ids)")
-    # Only the TOTAL context is capped (16k); generation length is NOT separately limited. Each
-    # request may generate up to (16k - its prompt length) tokens — long prompts get less, short
-    # prompts can run the full budget — so we never truncate reasoning more than the context bound
-    # itself. Why 16k total: a single rollout sequence is never split across stage-2 micro-batches,
-    # so its [T, vocab~152k] logits tensor must fit alongside the 70GB of BF16 weights in the
-    # forward; T<=16k keeps that ~10-12GB on one 96GB GPU. (A 32k context let single rollouts reach
-    # 30k tokens and OOM'd the forward.)
+    # Only the TOTAL context is capped (16k); generation length is bounded only by (16k - prompt
+    # length). Why 16k: a rollout sequence is never split across stage-2 micro-batches, so its
+    # [T, vocab~152k] logits tensor must fit alongside the 70GB of BF16 weights in the forward;
+    # T<=16k keeps that ~10-12GB on one 96GB GPU.
     ap.add_argument("--max-context-len", type=int, default=16384)
     ap.add_argument("--max-new-tokens", type=int, default=None,
                     help="hard cap on generated tokens; default None = only bounded by max-context-len")
@@ -191,10 +188,9 @@ def main():
         for _ in range(args_cli.samples_per_prompt):
             jobs.append((ei, ex, pids, mm))
 
-    # Submit ALL jobs in ONE batched generate() call. The offline engine then schedules them with
-    # continuous batching up to max_running_requests (= concurrency), instead of the previous
-    # one-request-at-a-time loop which ran at concurrency 1 (~30s/sample). Per-request image_data /
-    # input_ids are passed as parallel lists; the result is a list aligned to the input order.
+    # Submit ALL jobs in ONE batched generate() call; the engine schedules them with continuous
+    # batching up to max_running_requests (= concurrency). Per-request image_data / input_ids are
+    # parallel lists; outputs come back aligned to the input order.
     t0 = time.time()
     batch_input_ids = [pids for (_, _, pids, _) in jobs]
     batch_image_data = [mm_image_data(mm) for (_, _, _, mm) in jobs]
@@ -257,6 +253,11 @@ def main():
             rewards.append(r)
             truncs.append(bool(truncated))
 
+            # Persist the processor-output tensors (pixel_values, image_grid_thw, ...) for the
+            # stage-2 VLM forward; mm is None for text samples.
+            if mm:
+                C.save_mm_inputs(out_dir, j, mm)
+
             rec = {
                 "sample_idx": j,
                 "example_idx": ei,
@@ -267,6 +268,7 @@ def main():
                 "reward": float(r),
                 "label": ex.get("label"),
                 "has_experts": routed is not None,
+                "has_mm": bool(mm),
                 "finish_type": finish_type,   # "stop"/"eos"/"length"/...
                 "truncated": bool(truncated),  # True == hit length budget (no natural EOS)
             }

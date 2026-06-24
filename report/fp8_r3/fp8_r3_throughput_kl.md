@@ -1,190 +1,100 @@
-# FP8 vs BF16 on Qwen3.5-35B-A3B: throughput & rollout/training KL (± R3)
+# Low Precision Inference on Throughput, Accuracy, and Rollout-Train Discrepancy
 
-## Motivation
+Rollout stage can take up over half of RL training wall time.
+Low precision models (e.g. FP8, NVFP4) can leverage hardware FLOPS speedup to reduce inference time while offering near loss-less performance.
+However, low precision inference introduces rollout-train discrepancy and numerical instability.
+This report documents the interplay of low precision inference on throughput, accuracy, and rollout-train discrepancy on dense and MoE models.
 
-We want to see how much throughput FP8 buys on the rollout engine, while also measuring how much rollout/training KL divergence it (and MoE routing) introduces — comparing rollout routing replay (R3) on vs off against a dense 2B baseline.
+## Preliminary
 
-## Models
+### Models
 
-All from the Qwen3.5 family (hybrid: linear-attention + periodic full-attention, `full_attention_interval=4`).
+We benchmark **Qwen3.5-2B**, **Qwen3.5-9B**, and **Qwen3.5-35B-A3B** (MoE). The rest of the Qwen3.5 family is laid out for context — all share `head_dim` 256, vocab 248320, and a 3:1 linear/full-attention hybrid ratio.
 
-| Role | Model | Active | Layers (lin/full) | hidden | head_dim | KV heads | Notes |
-|------|-------|--------|-------------------|--------|----------|----------|-------|
-| MoE target | **Qwen3.5-35B-A3B** | ~3B | 40 (30/10) | 2048 | 256 | 2 | 256 experts, top-8 |
-| Dense baseline | **Qwen3.5-2B** | 2B | 24 (18/6) | 2048 | 256 | 2 | iso-width / iso-KV control |
+| Model | hidden | head_dim | Q heads | KV heads | Layers (lin/full) | Experts (top-k) |
+|-------|--------|----------|---------|----------|-------------------|-----------------|
+| **Qwen3.5-2B**   | 2048 | 256 | 8  | 2 | 24 (18/6)  | — (dense) |
+| Qwen3.5-4B       | 2560 | 256 | 16 | 4 | 32 (24/8)  | — (dense) |
+| **Qwen3.5-9B**   | 4096 | 256 | 16 | 4 | 32 (24/8)  | — (dense) |
+| Qwen3.5-27B      | 5120 | 256 | 24 | 4 | 64 (48/16) | — (dense) |
+| **Qwen3.5-35B-A3B** | 2048 | 256 | 16 | 2 | 40 (30/10) | 256 (top-8)  |
+| Qwen3.5-122B-A10B   | 3072 | 256 | 32 | 2 | 48 (36/12) | 256 (top-8)  |
+| Qwen3.5-397B-A17B   | 4096 | 256 | 32 | 2 | 60 (45/15) | 512 (top-10) |
 
-**Why 2B (not 4B) as the dense baseline.** The 2B matches the MoE on the dimensions that drive throughput and the KL comparison — same `hidden_size` (2048), same KV-head count (2), same `head_dim` (256), same 3:1 hybrid ratio, same vocab — whereas 4B is wider (2560 hidden, 4 KV heads). The MoE's ~3B active compute is bracketed just *above* the 2B dense reference (2B active). Remaining differences are depth (24 vs 40 layers) and attention heads (8 vs 16), so 2B is an **iso-active-compute / iso-width** baseline, not an iso-shape one (no Qwen3.5 dense model matches the MoE's 40-layer geometry exactly). R3 is a no-op on the dense model (no experts) — so 2B is the clean "routing gap = 0" control.
+The two dense baselines bracket the MoE on different axes. The **2B** is the **iso-width** baseline that differs in depth (24 vs 40 layers) and Q-heads (8 vs 16). The **9B** is the **iso-capacity** baseline: its ~9B parameters sit near the geometric mean of the MoE's ~34B total and ~2.9B active (√(34·2.9) ≈ 9.9B), a common rule-of-thumb for a dense model of equivalent effective capacity.
 
-Each model is run in two precisions: **BF16** (base checkpoint) and **FP8** (forged block-FP8, e4m3 128×128, dynamic activations, fp32 block scales — `tools/fp8_recipes/qwen35_official.json`). On this Blackwell card (RTX PRO 6000, SM120) DeepGEMM is disabled, so FP8 GEMM uses the Triton backend (`--sglang-fp8-gemm-backend triton`). BF16 carries no quantized GEMM backend — its matmuls run on the native cuBLAS backend.
+### Quantized precision & GEMM backends
 
-## Section 1 — Throughput difference (FP8 vs BF16)
+This report targets low precision rollout and full precision training recipe, i.e. only post-training quantization (PTQ) during weight sync, no quantization aware training (QAT).
+Experiment conducted on one RTX-PRO-6000 (Blackwell, SM120).
+Each model is evaluated in **BF16** and **FP8** precisions. 
+The FP8 checkpoint is post-training quantized with following recipe (same as Qwen3.5 official FP8 checkpoints):
+- 128×128 block e4m3 FP8,
+- fp32 block scales,
+- dynamic activations (w8a8),
+- modules kept in **BF16**: 
+  - `lm_head`, `embed_tokens`, 
+  - the linear-attention projections (`linear_attn.conv1d`/`in_proj_a`/`in_proj_b`), 
+  - the vision tower (`visual`),
+  - the MoE routing gates (`mlp.gate`, `mlp.shared_expert_gate`),
+  - the MTP head (`mtp.fc`) (not used in this report)
 
-Rollout decode throughput (median decode token/s), measured with `sglang.bench_one_batch` (FlashInfer attention, input=1024 / output=512), on the **same model family** for a like-for-like comparison: **Qwen3.5-2B** (dense) and **Qwen3.5-35B-A3B** (MoE), each BF16 vs FP8 (Triton block-GEMM). (A Qwen3.5-4B reference run during bring-up gave +28.6% at 32 / +19.8% at 64; not part of this study, since 2B is the aligned dense baseline.)
+Experiment used following backends with triton auto-tuned block-FP8 kernels:
 
-**Concurrency 32 is the shared comparison point for both models.** The BF16-35B caps the upper end: its ~67 GB of weights leave only ~50 KV request slots at `mem-fraction 0.9`, so batch 64 cannot be allocated (`alloc_req_slots runs out of memory`) — hence 32 is the highest concurrency both precisions of the 35B can run. Both models are swept at **1 / 8 / 16 / 32** (same set for BF16 and FP8) to show how the FP8 gain scales with batch; the 2B additionally has **64** (it fits easily). Read the FP8-vs-BF16 speedup *within a model at fixed concurrency* — the absolute token/s across the two models is not comparable (different size, different `mem-fraction`: 2B at 0.8, 35B at 0.9).
+| | Attention Backend | GEMM Backend |
+|---|-------------------|--------------|
+| BF16 Train (fwd-only) | SDPA | cuBLAS |
+| BF16 SGLang inference | FlashInfer | cuBLAS |
+| FP8 SGLang inference | FlashInfer | Triton block-FP8 |
 
-| Model | Conc | BF16 (tok/s) | FP8 (tok/s) | FP8 speedup |
-|-------|------|--------------|-------------|-------------|
-| 2B | 1 | 254.4 | 212.9 | −16.3% |
-| 2B | 8 | 1729.8 | 1752.1 | +1.3% |
-| 2B | 16 | 3163.0 | 3266.8 | +3.3% |
-| 2B | 32 | 5808.5 | 5965.0 | +2.7% |
-| 2B | 64 | 9186.4 | 9345.9 | +1.7% |
-| 35B-A3B | 1 | 148.5 | 174.2 | +17.3% |
-| 35B-A3B | 8 | 536.1 | 769.3 | +43.5% |
-| 35B-A3B | 16 | 797.0 | 1172.8 | +47.2% |
-| 35B-A3B | 32 | 1142.2 | 1752.6 | +53.4% |
 
-**Result.** On the small dense 2B, FP8 is roughly break-even (+1–3% at batch 8–64) and is actually *slower* at batch 1 (−16.3%): with little weight-bandwidth pressure at this size, the Triton FP8 GEMM overhead dominates, and at batch 1 (latency-bound) it isn't amortized. On the 35B-A3B MoE the win is large and *grows* with concurrency (+17% → +53%): the MoE moves far more weight per token, so dequant-from-FP8 saves real bandwidth, and at higher concurrency the decode is more GEMM/bandwidth-bound (vs latency-bound at batch 1), widening the FP8 advantage. This is the core throughput motivation for serving the rollout engine in FP8.
+## Throughput
 
-## Section 2 — Accuracy difference (FP8 vs BF16)
+We measured prefill and decode throughput via `sglang.bench_one_batch` (input=512, output=1024, context=1536) across concurrency $1\sim64$.
 
-Rule-based accuracy (boxed-answer match) from stage-1 evaluation rollouts, BF16 vs FP8, **reported separately for the two eval tasks** (100 prompts × 4 samples each, 16k context):
-- **Math** (text) — `datasets/eval100/test_math.parquet` (DAPO-Math-17k)
-- **Geo3k** (vision/VLM) — `datasets/eval100/test_vision.parquet` (Geometry3K, graded with the math RM)
+<img src="throughput.png" width="400" alt="Throughput">
 
-`acc` = raw accuracy over all 400 samples; `acc(unt)` = accuracy over only sequences that ended naturally (not length-truncated at 16k); `trunc` = fraction length-truncated. (Generated by `report/fp8_r3/collect_results.py`.)
+> FP8 could offer over **50%** decode speedup on high concurrency workloads. 
+> We observe the roof-line model: high concurrency prefill hit compute bound, where as decode always hit memory bandwidth bound on GDDR7 (not HBM). 
+> With future DeepGEMM (ue8m0 scale) or cuBLAS backends adding SM120 FP8 support, we expect the speedup to improve on low concurrency end.
 
-#### Math (text)
-| Model | Prec | acc | acc(unt) | trunc rate |
-|-------|------|-----|----------|------------|
-| 2B    | BF16 | 0.333 | 0.403 | 0.255 |
-| 2B    | FP8  | 0.350 | 0.415 | 0.278 |
-| 35B   | BF16 | 0.787 | 0.917 | 0.245 |
-| 35B   | FP8  | 0.790 | 0.913 | 0.193 |
+## Accuracy
 
-#### Geo3k (vision)
-| Model | Prec | acc | acc(unt) | trunc rate |
-|-------|------|-----|----------|------------|
-| 2B    | BF16 | 0.718 | 0.740 | 0.030 |
-| 2B    | FP8  | 0.693 | 0.718 | 0.035 |
-| 35B   | BF16 | 0.880 | 0.887 | 0.007 |
-| 35B   | FP8  | 0.882 | 0.882 | 0.000 |
+Each model generated **4 samples** per prompt on **100 prompts** from **DAPO-Math-17k** (text) and **Geometry3K** (vision) with 16K max context respectively.
+We report **pass@k**, **acc(unt)** (the accuracy of the sequences that ended naturally), and **trunc rate**.
 
-We report Math and Geo3k separately (not pooled): the tasks differ in difficulty and answer format, and FP8's impact may differ by modality.
+<img src="accuracy.png" width="600" alt="Accuracy">
 
-**Result.** FP8 is accuracy-neutral within noise on every cell (|Δ raw acc| ≤ 0.025; the 35B is +0.003 Math / +0.002 Geo3k). Two things the truncation split exposes: (1) **Math truncates heavily** (19–28% of rollouts exceed 16k) — so untruncated accuracy is much higher (35B Math jumps 0.79→0.92), i.e. the 35B is genuinely strong on math, it just often runs out of budget; (2) **Geo3k barely truncates** (≤3.5%), so raw≈untruncated there. The 35B-FP8 even truncates *less* on Math than BF16 (0.193 vs 0.245), nudging its raw accuracy up despite identical untruncated quality.
+> The accuracy difference between FP8 and BF16 is within the margin of sampling noise. 
+> FP8 offers near loss-less performance.
 
-## Section 3 — FSDP-backend rollout/training KL (R3 on vs off vs 2B baseline)
+## Rollout-Train Policy Discrepancy
 
-The headline measurement. For each token the FSDP training forward produces a logprob; the rollout engine produced another. The gap drives the policy-surrogate correction, and for an MoE a major source of it is **expert-routing divergence** between rollout (sglang) and training (HF/FSDP).
+In RL, generated tokens are sampled from the rollout engine (sglang) under $\pi_{\text{rollout}}$, but the policy-gradient is taken on the training actor (HF/FSDP) $\pi_{\text{train}}$. The quantized inference introduce addition discrepancy to already-existed numerical gap (floating point arithmetic is not associative) and expert-routing divergence in MoEs [ref: Rollout Routing Replay R3].
 
-**Metric** (`slim/utils/mismatch.py`). Both granularities compare only the **logprob of the realized (selected) token** — train vs rollout — never the full vocabulary distribution. With `Δ_i = train_logprob_i − rollout_logprob_i` on each generated token `i`:
-- **per-token (per-step)** — `kl_k3_i = exp(Δ_i) − Δ_i − 1`, over every realized generated token (also `log_prob_abs_diff_i = |Δ_i|`). Lets us plot divergence by position / rank tokens.
-- **sequence-level** — sum each sequence's selected-token logprobs first (one train sum, one rollout sum), so `Δ_seq = Σ_i train_logprob_i − Σ_i rollout_logprob_i = Σ_i Δ_i`, then a single K3 `kl_k3_seq = exp(Δ_seq) − Δ_seq − 1` per sequence, aggregated (mean/median) across all examples.
+Denote the model-generated token (i.e. the realized token at each step) as $t_i$. The per-token log-ratio and sequence-mean log-ratio are:
+$$
+\begin{aligned}
+\log r_i &= \log\pi_{\text{train}}(t_i) - \log\pi_{\text{rollout}}(t_i) \\
+\overline{\log r} &= \frac{1}{L}\sum_{i=1}^{L}\log r_i
+\end{aligned}
+$$
+We measure the **rollout-train discrepancy** as $\mathrm{KL}(\pi_{\text{rollout}}\|\pi_{\text{train}})$ and report the **k3** estimator (Schulman) at token and sequence level:
+$$
+\begin{aligned}
+\text{K3}_{\text{tok}} &= \mathbb{E}_{\textcolor{red}{t_i} \sim \pi_{\text{rollout}}}\left[e^{\log r_i} - \log r_i - 1 \right] \\
+\text{K3}_{\text{seq}} &=\mathbb{E}_{\textcolor{red}{t_:} \sim \pi_{\text{rollout}}} \left[e^{\overline{\log r}} - \overline{\log r} - 1\right]
+\end{aligned}
+$$
 
-Because we only gather the selected token's logprob (slim's Liger path does this without materializing the `[T, vocab]` distribution), the KL itself has **no vocabulary-dimension cost**.
+<img src="kl.png" width="400" alt="Rollout-train KL">
 
-The training forward runs **eager SDPA** (no FlashAttention-4, no `torch.compile`): the rollout↔training KL is set by *precision* (FP8-served rollout vs BF16 training forward), not by the training attention kernel — SDPA matches FA4 to bf16 rounding noise (max|Δ|≈0.016) — and `torch.compile` thrashes on the R3 MoE path (the per-layer routing-replay guard forces a recompile per MoE layer, collapsing GPU util to ~0–2%). The forward always loads the **BF16** weights (forward-only needs no fp32 master copy — that exists only for backward/optimizer stability — and 35B in fp32 = 140 GB won't fit one GPU; this also mirrors real slim RL, where `--load` is BF16 and FP8 is used only by the rollout engine). Total context is capped at **16k** for a memory reason that is separate from the KL math: the LM head must still compute the `[T, vocab~152k]` logits *as a transient* to get each token's logprob (the softmax normalizer needs the full row), and that compute buffer — not the KL — is what must fit alongside the 70 GB of BF16 weights; T ≤ 16k keeps it in range on one 96 GB GPU. The KL we keep is only the gathered selected-token logprobs.
+> FP8 inference introduces additional rollout-train discrepancy over BF16 inference, consistently but modestly, across all three models.
+> Vision tasks are more sensitive than pure text due to their continuous (image-embedding) representation.
+> R3 helps mitigate the MoE's expert-routing discrepancy.
 
-**Conditions:**
-| Config | Model | R3 | Expectation |
-|--------|-------|----|-----|
-| dense baseline | 2B | n/a | floor — KL from precision only, no routing |
-| MoE | 35B-A3B | off | largest gap — routing diverges |
-| MoE, R3 | 35B-A3B | on (`--use-rollout-routing-replay`) | gap shrinks toward the dense floor |
+## End-to-End RL Wall Time
 
-Run for both BF16 and FP8 to separate the **routing** contribution (R3 on/off) from the **precision** contribution (BF16 vs FP8). `qwen3_5_moe` has a registered routing-replay adapter (`ROUTING_REPLAY_REGISTRY`); sglang returns captured expert ids in `meta_info`. To keep the R3 and no-R3 KL on identical rollouts (so only the training forward differs), ONE R3-captured 35B stage-1 run feeds both: stage-2 replays the stored routers for the R3 row and ignores them for the no-R3 row.
+Despite the near loss-less performance and decode speedup, the rollout-train discrepancy may still slows down the end to end RL wall time. The low precision inference is generating tokens faster, however, the importance sampling in policy gradient may end up drop / clip more tokens. This section compares end to end RL training performance gain under same workload.
 
-**Results — reported separately for Math and Geo3k.** Per-token (per-step) K3 over realized generated tokens, and sequence-level K3 (summed Δ per sequence). Lower = rollout and training agree.
-
-#### Math (text)
-| Config | Precision | per-token K3 mean | median | p99 | seq K3 mean | median |
-|--------|-----------|-------------------|--------|-----|-------------|--------|
-| 2B baseline    | BF16 | 0.0050 | 0.0000 | 0.0698 | 52.8  | 4.6  |
-| 2B baseline    | FP8  | 0.0087 | 0.0000 | 0.1508 | 99.3  | 67.8 |
-| 35B            | BF16 | 0.0111 | 0.0000 | 0.1594 | 82.5  | 38.2 |
-| 35B            | FP8  | 0.0143 | 0.0000 | 0.2500 | 103.2 | 59.4 |
-| 35B R3         | BF16 | 0.0101 | 0.0000 | 0.1408 | 74.4  | 33.2 |
-| 35B R3         | FP8  | 0.0130 | 0.0000 | 0.2184 | 93.4  | 51.3 |
-
-#### Geo3k (vision)
-| Config | Precision | per-token K3 mean | median | p99 | seq K3 mean | median |
-|--------|-----------|-------------------|--------|-----|-------------|--------|
-| 2B baseline    | BF16 | 0.0888 | 0.0000 | 1.687 | 319.3 | 208.5 |
-| 2B baseline    | FP8  | 0.0825 | 0.0001 | 1.634 | 344.6 | 245.9 |
-| 35B            | BF16 | 0.1538 | 0.0000 | 3.334 | 216.8 | 120.2 |
-| 35B            | FP8  | 0.1584 | 0.0000 | 3.470 | 216.7 | 119.7 |
-| 35B R3         | BF16 | 0.1520 | 0.0000 | 3.294 | 211.2 | 118.9 |
-| 35B R3         | FP8  | 0.1533 | 0.0000 | 3.403 | 211.2 | 119.1 |
-
-**Reading the KL.** Median per-token K3 is ~0 everywhere — most realized tokens get nearly identical rollout and training logprobs; divergence lives in the tail (p99) and the seq-level sum.
-
-- **Routing (R3 on vs off, 35B).** R3 consistently *lowers* the KL, confirming rollout↔training routing divergence is a real contributor: Math per-token mean 0.0111→0.0101 (BF16) / 0.0143→0.0130 (FP8) and seq-mean 82.5→74.4 / 103.2→93.4; Geo3k seq-mean 216.8→211.2. The effect is modest here because the rollout and training MoE already route similarly on these short eval rollouts — the gap R3 closes would compound over many training steps.
-- **Precision (FP8 vs BF16).** FP8 adds a small but consistent KL increment on Math (e.g. 35B per-token 0.0111→0.0143) — expected, since the FP8-served rollout logprobs differ slightly from the BF16 training forward. On Geo3k the precision effect is negligible (the modality/length dominates the KL there).
-- **Per-token vs sequence.** The two granularities agree on ordering. Sequence-level K3 is large in absolute terms because it exponentiates a summed Δ over thousands of tokens, so we report its median (robust) alongside the mean (tail-dominated).
-- **2B floor.** The dense 2B has no routing gap (R3 is a no-op), so its KL is the precision/kernel floor; the 35B sits above it on Math, as expected for an MoE.
-
-## Experiment design (side notes)
-
-Since we are **not training** — only measuring generation throughput and a single forward-pass KL — we avoid spinning up the full slim training architecture (no optimizer, no backward, no weight sync, no CPU-offload thrash). Instead, decouple into stages:
-
-1. **Inference / rollout stage (standalone).** Generate rollouts per (model × precision) and persist: sampled sequences, rollout logprobs, captured expert ids (when R3), and rewards/eval pass-rates. Store to disk with an index keyed by (model, precision, split, R3). This also yields Section 1 (throughput) and Section 2 (accuracy) directly.
-
-2. **Forward-only KL stage (standalone).** Load the stored rollouts by index, spin up a separate process that runs **only the FSDP/HF training forward** (no backward) to produce training logprobs, then compute `kl_k3` / `log_prob_abs_diff` against the stored rollout logprobs — for R3 on, R3 off, and the 2B baseline. This is the Section 3 comparison.
-
-Decoupling keeps each stage cheap and independently re-runnable, sidesteps the single-GPU memory pressure of co-locating training+rollout for 35B, and lets the throughput numbers stay clean (measured without offload perturbation).
-
-### Token convention (follow slim's `Episode` exactly)
-
-Stored records MUST follow slim's edge-aligned rollout convention (`slim/utils/types.py::Episode`, materialized in `slim/rollout/sglang_rollout.py`), so stage-2 logprobs line up token-for-token with the rollout and so per-token divergence is directly plottable:
-
-- `tokens`: full sequence `[prompt_ids…, generated_ids…]`, length `N`. Store the **exact token ids** emitted by the engine (`meta_info["output_token_logprobs"]`), never a re-tokenization of decoded text.
-- All per-edge arrays have length `N-1`; **edge `i` predicts `tokens[i+1]`**:
-  - `loss_mask[i]` — 0 on prompt edges, 1 on generated edges.
-  - `rollout_log_probs[i]` — logprob of `tokens[i+1]` under the rollout policy.
-  - `rollout_routed_experts[i]` — top-k MoE expert ids at the router for that edge; full array shape `[N-1, num_layers, top_k]` (e.g. `[N-1, 40, 8]` for 35B-A3B). Captured from `meta_info["routed_experts"]` when `--use-rollout-routing-replay` is set; replayed into the stage-2 forward.
-- Validate with `Episode.ensure_edge_alignment()` before persisting; persist post-`freeze()` tensors.
-
-Storing per-token (not per-sequence aggregates) is deliberate: it lets a later topic plot the distribution of `kl_k3` / `log_prob_abs_diff` over token position and rank **which / how many tokens diverge most** (and correlate that with which experts were replayed).
-
-### Storage layout
-
-Large model weights live on the NVMe scratch and are symlinked into `models/`:
-
-```
-/opt/dlami/nvme/models/Qwen3.5-2B          ->  models/Qwen3.5-2B
-/opt/dlami/nvme/models/Qwen3.5-2B-FP8      ->  models/Qwen3.5-2B-FP8
-/opt/dlami/nvme/models/Qwen3.5-35B-A3B     ->  models/Qwen3.5-35B-A3B
-/opt/dlami/nvme/models/Qwen3.5-35B-A3B-FP8 ->  models/Qwen3.5-35B-A3B-FP8
-```
-
-Stored rollouts + logprob/expert records also go under `/opt/dlami/nvme/experiments/fp8_r3/`, one directory per run keyed `<model>_<precision>_<split>` — **a run with no rollout-routing-replay carries no suffix; only an R3 run gets the `_r3` subscript** (e.g. `2b_bf16_math`, `35b_fp8_vision`, `35b_bf16_math_r3`). The dense 2B is always no-R3, so it never carries a suffix; the MoE has both the plain (no-replay) and the `_r3` (replay) run for each precision/split.
-
-### Context length
-
-Both models support `max_position_embeddings=262144`, but we cap total context at **16k** for the whole study. The binding constraint is the stage-2 forward, not the rollout: a single rollout sequence is never split across micro-batches, so the LM head's transient `[T, vocab~152k]` logits buffer must fit alongside the 70 GB of BF16 weights on one 96 GB GPU; T ≤ 16k keeps that in range (a 32k cap let single rollouts reach ~30k tokens and OOM'd the forward). Generation length is *not* separately capped — each request may emit up to `16k − prompt_len` tokens. Because Math reasoning often exceeds 16k, we additionally report **untruncated accuracy** (over naturally-ended sequences) and the **truncation rate** (see Section 2).
-
-### Reproduce
-
-```
-uv run python report/fp8_r3/prepare_eval.py          # builds datasets/eval; eval100 is sliced from it
-bash report/fp8_r3/bench_fp8_vs_bf16.sh              # Section 1 (throughput)
-bash report/fp8_r3/run_matrix.sh                     # Sections 2 & 3: stage 1 then stage 2, all configs
-uv run python report/fp8_r3/collect_results.py --runs-dir /opt/dlami/nvme/experiments/fp8_r3   # tables below
-```
-
-## Appendix — key decisions (for review)
-
-Only the decisions worth a second look; routine debugging is omitted.
-
-1. **FP8 is our own forge, and it matches the official recipe.** Block-FP8 (e4m3, 128×128, dynamic activations, fp32 block scales) via `tools/fp8_recipes/qwen35_official.json`. We sanity-checked the produced `config.json` quantization block against the official Qwen3.5-35B-A3B-FP8 release and it is identical, so the forge is a faithful stand-in.
-2. **DeepGEMM is disabled on this SM120 card (RTX PRO 6000); FP8 GEMM uses the Triton backend.** DeepGEMM needs SM100's TMEM/tcgen05 (datacenter B200), absent on SM120. The repo's tuned Triton block-FP8 + 256-expert MoE configs for `NVIDIA_RTX_PRO_6000_Blackwell` are installed into sglang (`patch_sglang.py`), so all FP8 numbers here use the tuned kernels.
-3. **Throughput concurrency: 32 is the shared point; BF16-35B can't reach 64.** 67 GB of BF16 weights leave only ~50 KV request slots, so the 35B is swept at 1/8/16/32 (both precisions); 2B also has 64.
-4. **Stage-2 training forward = eager SDPA, BF16 native weights, no torch.compile, 16k cap.**
-   - SDPA (not FA4): the KL is precision-bound, not attention-kernel-bound — SDPA matches FA4 to bf16 rounding noise (max|Δ|≈0.016). (We *did* fix three FA4 SM120 kernel bugs in a local fork along the way; the experiment just doesn't depend on them.)
-   - BF16 native (no fp32 master): fp32 master weights exist only for backward/optimizer stability; this is forward-only, and 35B in fp32 = 140 GB won't fit one GPU.
-   - No `torch.compile`: the R3 routing-replay sets a per-MoE-layer dynamo guard, forcing a recompile per layer and collapsing GPU util to ~0–2%. KL is identical with/without compile.
-   - 16k context: bounds the single-sequence logits transient so the BF16-35B forward fits 96 GB.
-5. **One 35B rollout capture feeds both R3 and no-R3 KL.** R3 changes only the training forward (replayed routers), not the rollout, so stage-2 reads the same R3-captured rollouts (one `--src-dir`) and either replays (`--r3`) or ignores them — the KL difference is then purely the routing effect, on identical sequences.
-6. **Dense baseline is Qwen3.5-2B, not 4B.** 2B matches the MoE on hidden=2048, KV-heads=2, head_dim=256, 3:1 hybrid ratio, and vocab; 4B is wider. 2B brackets the MoE's ~3B active compute from just below and is the clean "routing gap = 0" control (R3 is a no-op on a dense model).
-7. **Accuracy is reported per task (Math vs Geo3k) and truncation-aware.** Raw accuracy + accuracy over only naturally-ended sequences + truncation rate, because Math rollouts frequently exceed the 16k budget (raw accuracy understates a model that's strong when it finishes).
-
-## Open items / TODO
-
-- [x] Download models to NVMe, symlink, forge + sanity-check FP8 (both models).
-- [x] Build eval set (100 prompts × 4 samples × {Math, Geo3k}).
-- [x] Stage-1 (inference + capture) and stage-2 (forward-only dual K3 KL) scripts, reusing slim paths.
-- [x] Fix the BF16-35B forward feasibility (BF16 native weights + 16k cap; no offload needed).
-- [x] Throughput sweep (Section 1).
-- [x] Finish stage-1/stage-2 matrix and fill Section 2/3 tables.
+ToCome

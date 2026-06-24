@@ -12,48 +12,59 @@ from pathlib import Path
 
 import numpy as np
 
-MODELS = ["2b", "35b"]
+MODELS = ["2b", "9b", "35b"]
 PRECS = ["bf16", "fp8"]
 SPLITS = ["math", "vision"]  # math = Math (text), vision = Geo3k
-EOS_ID = 248046  # Qwen3.5 <|im_end|>
 
 
 def _run_dir(runs_dir, model, prec, split, r3):
-    # The run-dir naming convention (shared with run_matrix.sh): base case carries no suffix, an R3
-    # run gets the `_r3` subscript. This aggregator is layout-aware by nature (it enumerates runs).
+    # Naming convention (shared with run_matrix.sh): base case has no suffix, R3 runs get `_r3`.
     return Path(runs_dir) / (f"{model}_{prec}_{split}" + ("_r3" if r3 else ""))
 
 
-def _trunc_stats(runs_dir, model, prec, split, r3):
-    """Return (accuracy, accuracy_untruncated, truncation_rate) for a run, or (None,)*3.
-
-    Prefers the per-record `truncated`/`finish_type` field (newer runs); falls back to EOS-token
-    detection (last token == <|im_end|>) for older records that predate that field.
-    """
+def _load_records(runs_dir, model, prec, split, r3):
+    """Return list of dicts with keys: reward, truncated. None if run missing."""
     d = _run_dir(runs_dir, model, prec, split, r3)
     p = d / "records.jsonl"
     if not p.exists():
-        return None, None, None
-    rewards, truncs = [], []
+        return None
+    records = []
     for line in open(p):
         line = line.strip()
         if not line:
             continue
         rec = json.loads(line)
-        rewards.append(float(rec.get("reward", 0.0)))
-        if "truncated" in rec:
-            truncs.append(bool(rec["truncated"]))
-        else:
-            # fallback: a naturally-finished sequence ends with the EOS token
-            truncs.append(rec["tokens"][-1] != EOS_ID)
-    if not rewards:
-        return None, None, None
-    rewards = np.array(rewards)
-    truncs = np.array(truncs, dtype=bool)
-    acc = float(rewards.mean())
+        records.append({
+            "example_idx": rec["example_idx"],
+            "reward": float(rec.get("reward", 0.0)),
+            "truncated": bool(rec["truncated"]),
+        })
+    return records or None
+
+
+def _pass_at_k(records, k):
+    """Unbiased pass@k estimator (Chen et al. 2021): E[1 - C(n-c,k)/C(n,k)]."""
+    from math import comb
+    by_prompt = {}
+    for r in records:
+        by_prompt.setdefault(r["example_idx"], []).append(r["reward"])
+    scores = []
+    for samples in by_prompt.values():
+        n = len(samples)
+        c = sum(1 for s in samples if s > 0)
+        if n < k:
+            continue
+        scores.append(1.0 - comb(n - c, k) / comb(n, k))
+    return float(np.mean(scores)) if scores else None
+
+
+def _trunc_stats(records):
+    """Return (acc_untruncated, truncation_rate) from loaded records."""
+    rewards = np.array([r["reward"] for r in records])
+    truncs = np.array([r["truncated"] for r in records], dtype=bool)
     keep = ~truncs
     acc_unt = float(rewards[keep].mean()) if keep.any() else None
-    return acc, acc_unt, float(truncs.mean())
+    return acc_unt, float(truncs.mean())
 
 
 def _kl(runs_dir, model, prec, split, r3):
@@ -68,18 +79,26 @@ def fmt(x, nd=4):
 
 def accuracy_tables(runs_dir):
     print("### Section 2 — Accuracy (per task)\n")
-    print("acc = raw accuracy over all 400 samples; acc(unt) = accuracy over only sequences that "
-          "ended naturally (not length-truncated at 16k); trunc = fraction length-truncated.\n")
+    print("pass@k = fraction of prompts solved by at least 1 of k samples (100 prompts × 4 samples, "
+          "0/1 boxed-answer reward); acc(unt) = pass@1 over non-truncated sequences only; "
+          "trunc = fraction length-truncated at 16k.\n")
     for split, label in [("math", "Math"), ("vision", "Geo3k")]:
         print(f"#### {label}")
-        print("| Model | Prec | acc | acc(unt) | trunc rate |")
-        print("|-------|------|-----|----------|------------|")
+        print("| Model | Prec | pass@1 | pass@2 | pass@4 | acc(unt) | trunc rate |")
+        print("|-------|------|--------|--------|--------|----------|------------|")
         for model in MODELS:
             # 35b stage-1 always runs with r3 capture; 2b has no r3.
             r3 = model == "35b"
             for prec in PRECS:
-                acc, acc_unt, tr = _trunc_stats(runs_dir, model, prec, split, r3)
-                print(f"| {model} | {prec.upper()} | {fmt(acc,3)} | {fmt(acc_unt,3)} | {fmt(tr,3)} |")
+                records = _load_records(runs_dir, model, prec, split, r3)
+                if records is None:
+                    print(f"| {model} | {prec.upper()} | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |")
+                    continue
+                p1 = _pass_at_k(records, 1)
+                p2 = _pass_at_k(records, 2)
+                p4 = _pass_at_k(records, 4)
+                acc_unt, tr = _trunc_stats(records)
+                print(f"| {model} | {prec.upper()} | {fmt(p1,3)} | {fmt(p2,3)} | {fmt(p4,3)} | {fmt(acc_unt,3)} | {fmt(tr,3)} |")
         print()
 
 
@@ -87,8 +106,10 @@ def kl_tables(runs_dir):
     print("### Section 3 — Rollout/training KL (per task)\n")
     # (label, model, precision, replay) rows
     rows = [
-        ("2B baseline", "2b", "bf16", False),
-        ("2B baseline", "2b", "fp8", False),
+        ("2B", "2b", "bf16", False),
+        ("2B", "2b", "fp8", False),
+        ("9B", "9b", "bf16", False),
+        ("9B", "9b", "fp8", False),
         ("35B", "35b", "bf16", False),
         ("35B", "35b", "fp8", False),
         ("35B R3", "35b", "bf16", True),
@@ -96,17 +117,18 @@ def kl_tables(runs_dir):
     ]
     for split, label in [("math", "Math"), ("vision", "Geo3k")]:
         print(f"#### {label}")
-        print("| Config | Precision | per-token K3 mean | median | p99 | seq K3 mean | median |")
-        print("|--------|-----------|-------------------|--------|-----|-------------|--------|")
+        # report mean (headline) + p99 (tail) for each K3 granularity (median ~0, std outlier-dominated).
+        print("| Config | Precision | tok K3 mean | tok K3 p99 | seq K3 mean | seq K3 p99 |")
+        print("|--------|-----------|-------------|------------|-------------|------------|")
         for name, model, prec, r3 in rows:
             s = _kl(runs_dir, model, prec, split, r3)
             if s is None:
-                print(f"| {name} | {prec.upper()} | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |")
+                print(f"| {name} | {prec.upper()} | _tbd_ | _tbd_ | _tbd_ | _tbd_ |")
             else:
                 print(
                     f"| {name} | {prec.upper()} | {fmt(s.get('kl_k3_token_mean'))} | "
-                    f"{fmt(s.get('kl_k3_token_median'))} | {fmt(s.get('kl_k3_token_p99'))} | "
-                    f"{fmt(s.get('kl_k3_seq_mean'),3)} | {fmt(s.get('kl_k3_seq_median'),3)} |"
+                    f"{fmt(s.get('kl_k3_token_p99'))} | "
+                    f"{fmt(s.get('kl_k3_seq_mean'))} | {fmt(s.get('kl_k3_seq_p99'))} |"
                 )
         print()
 
