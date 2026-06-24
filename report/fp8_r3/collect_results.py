@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-MODELS = ["2b", "9b", "35b"]
+MODELS = ["2b", "4b", "9b", "35b"]
 PRECS = ["bf16", "fp8"]
 SPLITS = ["math", "vision"]  # math = Math (text), vision = Geo3k
 
@@ -108,6 +108,8 @@ def kl_tables(runs_dir):
     rows = [
         ("2B", "2b", "bf16", False),
         ("2B", "2b", "fp8", False),
+        ("4B", "4b", "bf16", False),
+        ("4B", "4b", "fp8", False),
         ("9B", "9b", "bf16", False),
         ("9B", "9b", "fp8", False),
         ("35B", "35b", "bf16", False),

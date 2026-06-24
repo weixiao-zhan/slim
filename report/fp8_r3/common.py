@@ -28,15 +28,16 @@ import torch
 # Model registry: logical name -> (bf16 dir, fp8 dir). Paths are the repo symlinks.
 MODELS = {
     "2b": ("models/Qwen3.5-2B", "models/Qwen3.5-2B-FP8"),
+    "4b": ("models/Qwen3.5-4B", "models/Qwen3.5-4B-FP8"),
     "9b": ("models/Qwen3.5-9B", "models/Qwen3.5-9B-FP8"),
     "35b": ("models/Qwen3.5-35B-A3B", "models/Qwen3.5-35B-A3B-FP8"),
 }
 
-# Eval splits -> (parquet path, rm_type). 100-example sets (sliced from the larger pool built by
-# prepare_eval.py); the study uses 100 examples x 4 samples/prompt per split.
+# Eval splits -> (parquet path, rm_type). 100-example sets from tests/prepare_mixed.py.
+# The study uses 100 examples x 4 samples/prompt per split.
 SPLITS = {
-    "math": ("datasets/eval100/test_math.parquet", "math"),
-    "vision": ("datasets/eval100/test_vision.parquet", "math"),  # geo3k graded with the math RM (boxed)
+    "math": ("datasets/mixed/test_math.parquet", "math"),
+    "vision": ("datasets/mixed/test_vision.parquet", "math"),  # geo3k graded with the math RM (boxed)
 }
 
 

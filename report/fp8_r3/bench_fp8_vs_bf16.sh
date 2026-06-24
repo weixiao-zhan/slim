@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark FP8 vs BF16 decode/prefill throughput on Qwen3.5-2B, Qwen3.5-9B, and Qwen3.5-35B-A3B.
+# Benchmark FP8 vs BF16 decode/prefill throughput on Qwen3.5-2B, Qwen3.5-4B, Qwen3.5-9B, and Qwen3.5-35B-A3B.
 # Sweeps BATCH (default 1/2/4/8/16/32/64) at input=512, output=1024 (context=1536); outputs prefill
 # and median decode token/s to outputs/fp8_vs_bf16_bench/result_<tag>.jsonl.
 # The BF16 35B-A3B is skipped at batch 64: its 65GB of weights starve the GDN linear-attention
@@ -19,11 +19,11 @@ CONTEXT_LEN="${CONTEXT_LEN:-1536}"
 # Static KV/mamba pool fraction. The BF16 35B-A3B (65GB weights) needs a larger pool than 0.8 to
 # fit the batch-32 req_to_token / mamba slots; smaller models have ample headroom at any value.
 MEM_FRACTION="${MEM_FRACTION:-0.85}"
-MODELS="${MODELS:-2b 9b 35b}"
+MODELS="${MODELS:-2b 4b 9b 35b}"
 
 # logical name -> dir basenames under models/
-declare -A BF16_DIR=( [2b]="Qwen3.5-2B"        [9b]="Qwen3.5-9B"      [35b]="Qwen3.5-35B-A3B" )
-declare -A FP8_DIR=(  [2b]="Qwen3.5-2B-FP8"    [9b]="Qwen3.5-9B-FP8"  [35b]="Qwen3.5-35B-A3B-FP8" )
+declare -A BF16_DIR=( [2b]="Qwen3.5-2B"        [4b]="Qwen3.5-4B"      [9b]="Qwen3.5-9B"      [35b]="Qwen3.5-35B-A3B" )
+declare -A FP8_DIR=(  [2b]="Qwen3.5-2B-FP8"    [4b]="Qwen3.5-4B-FP8"  [9b]="Qwen3.5-9B-FP8"  [35b]="Qwen3.5-35B-A3B-FP8" )
 
 run() {
   local tag="$1" model="$2" batch="$3"; shift 3
