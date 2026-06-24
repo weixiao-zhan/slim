@@ -6,12 +6,12 @@
 # kl/summary.json for stage 2). Delete a run dir under $ROOT (below) to redo it.
 #
 # Stage 1 (inference + accuracy, offline sglang Engine), per (model, precision, split):
-#   - 2b : {bf16,fp8} x {math,vision}                      (dense, no experts)
-#   - 35b: {bf16,fp8} x {math,vision}, R3-capture ON       (one capture feeds replay AND no-replay KL)
+#   - 2b, 9b : {bf16,fp8} x {math,vision}                  (dense, no experts)
+#   - 35b    : {bf16,fp8} x {math,vision}, R3-capture ON   (one capture feeds replay AND no-replay KL)
 #
 # Stage 2 (forward-only KL, eager SDPA, no torch.compile, BF16 weights), per (model, precision, split):
-#   - 2b : baseline, no replay
-#   - 35b: replay AND no-replay, both reading the R3-captured rollouts (only --r3 + out-dir differ)
+#   - 2b, 9b : baseline, no replay
+#   - 35b    : replay AND no-replay, both reading the R3-captured rollouts (only --r3 + out-dir differ)
 #
 # Usage:
 #   bash report/fp8_r3/run_matrix.sh                  # everything
@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 STAGES="${STAGES:-1 2}"
-MODELS="${MODELS:-2b 35b}"
+MODELS="${MODELS:-2b 9b 35b}"
 SPLITS="${SPLITS:-math vision}"
 # This script OWNS the on-disk layout: it builds every run-dir path and hands each stage an explicit
 # --out-dir/--src-dir. The Python scripts hardcode no paths. Override the parent with ROOT=...
@@ -67,7 +67,7 @@ for s in $STAGES; do
           if [ "$m" = "35b" ]; then
             stage1 35b "$prec" "$split" 1    # MoE: always capture experts (r3=1)
           else
-            stage1 2b "$prec" "$split" 0
+            stage1 "$m" "$prec" "$split" 0   # dense baselines (2b, 9b): no experts
           fi
         done
       done
@@ -85,8 +85,8 @@ for s in $STAGES; do
             stage2 35b "$prec" "$split" 1 "$src"   # replay
             stage2 35b "$prec" "$split" 0 "$src"   # no replay (same source rollouts)
           else
-            src="$(run_dir 2b "$prec" "$split" 0)"
-            stage2 2b "$prec" "$split" 0 "$src"    # dense baseline
+            src="$(run_dir "$m" "$prec" "$split" 0)"
+            stage2 "$m" "$prec" "$split" 0 "$src"  # dense baseline (2b, 9b)
           fi
         done
       done
