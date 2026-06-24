@@ -30,9 +30,9 @@ def build_args(model_dir: str, rm_type: str, max_context_len: int, concurrency: 
         rollout_sampling_params={},
         apply_chat_template_kwargs={"enable_thinking": False},
         use_rollout_routing_replay=r3,
-        rollout_concurrency_per_engine=concurrency,
+        rollout_concurrency_per_replica=concurrency,
         rollout_num_gpus=1,
-        rollout_num_gpus_per_engine=1,
+        rollout_num_gpus_per_replica=1,
         sglang_dp_size=1,
         sglang_enable_deterministic_inference=False,
     )

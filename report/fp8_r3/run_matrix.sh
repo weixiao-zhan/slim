@@ -24,7 +24,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 STAGES="${STAGES:-1 2}"
-MODELS="${MODELS:-2b 9b 35b}"
+MODELS="${MODELS:-2b 4b 9b 35b}"
 SPLITS="${SPLITS:-math vision}"
 # This script OWNS the on-disk layout: it builds every run-dir path and hands each stage an explicit
 # --out-dir/--src-dir. The Python scripts hardcode no paths. Override the parent with ROOT=...

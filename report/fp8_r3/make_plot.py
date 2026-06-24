@@ -13,7 +13,7 @@ Produces (next to this script):
   accuracy.png    - pass@k curves (k=1..4) + acc(untrunc)/trunc bars per task
   kl.png          - token/seq K3 mean & p99 per task, linear y, shared y-lim per statistic
 
-Shared style: hue encodes the model (2B = blue, 9B = green, 35B = orange); shade encodes
+Shared style: hue encodes model size (2B blue, 4B green, 9B gold, 35B red-orange); shade encodes
 precision (deep = BF16, light = FP8). R3 reuses the 35B hue with a hatch overlay.
 
 Env overrides:
@@ -44,18 +44,25 @@ CONC = [1, 2, 4, 8, 16, 32, 64]  # concurrency sweep (input=512, output=1024)
 KS = [1, 2, 3, 4]      # pass@k
 BENCH_IN, BENCH_OUT = 512, 1024  # bench workload these plots read
 
-# ---- palette: <model>_<precision> -> hex (deep = BF16, light = FP8) -------------------
-# hue = model (2B blue, 9B green, 35B orange); shade = precision (deep BF16, light FP8).
+# ---- palette: <model>_<precision> -> hex ----------------------------------------------
+# Model size is encoded as POSITION along one continuous, perceptually-uniform colormap (viridis):
+# the four models sampled small->large (2B, 4B, 9B, 35B) so the colour sweep itself reads as the
+# size axis. Precision is the shade within a model: BF16 = the sampled colour, FP8 = the same hue
+# blended toward white.
+# BF16 = deep, FP8 = light; hue sweeps blue -> green -> gold -> orange-red with model size.
 C = {
-    "2b_bf16": "#1f4e79",
-    "2b_fp8": "#9ecae1",
-    "9b_bf16": "#1b6b3a",
-    "9b_fp8": "#a1d99b",
-    "35b_bf16": "#b35900",
-    "35b_fp8": "#fdbe85",
+    "2b_bf16":  "#6c8ebf",
+    "2b_fp8":   "#dae8fc",
+    "4b_bf16":  "#82B366",
+    "4b_fp8":   "#D5E8D4",
+    "9b_bf16":  "#D79B00",
+    "9b_fp8":   "#FFE6CC",
+    "35b_bf16": "#9673A6",
+    "35b_fp8":  "#E1D5E7",
 }
 # accuracy / throughput series: (palette key, legend label)
 SERIES = [("2b_bf16", "2B BF16"), ("2b_fp8", "2B FP8"),
+          ("4b_bf16", "4B BF16"), ("4b_fp8", "4B FP8"),
           ("9b_bf16", "9B BF16"), ("9b_fp8", "9B FP8"),
           ("35b_bf16", "35B BF16"), ("35b_fp8", "35B FP8")]
 
@@ -159,7 +166,7 @@ def acc_stats(records):
 def load_accuracy(split):
     """{palette_key: dict(passk=[k1..k4], acc=, trunc=)} for one split."""
     data = {}
-    for model in ("2b", "9b", "35b"):
+    for model in ("2b", "4b", "9b", "35b"):
         for prec in ("bf16", "fp8"):
             recs = load_records(model, prec, split)
             if recs is None:
@@ -230,8 +237,10 @@ def plot_accuracy():
             offs = x - 0.4 + w * (i + 0.5)
             bars = ax_bar.bar(offs, vals, w * 0.92, color=C[key], zorder=3)
             for b, v in zip(bars, vals):
-                ax_bar.text(b.get_x() + b.get_width() / 2, v + 0.012, f"{v:.2f}",
-                            ha="center", va="bottom", fontsize=10)
+                # 8 bars/group leaves little width: percent labels (XX%) are narrower than 0.XX, and
+                # vertical rotation keeps them inside the bar slot.
+                ax_bar.text(b.get_x() + b.get_width() / 2, v + 0.012, f"{v*100:.0f}%",
+                            ha="center", va="bottom", fontsize=9, rotation=90)
         ax_bar.set_title(title)
         ax_bar.set_xticks(x)
         ax_bar.set_xticklabels(groups)
@@ -240,9 +249,9 @@ def plot_accuracy():
         style_axes(ax_bar)
 
     handles = [Patch(facecolor=C[k], label=lab) for k, lab in SERIES]
-    fig.tight_layout(rect=(0, 0.10, 1, 1))
-    fig.subplots_adjust(bottom=0.14)
-    legend_below(fig, handles, ncol=6)
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    fig.subplots_adjust(bottom=0.18)
+    legend_below(fig, handles, ncol=4)
     fig.savefig(OUT / "accuracy.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("wrote", OUT / "accuracy.png")
@@ -313,10 +322,10 @@ def plot_throughput():
         ax.plot([xlo, xhi], [y0, y0 * 10 ** x_dec], linestyle=(0, (4, 4)), linewidth=1.2,
                 color="#999999", zorder=1)
 
-    # ncol=3 wraps the 6 series into two rows: BF16 on top, FP8 below, one model per column.
+    # ncol=4 wraps the 8 series into two rows, one model's two precisions per pair.
     handles = [Patch(facecolor=C[k], label=lab) for k, lab in SERIES]
     fig.subplots_adjust(bottom=0.24)
-    legend_below(fig, handles, ncol=3, y=0.0)
+    legend_below(fig, handles, ncol=4, y=0.0)
     fig.savefig(OUT / "throughput.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("wrote", OUT / "throughput.png")
@@ -329,6 +338,8 @@ def plot_throughput():
 KL_SERIES = [
     ("2b_bf16", "2B BF16", C["2b_bf16"], None, "2b", "bf16", False),
     ("2b_fp8", "2B FP8", C["2b_fp8"], None, "2b", "fp8", False),
+    ("4b_bf16", "4B BF16", C["4b_bf16"], None, "4b", "bf16", False),
+    ("4b_fp8", "4B FP8", C["4b_fp8"], None, "4b", "fp8", False),
     ("9b_bf16", "9B BF16", C["9b_bf16"], None, "9b", "bf16", False),
     ("9b_fp8", "9B FP8", C["9b_fp8"], None, "9b", "fp8", False),
     ("35b_bf16", "35B BF16", C["35b_bf16"], None, "35b", "bf16", False),
@@ -343,7 +354,7 @@ KL_GRAN = [
 ]
 KL_TASKS = [("math", "Math (text)"), ("vision", "Geo3k (vision)")]
 # x clusters (model config), each holding the two precision bars (BF16 deep, FP8 light).
-KL_CLUSTERS = [("2B", "2b", False), ("9B", "9b", False), ("35B", "35b", False), ("35B R3", "35b", True)]
+KL_CLUSTERS = [("2B", "2b", False), ("4B", "4b", False), ("9B", "9b", False), ("35B", "35b", False), ("35B R3", "35b", True)]
 KL_PRECS = ["bf16", "fp8"]
 
 
@@ -434,10 +445,10 @@ def plot_kl():
     handles = [Patch(facecolor=color, hatch=hatch,
                      edgecolor=shade(color, 0.5) if hatch else color, label=lab)
                for _, lab, color, hatch, *_ in KL_SERIES]
-    # ncol=4 -> two rows (KL has the extra R3 entries); position/font match the other figures.
+    # ncol=5 wraps the 10 entries (8 base + 2 R3) into rows; position/font match the other figures.
     fig.tight_layout(rect=(0, 0.10, 1, 1))
     fig.subplots_adjust(bottom=0.13)
-    legend_below(fig, handles, ncol=4)
+    legend_below(fig, handles, ncol=5)
     fig.savefig(OUT / "kl.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("wrote", OUT / "kl.png")

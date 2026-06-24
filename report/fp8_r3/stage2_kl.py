@@ -52,8 +52,7 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
         "--rollout-batch-size", "1",  # required by the parser; unused on the forward-only path
         "--num-rollout", "1",
         "--rm-type", "math",
-        "--actor-num-nodes", "1",
-        "--actor-num-gpus-per-node", "1",
+        "--actor-num-gpus", "1",
         # SDPA for the training forward. The rollout-vs-training KL is set by precision (FP8-served
         # rollout vs BF16 training), not by the attention kernel: SDPA matches FA4 to bf16 rounding
         # noise (max|Δ|~0.016).

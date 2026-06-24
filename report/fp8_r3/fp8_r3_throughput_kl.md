@@ -14,7 +14,7 @@ We benchmark **Qwen3.5-2B**, **Qwen3.5-9B**, and **Qwen3.5-35B-A3B** (MoE). The 
 | Model | hidden | head_dim | Q heads | KV heads | Layers (lin/full) | Experts (top-k) |
 |-------|--------|----------|---------|----------|-------------------|-----------------|
 | **Qwen3.5-2B**   | 2048 | 256 | 8  | 2 | 24 (18/6)  | — (dense) |
-| Qwen3.5-4B       | 2560 | 256 | 16 | 4 | 32 (24/8)  | — (dense) |
+| **Qwen3.5-4B**   | 2560 | 256 | 16 | 4 | 32 (24/8)  | — (dense) |
 | **Qwen3.5-9B**   | 4096 | 256 | 16 | 4 | 32 (24/8)  | — (dense) |
 | Qwen3.5-27B      | 5120 | 256 | 24 | 4 | 64 (48/16) | — (dense) |
 | **Qwen3.5-35B-A3B** | 2048 | 256 | 16 | 2 | 40 (30/10) | 256 (top-8)  |
@@ -63,7 +63,7 @@ We measured prefill and decode throughput via `sglang.bench_one_batch` (input=51
 Each model generated **4 samples** per prompt on **100 prompts** from **DAPO-Math-17k** (text) and **Geometry3K** (vision) with 16K max context respectively.
 We report **pass@k**, **acc(unt)** (the accuracy of the sequences that ended naturally), and **trunc rate**.
 
-<img src="accuracy.png" width="600" alt="Accuracy">
+<img src="accuracy.png" width="800" alt="Accuracy">
 
 > The accuracy difference between FP8 and BF16 is within the margin of sampling noise. 
 > FP8 offers near loss-less performance.
