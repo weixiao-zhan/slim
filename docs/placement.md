@@ -94,3 +94,41 @@ phase                A      C
 legend:
 ■ active resident ░ idle resident · offloaded (CPU)
 ```
+
+---
+
+## Weight Update
+
+On-policy RL syncs model weights from the FSDP actor to the SGLang rollout engines at every training step.
+Slim treats each engine as an opaque unit of `rollout_num_gpus_per_replica` GPUs.
+How the engine internally splits those GPUs (TP/PP/DP/EP) is configured via sglang args and is transparent to the weight update path; the sglang engine discards any param slice it does not need.
+
+![Weight sync paths](images/WeightSync.png)
+
+### Colocate path
+
+After training, the actor model is offloaded to CPU.
+During weight update, params are streamed from CPU to GPU one bucket at a time: each param is moved to GPU, all-gathered across the FSDP mesh, pushed to the engine, then freed.
+Only one bucket of params lives on GPU at a time, so the full model never needs to fit in GPU memory alongside the engine.
+
+For each bucket, ranks serialize their tensors as CUDA IPC handles.
+Gloo collects all handles to the source rank (first rank in the IPC group, e.g. A0, A2).
+The source rank issues a single Ray RPC to the engine, passing all handles.
+The engine dispatches each handle to its corresponding TP worker, which opens it from its colocated actor rank (zero-copy, same GPU).
+The actual tensor data never crosses GPUs; only the small IPC handle metadata is gathered.
+
+### Separate path
+
+The same FSDP all-gather by buckets followed by 
+Only A0 broadcasts to all engine TP workers directly.
+Each TP worker receives the full param and keeps only its slice.
+
+### sync with LoRA
+
+Before weight sync, the adapter is merged into the base weights (`merge_adapter()`), synced as full HF params, then unmerged when wake up for training.
+In colocate mode with CPU offload, the merge happens during `sleep()` before offloading.
+
+### sync with low precision inference
+
+A quantizer quantizes each bucket from BF16 to block-FP8 format between all-gather and send.
+Rollout engines receive weights in the same quantized format they were initialized with.

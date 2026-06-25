@@ -51,7 +51,6 @@ class Episode:
     text: str | None = None                            # decode of all tokens
     generated_text: str | None = None                  # decode of loss_mask==1 tokens
     non_generation_time: float = 0.0
-    train_metadata: dict = field(default_factory=dict)
     max_tokens: int = 0
     _sampling_params: dict[str, Any] | None = None     # transient rollout request params; cleared by freeze()
 
