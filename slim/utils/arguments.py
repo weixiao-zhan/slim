@@ -703,8 +703,8 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 "--kl-loss-type",
                 type=str,
                 choices=["k1", "k2", "k3", "low_var_kl"],
-                default="k1",
-                help="Choose KL loss type: kl, k2, k3, low_var_kl",
+                default="low_var_kl",
+                help="Choose KL loss type: k1, k2, k3, low_var_kl",
             )
             parser.add_argument(
                 "--policy-surrogate",
@@ -1092,18 +1092,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        def add_mtp_training_arguments(parser):
-            """Add MTP training specific arguments."""
-            reset_arg(parser, "--mtp-num-layers", type=int, default=None)
-            reset_arg(parser, "--mtp-loss-scaling-factor", type=float, default=0.2)
-            parser.add_argument(
-                "--enable-mtp-training",
-                action="store_true",
-                default=False,
-                help="Enable MTP layer parameter updates during training",
-            )
-
-            return parser
 
         def add_ci_arguments(parser):
             parser.add_argument(
@@ -1143,7 +1131,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_filter_arguments(parser)
-        parser = add_mtp_training_arguments(parser)
         parser = add_ci_arguments(parser)
         reset_arg(
             parser,
@@ -1426,8 +1413,6 @@ def slim_validate_args(args):
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
 
-    if args.enable_mtp_training:
-        assert args.mtp_num_layers, "mtp_num_layers must be set when enable_mtp_training is set"
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
