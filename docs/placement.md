@@ -132,3 +132,8 @@ In colocate mode with CPU offload, the merge happens during `sleep()` before off
 
 A quantizer quantizes each bucket from BF16 to block-FP8 format between all-gather and send.
 Rollout engines receive weights in the same quantized format they were initialized with.
+
+### sync with failed engines
+
+Slim also keeps a heart beat health check on all sglang engines and kills any non-responsive ones. 
+The killed engine are restarted before weight sync and receive fresh memory and join next batch of training.

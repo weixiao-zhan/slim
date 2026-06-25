@@ -26,6 +26,7 @@ from slim.utils.ppo_utils import (
     compute_value_loss,
     vanilla_gae,
 )
+from slim.utils.misc import load_function
 from slim.utils.processing_utils import load_processor, load_tokenizer
 from slim.utils.profile_utils import TrainProfiler
 from slim.utils.timer import Timer, inverse_timer, timer, with_defer
@@ -953,13 +954,12 @@ class FSDPTrainRayActor(TrainRayActor):
             logits = self.model(**model_args).logits.squeeze(0)
 
         # Compute log probs and entropy
-        need_full_log_probs = self.args.entropy_coef != 0.0
         log_probs, entropy_result = get_logprob_and_entropy(
             logits=logits,
             target_tokens=packed_batch["tokens"],
             allow_compile=True,
             temperature=self.args.rollout_temperature,
-            need_full_log_probs=need_full_log_probs,
+            need_full_log_probs=self.args.entropy_coef != 0.0,
             cu_seqlens=packed_batch["cu_seqlens"],
         )
         packed_batch["cur_log_probs"] = log_probs
@@ -968,6 +968,24 @@ class FSDPTrainRayActor(TrainRayActor):
 
         unpacked_batches = unpack_sequences(packed_batch)
 
+        if self.args.loss_type == "custom_loss":
+            custom_loss_func = load_function(self.args.custom_loss_function_path)
+            loss, reported = custom_loss_func(self.args, unpacked_batches)
+        else:
+            loss, reported = self._policy_loss(unpacked_batches)
+
+        loss = loss * self.dp_size / self.args.global_batch_size
+        loss.backward()
+
+        self._accumulate_and_step(reported, reported_accum, mbs_id, grad_accum, log_prefix="train")
+
+    def _policy_loss(self, unpacked_batches):
+        """policy-gradient loss (pg + entropy + optional KL).
+
+        Returns ``(loss, reported)`` where ``loss`` is the summed-microbatch loss
+        and ``reported`` is a dict of detached scalar metrics logged under train/.
+        """
+        need_full_log_probs = self.args.entropy_coef != 0.0
         old_log_prob_key = "actor_old_log_probs" if self.args.old_logprob_source == "actor" else "rollout_log_probs"
         missing_old_log_probs = [
             idx
@@ -1041,8 +1059,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 raise KeyError("mismatch correction requires rollout_log_probs and actor_old_log_probs.")
 
             if self.args.custom_mismatch_correction_function_path is not None:
-                from slim.utils.misc import load_function
-
                 mismatch_func = load_function(self.args.custom_mismatch_correction_function_path)
                 mismatch_weights, mismatch_modified_masks, custom_mismatch_metrics = mismatch_func(
                     args=self.args,
@@ -1106,10 +1122,7 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.use_kl_loss:
             reported["kl_loss"] = kl_loss.detach()
 
-        loss = loss * self.dp_size / self.args.global_batch_size
-        loss.backward()
-
-        self._accumulate_and_step(reported, reported_accum, mbs_id, grad_accum, log_prefix="train")
+        return loss, reported
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]

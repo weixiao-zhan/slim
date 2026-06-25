@@ -86,6 +86,21 @@ class DataSource(abc.ABC):
     def __len__(self) -> int: ...
 ```
 
+### Loss function (`--custom-loss-function-path`)
+
+```python
+def custom_loss(args, unpacked_batches: list[dict]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]
+```
+
+Set `--loss-type custom_loss` to use it. The function owns the entire loss math
+(policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
+`unpacked_batches` is the per-sample list from `unpack_sequences`; each dict
+carries `cur_log_probs`, `advantages`, `loss_masks`, `edge_lengths`, and the
+old/ref log-probs when available.
+Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
+framework applies global-batch normalization and `backward()`) and `metrics` is
+a dict of scalar tensors logged under `train/`.
+
 ### Logging (`--custom-rollout-log-function-path`)
 
 ```python
