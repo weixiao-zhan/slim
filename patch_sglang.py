@@ -124,7 +124,7 @@ def _install_configs(src_root: Path, dst_root: Path, label: str) -> int:
     if copied:
         print(f"  Applied: installed {copied} {label} config(s) into sglang")
     else:
-        print(f"  Skipped: {label} configs already installed")
+        print(f"  Skipped (already installed): {label} configs")
     return copied
 
 
