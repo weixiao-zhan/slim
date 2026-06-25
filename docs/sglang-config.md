@@ -17,8 +17,7 @@ See [Placement](placement.md) for how engines are mapped onto GPUs.
 
 ### Parameter pass-through
 
-slim strips the `--sglang-` prefix and supplies the remainder directly to SGLang's `ServerArgs`:
-
+`--sglang-` prefixed args are stripped the prefix and supplies the remainder directly to SGLang's `ServerArgs`:
 ```
 --sglang-mem-fraction-static 0.85 →  ServerArgs(mem_fraction_static=0.85)
 --sglang-context-length 16384     →  ServerArgs(context_length=16384)
@@ -151,7 +150,7 @@ Slim current does not support online MTP training (will revisit when HF transfor
 
 ## Fault Tolerance
 
-slim includes heartbeat-based health monitoring.
+slim includes heart beat health monitoring (via `/health` not `/health_generate`; the later could timeout under extreme workloads and may kill health engine).
 When an engine becomes unresponsive, it is killed and restarted with a fresh weight sync before the next rollout round.
 
 | Flag | Default | Description |

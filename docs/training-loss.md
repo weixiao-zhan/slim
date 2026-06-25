@@ -160,7 +160,7 @@ When `--calculate-per-token-loss` is set, per-token losses are summed (not avera
 | `--old-logprob-source` | `actor` | Source of old log-probs: `actor`, `rollout` |
 | `--mismatch-correction` | `none` | `none`, `custom` |
 | `--calculate-per-token-loss` | `False` | Sum (not average) token losses within each sequence |
-| `--loss-type` | `policy_loss` | `policy_loss`, `sft_loss`, `custom_loss` |
+| `--loss-type` | `policy_loss` | `policy_loss`, `custom_loss` |
 | `--ref-load` | `None` | Reference model checkpoint |
 
 ---

@@ -127,15 +127,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
             )
             parser.add_argument(
-                "--disable-weights-backuper",
-                action="store_false",
-                dest="enable_weights_backuper",
-                help="Whether to disable weights backuper to save host memory.",
-            )
-            parser.add_argument(
-                "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
-            )
-            parser.add_argument(
                 "--only-train-params-name-list",
                 type=str,
                 nargs="*",
@@ -191,16 +182,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--model-name",
-                type=str,
-                default=None,
-                help=(
-                    "The name of the model. "
-                    "If not set, we will use `type(AutoConfig.from_pretrained(args.hf_checkpoint)).__name__.lower()` as model_name. "
-                    "Also, sometimes this will help alleviate the bug that transformers cannot find certain model."
-                ),
-            )
-            parser.add_argument(
                 "--rollout-function-path",
                 type=str,
                 default="slim.rollout.sglang_rollout.generate_rollout",
@@ -241,15 +222,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "Single source of truth for max context length. Drives train rollout budget, "
                     "eval rollout budget (per-dataset YAML override allowed), and SGLang server "
                     "context_length. Must not exceed `max_position_embeddings` in the HF model config."
-                ),
-            )
-            parser.add_argument(
-                "--rollout-max-response-len",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum length of the response for the inference engine during rollout. "
-                    "It is basically `max_tokens` in sglang."
                 ),
             )
             parser.add_argument(
@@ -345,11 +317,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=1,
                 help="Interval for updating the weights",
-            )
-            parser.add_argument(
-                "--keep-old-actor",
-                action="store_true",
-                help="Whether to keep the rollout model on training process",
             )
 
             parser.add_argument(
@@ -587,7 +554,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="number of responses for each prompt in generation",
             )
             parser.add_argument("--eval-temperature", type=float, default=None)
-            parser.add_argument("--eval-max-response-len", type=int, default=None)
 
             return parser
 
@@ -600,9 +566,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "The checkpoint for reference model. "
                     "When --load is not set, this will be used as the initial checkpoint for training. "
                 ),
-            )
-            parser.add_argument(
-                "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
             )
             reset_arg(
                 parser,
@@ -639,15 +602,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "This reduces checkpoint size but disables training resumption from the saved checkpoint."
                 ),
             )
-            parser.add_argument(
-                "--save-hf",
-                type=str,
-                default=None,
-                help=(
-                    "Path to save the model in HuggingFace format. "
-                    "The model will be saved to `save_hf.format(rollout_id)`. "
-                ),
-            )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
             reset_arg(parser, "--calculate-per-token-loss", action="store_true")
@@ -658,12 +612,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
             parser.add_argument("--critic-train-only", action="store_true", default=False, help="Only train critic")
-            parser.add_argument(
-                "--critic-lr-warmup-iters",
-                type=int,
-                default=0,
-                help="number of iterations to linearly warmup for critic model.",
-            )
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
@@ -683,21 +631,18 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--loss-type",
                 type=str,
-                choices=["policy_loss", "sft_loss", "custom_loss"],
+                choices=["policy_loss", "custom_loss"],
                 default="policy_loss",
                 help=(
-                    "Choose loss type, currently support policy gradient loss or sft_loss, "
-                    "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
+                    "Choose loss type. `policy_loss` is the built-in policy-gradient loss. "
+                    "If `custom_loss` is set, the function from `--custom-loss-function-path` is used."
                 ),
             )
             parser.add_argument(
                 "--custom-loss-function-path",
                 type=str,
                 default=None,
-                help=(
-                    "Path to the custom loss function, if the loss_type is `custom_loss`, "
-                    "we will use this function to calculate the loss. "
-                ),
+                help="Path to the custom loss function, used when `--loss-type custom_loss`.",
             )
             parser.add_argument(
                 "--kl-loss-type",
@@ -723,16 +668,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ],
                 default="grpo",
                 help="Advantage estimator to use.",
-            )
-            parser.add_argument(
-                "--disable-compute-advantages-and-returns",
-                action="store_false",
-                dest="compute_advantages_and_returns",
-                help=(
-                    "Whether to disable computing advantages and returns. "
-                    "If set, we will not compute the advantages and returns, "
-                    "This is useful for sft or custom loss function."
-                ),
             )
             parser.add_argument(
                 "--use-kl-loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
@@ -777,15 +712,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Force an old actor forward pass for train/mismatch/*"
-                ),
-            )
-            parser.add_argument(
-                "--reset-optimizer-states",
-                action="store_true",
-                default=False,
-                help=(
-                    "Whether to reset optimizer states after each rollout. "
-                    "If enabled, the optimizer's history will be cleared at the end of each rollout, which can sometimes help with training stability or fulfill specific experiment requirements."
                 ),
             )
             parser.add_argument(
@@ -889,28 +815,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--log-multi-turn",
-                action="store_true",
-                default=False,
-                help="Whether to log information for multi-turn rollout.",
-            )
-            parser.add_argument(
                 "--eval-log-passrate",
-                action="store_true",
-                default=False,
-                help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
-            )
-            parser.add_argument(
-                "--log-reward-category",
-                type=str,
-                default=None,
-                help=(
-                    "Log statistics of the category of reward, such as why the reward function considers it as failed. "
-                    "Specify the key in the reward dict using this argument.",
-                ),
-            )
-            parser.add_argument(
-                "--log-correct-samples",
                 action="store_true",
                 default=False,
                 help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
@@ -941,12 +846,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             # --load-debug-rollout-data, --debug-rollout-only, --debug-train-only
             # are parsed early in _pre_parse_mode() and merged later.
-            parser.add_argument(
-                "--load-debug-rollout-data-subsample",
-                type=float,
-                default=None,
-                help="Subsample a portion of the debug rollout data for faster debugging.",
-            )
             parser.add_argument(
                 "--save-debug-train-data",
                 type=str,
@@ -1001,7 +900,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             return parser
 
         def add_network_arguments(parser):
-            parser.add_argument("--http-proxy", type=str, default=None)
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
             return parser
 
@@ -1097,20 +995,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--ci-test",
                 action="store_true",
-            )
-            parser.add_argument(
-                "--ci-disable-kl-checker",
-                action="store_true",
-            )
-            parser.add_argument(
-                "--ci-save-grad-norm",
-                type=str,
-                default=None,
-            )
-            parser.add_argument(
-                "--ci-load-grad-norm",
-                type=str,
-                default=None,
             )
             return parser
 
@@ -1416,3 +1300,6 @@ def slim_validate_args(args):
 
     if args.only_train_params_name_list and args.freeze_params_name_list:
         raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
+
+    if args.loss_type == "custom_loss" and args.custom_loss_function_path is None:
+        raise ValueError("--loss-type custom_loss requires --custom-loss-function-path.")
