@@ -6,7 +6,6 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from .actor_group import RayTrainGroup
-from .rollout import RolloutManager
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +136,13 @@ def create_placement_groups(args):
     }
 
 
-def allocate_train_group(args, num_gpus, pg):
+def allocate_train_group(args, num_gpus, pg, role):
     return RayTrainGroup(
         args=args,
         num_gpus=num_gpus,
         pg=pg,
         num_gpus_per_actor=0.4,
+        role=role,
     )
 
 
@@ -151,12 +151,14 @@ def create_training_models(args, pgs, rollout_manager):
         args=args,
         num_gpus=args.actor_num_gpus,
         pg=pgs["actor"],
+        role="actor",
     )
     if args.use_critic:
         critic_model = allocate_train_group(
             args=args,
             num_gpus=args.critic_num_gpus,
             pg=pgs["critic"],
+            role="critic",
         )
         critic_init_handle = critic_model.async_init(args, role="critic", with_ref=False)
     else:
@@ -193,6 +195,10 @@ def create_training_models(args, pgs, rollout_manager):
 
 
 def create_rollout_manager(args, pg):
+    # Imported here, where the Ray actor is built: the driver calls .remote()
+    # and does not run the sglang backend itself.
+    from .rollout import RolloutManager
+
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,

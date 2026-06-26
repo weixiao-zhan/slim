@@ -607,10 +607,33 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--calculate-per-token-loss", action="store_true")
             reset_arg(parser, "--lr", type=float, default=1e-6)
 
-            parser.add_argument("--num-critic-only-steps", type=int, default=0, help="Number of critic only steps")
+            parser.add_argument(
+                "--lr-actor-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the actor (RL policy) starts training.",
+            )
+            parser.add_argument(
+                "--lr-critic-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic backbone learning rate leaves 0 (warmup begins).",
+            )
+            parser.add_argument(
+                "--lr-critic-value-head-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic value head learning rate leaves 0 (warmup begins).",
+            )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
-            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
+            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic backbone")
+            parser.add_argument(
+                "--critic-value-head-lr",
+                type=float,
+                default=None,
+                help="The lr for the critic value head. Defaults to --critic-lr.",
+            )
             parser.add_argument("--critic-train-only", action="store_true", default=False, help="Only train critic")
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
@@ -1199,6 +1222,8 @@ def slim_validate_args(args):
         args.critic_load = args.load
     if args.critic_lr is None:
         args.critic_lr = args.lr
+    if args.critic_value_head_lr is None:
+        args.critic_value_head_lr = args.critic_lr
 
     # A replica size must evenly divide the role's GPU total.
     if args.actor_num_gpus:

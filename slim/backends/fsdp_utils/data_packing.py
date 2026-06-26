@@ -178,3 +178,52 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
         instances.append(instance)
 
     return instances
+
+
+def strip_cross_boundary(flat_edges: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """Remove cross-boundary entries from a flat edge tensor computed via [:-1].
+
+    When multiple sequences are packed and we compute logits[:-1], the result
+    has total_tokens - 1 entries, including cross-boundary entries between
+    adjacent sequences.  This function extracts only the valid within-sequence
+    edges (total_tokens - num_sequences entries).
+    """
+    if len(cu_seqlens) <= 2:
+        # Single sequence — no cross-boundary entries
+        return flat_edges
+    indices = torch.cat([
+        torch.arange(cu_seqlens[i], cu_seqlens[i + 1] - 1, device=flat_edges.device)
+        for i in range(len(cu_seqlens) - 1)
+    ])
+    return flat_edges[indices]
+
+
+def init_dummy_advantages(episodes: list[Episode]) -> None:
+    """Set zero advantages/returns on episodes so pack_sequences can proceed."""
+    for ep in episodes:
+        ep._advantages = [0.0] * ep.num_edges
+        ep._returns = [0.0] * ep.num_edges
+
+
+def update_packed_advantages(packed_batches: list[dict], episodes: list[Episode]) -> None:
+    """Update advantages/returns/old_values in pre-packed batches from episodes.
+
+    After advantages are computed on episodes (e.g. via GAE), this function
+    overwrites the dummy values that were used during initial packing.
+    """
+    for batch in packed_batches:
+        ep_indices = batch["_episode_indices"]
+        adv_parts = []
+        ret_parts = []
+        val_parts = []
+        for idx in ep_indices:
+            ep = episodes[idx]
+            adv_parts.append(torch.tensor(ep._advantages, dtype=torch.float32))
+            ret_parts.append(torch.tensor(ep._returns, dtype=torch.float32))
+            values = getattr(ep, "_values", None)
+            if values is not None:
+                val_parts.append(torch.tensor(values, dtype=torch.float32))
+        batch["advantages"] = torch.cat(adv_parts)
+        batch["returns"] = torch.cat(ret_parts)
+        if val_parts:
+            batch["old_values"] = torch.cat(val_parts)
