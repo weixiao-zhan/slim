@@ -40,7 +40,7 @@ def train(args):
             rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
 
         if args.use_critic:
-            should_train_actor = rollout_id >= args.num_critic_only_steps and not args.critic_train_only
+            should_train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
             if args.critic_colocate:
                 values_refs = critic_model.compute_values(rollout_id, rollout_data_curr_ref)
                 ray.get(values_refs)

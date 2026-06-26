@@ -25,44 +25,48 @@ mkdir -p "$LOG_DIR"
 WANDB_ARGS="$(wandb_args fp8_e2erl)"
 
 COMMON_ARGS="
-    --num-rollout 50
-    --rollout-batch-size 64
+    --num-rollout 80
+    --rollout-batch-size 32
     --n-samples-per-prompt 8
     --num-steps-per-rollout 1
-    --max-context-len 8192
     --rollout-temperature 1
     --rollout-shuffle
+    --max-context-len 8192
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
 
     --rollout-num-gpus-per-replica 1
-    --rollout-concurrency-per-replica 64
+    --rollout-concurrency-per-replica 128
     --sglang-mem-fraction-static 0.8
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
+    --sglang-enable-metrics
     --rollout-colocate
 
     --eval-interval 10
+    --skip-eval-before-train
     --eval-prompt-data math $DATASET_DIR/test_math.parquet vision $DATASET_DIR/test_vision.parquet
 
     --actor-num-gpus $NUM_GPUS
-    --attn-implementation flash_attention_3
+    --attn-implementation sdpa
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 32768
+    --max-tokens-per-gpu 24576
 
-    --advantage-estimator grpo
-    --disable-rewards-std-normalization
-    --policy-surrogate cis
-    --old-logprob-source rollout
-    --eps-clip 1
-    --eps-clip-high 1
+    --advantage-estimator ppo_gae
+    --critic-colocate
+    --num-critic-only-steps 20
+    --critic-lr 1e-5
+    --value-clip 0.2
+    --policy-surrogate ppo_clip
+    --eps-clip 0.2
+    --eps-clip-high 0.28
 
     --optimizer adam
-    --lr 3e-6
+    --lr 1e-5
     --lr-decay-style WSD
     --lr-wsd-decay-style cosine
     --lr-warmup-iters 5
@@ -94,7 +98,7 @@ for name in "${ORDER[@]}"; do
 
     start_ray
     set +e
-    run_train "$COMMON_ARGS $combo_args --save $LOG_DIR/$name.ckpt" 2>&1 | tee "$log"
+    run_train "$COMMON_ARGS $combo_args --wandb-group fp8_e2erl_$name" 2>&1 | tee "$log"
     set -e
 
     verdict_line="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$log" 1 0)"

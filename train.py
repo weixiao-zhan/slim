@@ -37,7 +37,7 @@ def train(args):
         ray.get(rollout_manager.eval.remote(rollout_id=0))
 
     def save(rollout_id):
-        if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps and not args.critic_train_only):
+        if (not args.use_critic) or (rollout_id >= args.lr_actor_start_step and not args.critic_train_only):
             actor_model.save_model(
                 rollout_id,
                 force_sync=rollout_id == args.num_rollout - 1,
@@ -62,7 +62,7 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            should_train_actor = rollout_id >= args.num_critic_only_steps and not args.critic_train_only
+            should_train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
             if args.critic_colocate:
                 values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
                 ray.get(values_refs)
