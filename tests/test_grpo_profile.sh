@@ -4,11 +4,9 @@ BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 SAVE_DIR="$REPO_DIR/outputs/grpo-mixed-cis-qwen35-4b-profile"
 PROFILE_DIR="$REPO_DIR/outputs/profiles"
-LOG="$SAVE_DIR/run.log"
 mkdir -p "$SAVE_DIR"
 
 start_ray
-set +e
 run_train "
     --num-rollout 3
     --rollout-batch-size 8
@@ -60,10 +58,4 @@ run_train "
     --save $SAVE_DIR
 
     $(wandb_args grpo-mixed-cis-qwen35-4b-fp8-fp32-profile)
-" 2>&1 | tee "$LOG"
-set -e
-
-cleanup
-verdict="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$LOG" 1 0)"
-echo "RESULT: $verdict"
-[[ "$verdict" == PASS* ]]
+"

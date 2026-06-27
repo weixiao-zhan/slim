@@ -4,7 +4,6 @@
 #   tp1      -> tensor-parallel 1   (8 single-GPU replicas)
 #   tp4      -> tensor-parallel 4   (2 replicas, pure TP)
 #   tp4_ep4  -> tensor-parallel 4 + expert-parallel 4   (2 replicas, EP across experts)
-# Each combo runs a few rollout steps and is graded by tests/sanity_check.py.
 # The MoE checkpoint is referenced via the models/<name> symlink to NVMe.
 #
 # Usage:  bash tests/sweep_moe_rollout.sh [combo_name ...]
@@ -12,8 +11,7 @@ source "$(dirname "$0")/common.sh"
 
 MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B"
 DATASET_DIR="$REPO_DIR/datasets/geo3k"
-LOG_DIR="$REPO_DIR/outputs/moe_rollout_sweep"
-mkdir -p "$LOG_DIR"
+maybe_detach "$0" "$@"
 
 # Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. 8 actor GPUs, rollout colocated.
 COMMON_ARGS="
@@ -68,36 +66,14 @@ COMBOS[tp4_ep4]="1|0|--rollout-num-gpus-per-replica 4 --sglang-ep 4"
 ORDER=(tp1 tp4 tp4_ep4)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
-declare -A RESULTS
+# Submit all combos to one cluster; they queue and run sequentially.
+# See tests/RUNNING_TESTS.md for watching/grading via ray job logs.
+start_ray
+
 for name in "${ORDER[@]}"; do
     spec="${COMBOS[$name]:-}"
     if [[ -z "$spec" ]]; then echo "Unknown combo: $name"; exit 2; fi
     IFS='|' read -r expect_actor expect_critic combo_args <<< "$spec"
-    log="$LOG_DIR/$name.log"
-
-    echo "=============================================================="
-    echo ">>> Running $name  (expect_actor=$expect_actor, expect_critic=$expect_critic)"
-    echo "=============================================================="
-
-    start_ray
-    set +e
-    run_train "$COMMON_ARGS $combo_args --save $LOG_DIR/$name.ckpt" 2>&1 | tee "$log"
-    set -e
-
-    verdict_line="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$log" "$expect_actor" "$expect_critic")"
-    echo "RESULT[$name]: $verdict_line"
-    RESULTS[$name]="$verdict_line"
+    echo ">>> Submitting $name  (expect_actor=$expect_actor, expect_critic=$expect_critic)"
+    run_train "$COMMON_ARGS $combo_args"
 done
-
-cleanup
-echo
-echo "================  MoE ROLLOUT SWEEP SUMMARY  ================"
-fail=0
-for name in "${ORDER[@]}"; do
-    line="${RESULTS[$name]}"
-    printf "  %-20s %s\n" "$name" "$line"
-    [[ "$line" == PASS* ]] || fail=1
-done
-echo "============================================================"
-[[ $fail -eq 0 ]] && echo "ALL COMBOS PASSED" || echo "SOME COMBOS FAILED"
-exit $fail

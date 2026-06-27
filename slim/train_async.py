@@ -87,6 +87,10 @@ def train(args):
     finish_tracking(args)
 
 
-if __name__ == "__main__":
+def main():
     args = parse_args()
     train(args)
+
+
+if __name__ == "__main__":
+    main()

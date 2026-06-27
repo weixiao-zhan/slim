@@ -608,6 +608,24 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--lr", type=float, default=1e-6)
 
             parser.add_argument(
+                "--lr-actor",
+                type=float,
+                default=None,
+                help="Max LR for the actor (RL policy). Defaults to --lr.",
+            )
+            parser.add_argument(
+                "--lr-critic",
+                type=float,
+                default=None,
+                help="Max LR for the critic backbone. Defaults to --lr.",
+            )
+            parser.add_argument(
+                "--lr-critic-value-head",
+                type=float,
+                default=None,
+                help="Max LR for the critic value head. Defaults to --lr-critic.",
+            )
+            parser.add_argument(
                 "--lr-actor-start-step",
                 type=int,
                 default=0,
@@ -627,13 +645,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
-            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic backbone")
-            parser.add_argument(
-                "--critic-value-head-lr",
-                type=float,
-                default=None,
-                help="The lr for the critic value head. Defaults to --critic-lr.",
-            )
             parser.add_argument("--critic-train-only", action="store_true", default=False, help="Only train critic")
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
@@ -715,7 +726,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
-            parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
+            parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
                 "--disable-rewards-std-normalization",
@@ -1220,10 +1231,12 @@ def slim_validate_args(args):
         args.critic_num_gpus_per_replica = args.critic_num_gpus or 1
     if args.critic_load is None:
         args.critic_load = args.load
-    if args.critic_lr is None:
-        args.critic_lr = args.lr
-    if args.critic_value_head_lr is None:
-        args.critic_value_head_lr = args.critic_lr
+    if args.lr_actor is None:
+        args.lr_actor = args.lr
+    if args.lr_critic is None:
+        args.lr_critic = args.lr
+    if args.lr_critic_value_head is None:
+        args.lr_critic_value_head = args.lr_critic
 
     # A replica size must evenly divide the role's GPU total.
     if args.actor_num_gpus:

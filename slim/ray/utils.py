@@ -2,7 +2,7 @@
 import os
 
 import ray
-from slim.ray.ray_actor import RayActor
+from slim.ray.ray_worker import RayWorker
 
 
 # Refer to
@@ -39,7 +39,7 @@ def get_physical_gpu_id():
 
 
 @ray.remote
-class Lock(RayActor):
+class Lock(RayWorker):
     def __init__(self):
         self._locked = False  # False: unlocked, True: locked
 

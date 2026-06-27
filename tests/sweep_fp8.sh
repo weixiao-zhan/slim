@@ -4,9 +4,8 @@
 #   bf16       -> bf16 rollout weights (base case)
 #   fp8_fp32   -> block-FP8 rollout weights, fp32 block scales
 #   fp8_ue8m0  -> block-FP8 rollout weights, ue8m0 (power-of-two) block scales
-# Rollout colocates on all 8 GPUs. Each combo runs a few rollout steps and is graded by
-# tests/sanity_check.py. The fp8_* combos require pre-forged FP8 checkpoints (see
-# tests/RUNNING_TESTS.md).
+# Rollout colocates on all 8 GPUs. The fp8_* combos require pre-forged FP8 checkpoints
+# (see tests/RUNNING_TESTS.md).
 #
 # Usage:  bash tests/sweep_fp8.sh [combo_name ...]
 source "$(dirname "$0")/common.sh"
@@ -15,8 +14,7 @@ BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
 FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8"
 FP8_UE8M0_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8-ue8m0"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-LOG_DIR="$REPO_DIR/outputs/fp8_sweep"
-mkdir -p "$LOG_DIR"
+maybe_detach "$0" "$@"
 
 # Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. GRPO + CIS, rollout colocated.
 COMMON_ARGS="
@@ -67,36 +65,14 @@ COMBOS[fp8_ue8m0]="1|0|--hf-checkpoint $FP8_UE8M0_MODEL_DIR --load $BF16_MODEL_D
 ORDER=(bf16 fp8_fp32 fp8_ue8m0)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
-declare -A RESULTS
+# Submit all combos to one cluster; they queue and run sequentially.
+# See tests/RUNNING_TESTS.md for watching/grading via ray job logs.
+start_ray
+
 for name in "${ORDER[@]}"; do
     spec="${COMBOS[$name]:-}"
     if [[ -z "$spec" ]]; then echo "Unknown combo: $name"; exit 2; fi
     IFS='|' read -r expect_actor expect_critic combo_args <<< "$spec"
-    log="$LOG_DIR/$name.log"
-
-    echo "=============================================================="
-    echo ">>> Running $name  (expect_actor=$expect_actor, expect_critic=$expect_critic)"
-    echo "=============================================================="
-
-    start_ray
-    set +e
-    run_train "$COMMON_ARGS $combo_args --save $LOG_DIR/$name.ckpt" 2>&1 | tee "$log"
-    set -e
-
-    verdict_line="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$log" "$expect_actor" "$expect_critic")"
-    echo "RESULT[$name]: $verdict_line"
-    RESULTS[$name]="$verdict_line"
+    echo ">>> Submitting $name  (expect_actor=$expect_actor, expect_critic=$expect_critic)"
+    run_train "$COMMON_ARGS $combo_args"
 done
-
-cleanup
-echo
-echo "================  FP8 SWEEP SUMMARY  ================"
-fail=0
-for name in "${ORDER[@]}"; do
-    line="${RESULTS[$name]}"
-    printf "  %-20s %s\n" "$name" "$line"
-    [[ "$line" == PASS* ]] || fail=1
-done
-echo "===================================================="
-[[ $fail -eq 0 ]] && echo "ALL COMBOS PASSED" || echo "SOME COMBOS FAILED"
-exit $fail
