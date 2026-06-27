@@ -20,7 +20,7 @@ import torch.distributed as dist
 from transformers import AutoConfig
 
 import slim.utils.eval_config
-from slim.ray.ray_actor import RayActor
+from slim.ray.ray_worker import RayWorker
 from slim.utils import logging_utils, train_dump_utils, train_metric_utils
 from slim.utils.data import get_minimum_num_micro_batch_size, process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
@@ -47,7 +47,7 @@ from .routing_replay import RoutingReplay
 logger = logging.getLogger(__name__)
 
 
-class FSDPTrainer(RayActor):
+class FSDPTrainer(RayWorker):
     """Base trainer for pure HF+FSDP training, shared by actor and critic.
 
     Responsibilities:
@@ -109,6 +109,7 @@ class FSDPTrainer(RayActor):
         dist.init_process_group(
             backend=backend,
             timeout=timedelta(minutes=args.distributed_timeout_minutes),
+            device_id=torch.device(f"cuda:{local_rank}"),
         )
         init_gloo_group()
 
@@ -773,7 +774,7 @@ class FSDPTrainer(RayActor):
                 logger.info(kl_info)
 
             logger.info(f"{log_prefix} step {self.global_step}: {log_dict}")
-            log_dict[f"{log_prefix}/step"] = self.global_step
+            log_dict["train/step"] = self.global_step
             logging_utils.log(self.args, log_dict)
 
         self.global_step += 1

@@ -13,7 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
 
-from slim.ray.ray_actor import RayActor
+from slim.ray.ray_worker import RayWorker
 from slim.utils.http_utils import get_host_info
 
 logger = logging.getLogger(__name__)
@@ -99,14 +99,12 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     p = multiprocessing.Process(target=target, args=(server_args,))
     p.start()
 
-    if server_args.node_rank != 0:
-        return
-
-    _wait_server_healthy(
-        base_url=server_args.url(),
-        api_key=server_args.api_key,
-        is_process_alive=lambda: p.is_alive(),
-    )
+    if server_args.node_rank == 0:
+        _wait_server_healthy(
+            base_url=server_args.url(),
+            api_key=server_args.api_key,
+            is_process_alive=lambda: p.is_alive(),
+        )
 
     return p
 
@@ -147,7 +145,7 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
             time.sleep(2)
 
 
-class SGLangEngine(RayActor):
+class SGLangEngine(RayWorker):
     def __init__(
         self,
         args,
@@ -394,7 +392,9 @@ class SGLangEngine(RayActor):
 
             if response is not None:
                 response.raise_for_status()
-        kill_process_tree(self.process.pid)
+        # Every rank kills its own local server subprocess.
+        if self.process is not None:
+            kill_process_tree(self.process.pid)
 
     def get_weight_version(self):
         if self.node_rank != 0:

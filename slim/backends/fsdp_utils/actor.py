@@ -33,7 +33,7 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 logger = logging.getLogger(__name__)
 
 
-class PolicyFSDPTrainer(FSDPTrainer):
+class ActorFSDPTrainer(FSDPTrainer):
     """FSDP trainer for the RL policy (actor + optional frozen reference model)."""
 
     _train_log_prefix = "train/actor"
@@ -94,7 +94,7 @@ class PolicyFSDPTrainer(FSDPTrainer):
         return ref_model
 
     def _build_optimizer_param_groups(self) -> list[dict]:
-        return [{"params": list(self.model.parameters()), "max_lr": self.args.lr}]
+        return [{"params": list(self.model.parameters()), "max_lr": self.args.lr_actor}]
 
     def _post_model_setup(self) -> None:
         args = self.args

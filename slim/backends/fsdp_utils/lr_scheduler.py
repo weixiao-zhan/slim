@@ -121,12 +121,13 @@ class FSDPLRScheduler(LRScheduler):
         elif self.lr_decay_style == "cosine":
             coeff = 0.5 * (math.cos(math.pi * decay_ratio) + 1.0)
         elif self.lr_decay_style == "WSD":
+            # The anneal is anchored to the global run end (last_epoch),
             wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
-            if local_step <= wsd_anneal_start_:
+            if self.last_epoch <= wsd_anneal_start_:
                 coeff = 1.0
             else:
-                wsd_steps = local_step - wsd_anneal_start_
-                wsd_decay_ratio = float(wsd_steps) / float(self.wsd_decay_steps)
+                wsd_steps = self.last_epoch - wsd_anneal_start_
+                wsd_decay_ratio = min(1.0, float(wsd_steps) / float(self.wsd_decay_steps))
                 if self.lr_wsd_decay_style == "linear":
                     coeff = 1.0 - wsd_decay_ratio
                 elif self.lr_wsd_decay_style == "cosine":
@@ -179,7 +180,7 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         optimizer,
         init_lr=args.lr_warmup_init,
         max_lr=args.lr,
-        min_lr=args.min_lr,
+        min_lr=args.lr_min,
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style=args.lr_decay_style,

@@ -86,12 +86,12 @@ class CriticFSDPTrainer(FSDPTrainer):
         return [
             {
                 "params": backbone_params,
-                "max_lr": self.args.critic_lr,
+                "max_lr": self.args.lr_critic,
                 "start_step": self.args.lr_critic_start_step * steps_per_rollout,
             },
             {
                 "params": value_head_params,
-                "max_lr": self.args.critic_value_head_lr,
+                "max_lr": self.args.lr_critic_value_head,
                 "start_step": self.args.lr_critic_value_head_start_step * steps_per_rollout,
             },
         ]

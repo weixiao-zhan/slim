@@ -14,7 +14,7 @@ class FSDPArgs:
     optimizer: str = "adam"  # Optimizer type: "adam" (AdamW)
     lr: float = 2e-5
     lr_warmup_init: float = 0.0
-    min_lr: float = 0.0
+    lr_min: float = 0.0
     lr_decay_style: str = "constant"
     lr_decay_iters: int | None = None
     lr_warmup_iters: int = 0

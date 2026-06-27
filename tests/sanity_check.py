@@ -19,17 +19,16 @@ import re
 import sys
 
 
-def _finite_losses(text: str, prefix: str) -> list[float]:
+def _finite_losses(text: str, prefix: str, loss_key: str) -> list[float]:
     """Extract loss values from lines like '<prefix> step N: {...}'."""
     losses = []
-    for m in re.finditer(rf"{prefix} step \d+: (\{{.*?\}})", text):
+    for m in re.finditer(rf"{re.escape(prefix)} step \d+: (\{{.*?\}})", text):
         try:
             d = ast.literal_eval(m.group(1))
         except (ValueError, SyntaxError):
             continue
-        key = f"{prefix}/loss" if prefix == "train" else f"{prefix}/value_loss"
-        if key in d and isinstance(d[key], (int, float)):
-            losses.append(float(d[key]))
+        if loss_key in d and isinstance(d[loss_key], (int, float)):
+            losses.append(float(d[loss_key]))
     return losses
 
 
@@ -49,8 +48,8 @@ def main() -> int:
     if "Weight version mismatch" in text:
         problems.append("weight-version-mismatch")
 
-    actor_losses = _finite_losses(text, "train")
-    critic_losses = _finite_losses(text, "critic")
+    actor_losses = _finite_losses(text, "train/actor", "train/actor/loss")
+    critic_losses = _finite_losses(text, "train/critic", "train/critic/value_loss")
 
     # Each actor.update_weights() is @timer-wrapped -> one "Timer update_weights end" per sync.
     weight_updates = len(re.findall(r"Timer update_weights end", text))
