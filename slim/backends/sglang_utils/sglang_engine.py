@@ -599,7 +599,7 @@ def _compute_server_args(
 
     # Routing replay: capture per-token expert ids during rollout so the actor
     # can gather scores at the same indices during training.
-    if getattr(args, "use_rollout_routing_replay", False):
+    if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
 
     if worker_type == "prefill":

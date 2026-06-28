@@ -68,7 +68,7 @@ def apply_hf_model_patches(hf_config, args) -> "RoutingReplayAdapter | None":
     # MoE routing replay: look up a per-arch adapter and apply its router
     # patch now. Currently only Qwen3.5-MoE is wired; other archs return
     # None and the trainer treats replay as off.
-    if not getattr(args, "use_rollout_routing_replay", False):
+    if not args.use_rollout_routing_replay:
         return None
 
     adapter = ROUTING_REPLAY_REGISTRY.get(model_type)

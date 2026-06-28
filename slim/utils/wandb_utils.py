@@ -59,7 +59,7 @@ def init_wandb_primary(args):
     }
 
     # Resume an existing run if --wandb-run-id was provided.
-    if getattr(args, "wandb_run_id", None):
+    if args.wandb_run_id:
         init_kwargs["id"] = args.wandb_run_id
         init_kwargs["resume"] = "allow"
 
@@ -98,7 +98,7 @@ def _compute_config_for_logging(args):
 
 # https://docs.wandb.ai/guides/track/log/distributed-training/#track-all-processes-to-a-single-run
 def init_wandb_secondary(args, metrics_endpoints=None):
-    wandb_run_id = getattr(args, "wandb_run_id", None)
+    wandb_run_id = args.wandb_run_id
     if wandb_run_id is None:
         return
 

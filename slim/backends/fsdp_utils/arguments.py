@@ -111,7 +111,7 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
         raise ValueError(
             f"--compute-dtype must be one of {valid_compute}, got {args.compute_dtype!r}"
         )
-    if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "use_peft", False):
+    if args.fsdp_cpu_offload and args.use_peft:
         logger.warning(
             "--fsdp-cpu-offload and --use-peft would cause "
             "extremely slow weight sync due to merge/unmerge "

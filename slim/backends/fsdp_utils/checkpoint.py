@@ -105,7 +105,7 @@ def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
     direct_match = _ITERATION_DIR_PATTERN.fullmatch(root_path.name)
     if direct_match is not None:
         return root_path
-    target_step = getattr(args, "ckpt_step", None)
+    target_step = args.ckpt_step
     if target_step is None:
         tracker_file = root_path / "latest_checkpointed_iteration.txt"
         if not tracker_file.exists():
@@ -120,7 +120,7 @@ def load(actor: Any) -> dict[str, Any] | None:
     Loads model weights and optionally optimizer state from separate directories.
     This allows loading weights without optimizer or deleting optimizer before loading.
     """
-    load_root = getattr(actor, "_checkpoint_load_dir", None) or getattr(actor.args, "load", None)
+    load_root = getattr(actor, "_checkpoint_load_dir", None) or actor.args.load
     checkpoint_dir = resolve_checkpoint_dir(load_root, actor.args)
     if checkpoint_dir is None:
         logger.info(f"[FSDP] Checkpoint not found at {load_root}; skipping load.")
@@ -177,7 +177,7 @@ def load(actor: Any) -> dict[str, Any] | None:
     load_lr_scheduler = (
         hasattr(actor, "lr_scheduler")
         and lr_scheduler_dir.exists()
-        and not getattr(actor.args, "no_load_lr_scheduler", False)
+        and not actor.args.no_load_lr_scheduler
     )
     if load_lr_scheduler:
         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
@@ -190,7 +190,7 @@ def load(actor: Any) -> dict[str, Any] | None:
             )
         except Exception as e:
             logger.warning(f"[FSDP] Failed to load LR scheduler from {lr_scheduler_dir}: {e}")
-    elif hasattr(actor, "lr_scheduler") and getattr(actor.args, "no_load_lr_scheduler", False):
+    elif hasattr(actor, "lr_scheduler") and actor.args.no_load_lr_scheduler:
         logger.info("[FSDP] --no-load-lr-scheduler set; using fresh LR scheduler from args.")
     elif hasattr(actor, "lr_scheduler"):
         logger.info(f"[FSDP] LR scheduler checkpoint not found at {lr_scheduler_dir}, skipping LR scheduler load.")
@@ -233,11 +233,11 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
         if next_rollout is not None:
             actor.args.start_rollout_id = next_rollout
     elif iteration is not None:
-        if getattr(actor.args, "start_rollout_id", None) is None:
+        if actor.args.start_rollout_id is None:
             actor.args.start_rollout_id = iteration
 
-    start_step = getattr(actor.args, "lr_scheduler_start_step", None)
-    if start_step is None and getattr(actor.args, "no_load_lr_scheduler", False):
+    start_step = actor.args.lr_scheduler_start_step
+    if start_step is None and actor.args.no_load_lr_scheduler:
         start_step = iteration
     if start_step is not None and hasattr(actor, "lr_scheduler"):
         actor.lr_scheduler.last_epoch = int(start_step)
@@ -279,7 +279,7 @@ def save(actor: Any, iteration: int) -> None:
     # No separate adapter save needed — checkpoint.load() restores everything.
 
     # Save optimizer state (skip if --no-save-optim is set)
-    save_optimizer_state = not getattr(actor.args, "no_save_optim", False)
+    save_optimizer_state = not actor.args.no_save_optim
     if save_optimizer_state and hasattr(actor, "optimizer") and actor.optimizer is not None:
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}

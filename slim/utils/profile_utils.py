@@ -17,7 +17,7 @@ def profile_rollout(args, rollout_id):
     """
     Trace one rollout step's generation and rm phase with VizTracer.
     """
-    if "rollout" not in getattr(args, "profile_target", []) or not (args.profile_step_start <= rollout_id < args.profile_step_end):
+    if "rollout" not in args.profile_target or not (args.profile_step_start <= rollout_id < args.profile_step_end):
         yield
         return
 

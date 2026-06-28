@@ -35,6 +35,7 @@ from slim.utils.types import Episode
 from . import checkpoint
 from .data_packing import pack_sequences, update_packed_advantages
 from .fsdp_helpers import (
+    _REPLICATED_FROZEN_MODULE_KEYWORDS,
     _get_replicated_frozen_module_roots,
     apply_fsdp2,
     get_local_gpu_id,
@@ -101,7 +102,7 @@ class FSDPTrainer(RayWorker):
 
         # Use hybrid backend when FSDP CPU offload is enabled with a CPU backend
         backend = args.distributed_backend
-        if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "fsdp_cpu_backend", None):
+        if args.fsdp_cpu_offload and args.fsdp_cpu_backend:
             cpu_backend = args.fsdp_cpu_backend
             backend = f"cpu:{cpu_backend},cuda:{args.distributed_backend}"
             logger.info(f"FSDP CPU offload enabled, using hybrid backend: {backend}")
@@ -160,7 +161,7 @@ class FSDPTrainer(RayWorker):
         if self.args.debug_rollout_only:
             return 0
 
-        self.fsdp_cpu_offload = getattr(self.args, "fsdp_cpu_offload", False)
+        self.fsdp_cpu_offload = self.args.fsdp_cpu_offload
         self._need_offload = (
             self.args.rollout_colocate or self.args.critic_colocate
         ) and not self.fsdp_cpu_offload
@@ -168,7 +169,7 @@ class FSDPTrainer(RayWorker):
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
 
-        if getattr(self.args, "start_rollout_id", None) is None:
+        if self.args.start_rollout_id is None:
             self.args.start_rollout_id = 0
 
         self.prof = TrainProfiler(args)
@@ -262,7 +263,7 @@ class FSDPTrainer(RayWorker):
 
         self.prof.on_init_end()
 
-        return int(getattr(self.args, "start_rollout_id", 0))
+        return int(self.args.start_rollout_id)
 
     # ------------------------------------------------------------------
     # Role hooks: overridden by PolicyFSDPTrainer / CriticFSDPTrainer.
@@ -392,17 +393,19 @@ class FSDPTrainer(RayWorker):
         Returns PeftModel if --use-peft is set, otherwise the original model unchanged.
         On resume, checkpoint.load() restores adapter weights via DCP after FSDP wrapping.
         """
-        if not getattr(self.args, "use_peft", False):
+        if not self.args.use_peft:
             return model
 
         from peft import LoraConfig, get_peft_model
 
+        # Exclude the replicated+frozen encoders (same keywords as FSDP wrapping)
+        # so LoRA only adapts the language backbone.
         defaults = dict(
             r=16,
             lora_alpha=32,
             use_dora=False,
             target_modules="all-linear",
-            exclude_modules=["visual", "vision_tower", "vision_model", "audio", "speech"],
+            exclude_modules=list(_REPLICATED_FROZEN_MODULE_KEYWORDS),
             lora_dropout=0.0,
             bias="none",
             task_type="CAUSAL_LM",
@@ -909,7 +912,7 @@ class FSDPTrainer(RayWorker):
         # Unwrap PEFT (base_model.model) then walk HF's .model nesting to
         # reach the base model that defines get_rope_index.
         inner = self.model
-        if getattr(self.args, "use_peft", False):
+        if self.args.use_peft:
             inner = inner.base_model.model
         inner = inner.model
         get_rope_index = inner.get_rope_index
