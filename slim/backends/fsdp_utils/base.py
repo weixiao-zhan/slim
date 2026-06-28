@@ -167,7 +167,7 @@ class FSDPTrainer(RayWorker):
         ) and not self.fsdp_cpu_offload
 
         if dist.get_rank() == 0:
-            init_tracking(args, primary=False)
+            init_tracking(args, primary=False, disable_stats=True)
 
         if self.args.start_rollout_id is None:
             self.args.start_rollout_id = 0
