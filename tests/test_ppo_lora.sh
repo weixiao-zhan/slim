@@ -37,7 +37,7 @@ run_train "
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
     --use-peft
-    --peft-config '{\"r\": 128, \"lora_alpha\": 256, \"target_modules\": \"all-linear\"}'
+    --peft-config {\"r\":128,\"lora_alpha\":256,\"target_modules\":\"all-linear\"}
 
     --advantage-estimator ppo_gae
     --value-clip 0.2

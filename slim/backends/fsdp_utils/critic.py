@@ -65,6 +65,29 @@ class CriticFSDPTrainer(FSDPTrainer):
 
         return model
 
+    def _maybe_apply_peft(self, model):
+        """Apply PEFT, then unfreeze the value head for full-parameter training.
+
+        ``target_modules="all-linear"`` skips the output head, and
+        ``get_peft_model`` freezes every non-adapter param, so the zero-init
+        value head would never train. Unfreezing ``lm_head.weight`` keeps it
+        full-parameter (no low-rank bypass on a freshly-initialized head) while
+        preserving the clean ``lm_head.weight`` FQN that
+        ``_build_optimizer_param_groups`` selects on.
+        """
+        model = super()._maybe_apply_peft(model)
+        if not self.args.use_peft:
+            return model
+
+        unfrozen = 0
+        for name, p in model.named_parameters():
+            if name.endswith("lm_head.weight"):
+                p.requires_grad_(True)
+                unfrozen += 1
+        assert unfrozen == 1, f"expected exactly one value-head param to unfreeze, got {unfrozen}"
+        logger.info(f"[Rank {dist.get_rank()}] PEFT critic: value head unfrozen for full-parameter training")
+        return model
+
     def _build_optimizer_param_groups(self) -> list[dict]:
         """Two groups so the value head and backbone can warm up independently.
 
@@ -76,6 +99,8 @@ class CriticFSDPTrainer(FSDPTrainer):
         steps_per_rollout = self._steps_per_rollout()
         value_head_params, backbone_params = [], []
         for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
             if name.endswith("lm_head.weight"):
                 value_head_params.append(p)
             else:

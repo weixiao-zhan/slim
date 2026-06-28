@@ -46,7 +46,9 @@ COMMON_ARGS="
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 12288
+    --max-tokens-per-gpu 8192
+    --use-peft
+    --peft-config {\"r\":128,\"lora_alpha\":256,\"target_modules\":\"all-linear\"}
     --critic-colocate
 
     --advantage-estimator ppo_gae

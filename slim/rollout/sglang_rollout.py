@@ -53,7 +53,7 @@ class GenerateState(metaclass=SingletonMeta):
 
         concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.chat_template_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
+        self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
         self.sampling_params: dict[str, Any] = {
             "temperature": args.rollout_temperature,
             "no_stop_trim": True,
@@ -68,7 +68,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_rank = 0
 
         self.routing_replay_shape: tuple[int, int] | None = None
-        if getattr(args, "use_rollout_routing_replay", False):
+        if args.use_rollout_routing_replay:
             from transformers import AutoConfig
 
             cfg = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
@@ -228,7 +228,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         payload["image_data"] = [processor_output]
 
     headers = None
-    if getattr(args, "router_policy", None) == "consistent_hashing" and episode.session_id:
+    if args.router_policy == "consistent_hashing" and episode.session_id:
         headers = {"X-SMG-Routing-Key": episode.session_id}
 
     url = f"http://{args.router_ip}:{args.router_port}/generate"
@@ -444,7 +444,7 @@ async def eval_rollout(args: Namespace, rollout_id: int) -> RolloutFnEvalOutput:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     coros = []
-    for dataset_cfg in getattr(args, "eval_datasets", []) or []:
+    for dataset_cfg in args.eval_datasets or []:
         coros.append(eval_rollout_single_dataset(args, rollout_id, dataset_cfg))
     results_list = await asyncio.gather(*coros)
     combined = {}

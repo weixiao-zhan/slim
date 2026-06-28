@@ -980,7 +980,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
 def _resolve_sglang_config(args) -> SglangConfig:
     """Build a SglangConfig from args, choosing the right source."""
-    if getattr(args, "sglang_config", None) is not None:
+    if args.sglang_config is not None:
         config = SglangConfig.from_yaml(args.sglang_config)
         # Validate total GPUs match.
         expected = args.rollout_num_gpus

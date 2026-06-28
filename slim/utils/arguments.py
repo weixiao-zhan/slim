@@ -160,7 +160,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "JSON string of LoraConfig overrides for PEFT. "
                     'Defaults: {"r": 16, "lora_alpha": 32, "use_dora": false, '
                     '"target_modules": "all-linear", '
-                    '"exclude_modules": ["vision_tower", "multi_modal_projector"], '
+                    '"exclude_modules": ["visual", "vision_tower", "vision_model", "audio", "speech"], '
                     '"lora_dropout": 0.0, "bias": "none", "task_type": "CAUSAL_LM"}'
                 ),
             )
