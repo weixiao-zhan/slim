@@ -104,11 +104,8 @@ $\pi_\text{rollout} \ne \pi_\theta$ due to rollout-trainer policy numerical mism
 KL penalty measures the divergence between $\pi_\theta$ and the frozen reference model $\pi_\text{ref}$ (load via `--ref-load`).
 It constrains the trained policy from drifting too far from the reference.
 
-There are two places to inject and only one should be non-zero:
-1. **As a loss term** (`--use-kl-loss`, `--kl-loss-coef`): added directly to the training loss.
-   $$L_\text{total} = L_\text{pg} + \alpha_\text{kl} \cdot \text{KL}(\pi_\theta \| \pi_\text{ref})$$
-
-2. **As reward shaping** (`--kl-coef`): subtracted from the reward *before* advantage computation, so the advantage estimator sees KL-penalized rewards.
+KL is injected as a loss term (`--kl-loss-coef`), added directly to the training loss:
+$$L_\text{total} = L_\text{pg} + \alpha_\text{kl} \cdot \text{KL}(\pi_\theta \| \pi_\text{ref})$$
 
 KL is estimated per-token from $\rho_{i,t} = \log\pi_\theta(x_{i,t}) - \log\pi_\text{ref}(x_{i,t})$.
 The estimator type (`--kl-loss-type`) selects among `k1` ($\rho$), `k2` ($\rho^2/2$), or `k3`/`low_var_kl` ($e^{-\rho} - 1 + -\rho$).
@@ -147,11 +144,9 @@ When `--calculate-per-token-loss` is set, per-token losses are summed (not avera
 | `--eps-clip` | `0.2` | PPO clip lower bound |
 | `--eps-clip-high` | `None` | PPO clip upper bound (defaults to `--eps-clip`) |
 | `--eps-clip-c` | `None` | Dual-clip lower bound (> 1.0) |
-| `--use-kl-loss` | `False` | Enable KL loss term |
-| `--kl-loss-coef` | `0.0` | KL loss coefficient |
+| `--kl-loss-coef` | `0.0` | KL loss coefficient (non-zero enables the KL loss term) |
 | `--kl-loss-type` | `low_var_kl` | KL estimator: `k1`, `k2`, `k3`, `low_var_kl` |
 | `--use-unbiased-kl` | `False` | Multiply KL by importance ratio |
-| `--kl-coef` | `0.0` | KL penalty on reward (before advantage) |
 | `--entropy-coef` | `0.0` | Entropy bonus coefficient |
 | `--gamma` | `1.0` | GAE discount factor |
 | `--lambd` | `1.0` | GAE lambda |

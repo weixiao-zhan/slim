@@ -771,7 +771,7 @@ class FSDPTrainer(RayWorker):
             for gid, _group in enumerate(self.optimizer.param_groups):
                 log_dict[f"{log_prefix}/lr-pg_{gid}"] = lr_values[gid]
 
-            if self.args.use_kl_loss and "kl_loss" in aggregated:
+            if self.args.kl_loss_coef != 0 and "kl_loss" in aggregated:
                 kl_info = f"kl_loss: {aggregated['kl_loss']:.4f}, kl_penalty: {aggregated['kl_loss'] * self.args.kl_loss_coef:.4f}"
                 logger.info(kl_info)
 
