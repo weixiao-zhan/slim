@@ -20,13 +20,13 @@ DATASET_DIR="$REPO_DIR/datasets/mixed"
 COMMON_ARGS="
     --num-rollout 80
     --rollout-batch-size 32
-    --n-samples-per-prompt 8
+    --n-samples-per-prompt 16
     --num-steps-per-rollout 1
 
     --prompt-data $DATASET_DIR/train.parquet
     --rollout-temperature 1
     --rollout-shuffle
-    --max-context-len 6144
+    --max-context-len 8192
     --rm-type math
     --eval-interval 10
     --skip-eval-before-train
@@ -35,21 +35,20 @@ COMMON_ARGS="
     --rollout-colocate
     --rollout-num-gpus-per-replica 1
     --rollout-concurrency-per-replica 128
+    --sglang-attention-backend fa3
     --sglang-mem-fraction-static 0.8
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
     --sglang-enable-metrics
 
-    --actor-num-gpus $NUM_GPUS
-    --attn-implementation sdpa
+    --actor-num-gpus 4
+    --critic-num-gpus 4
+    --attn-implementation flash_attention_3
     --master-weight-dtype fp32
     --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 8192
-    --use-peft
-    --peft-config {\"r\":128,\"lora_alpha\":256,\"target_modules\":\"all-linear\"}
-    --critic-colocate
+    --max-tokens-per-gpu 32768
 
     --advantage-estimator ppo_gae
     --policy-surrogate ppo_clip
