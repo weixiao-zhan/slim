@@ -193,10 +193,14 @@ class CriticFSDPTrainer(FSDPTrainer):
         old_values = torch.cat(old_values_list, dim=0)
         returns = torch.cat(returns_list, dim=0)
 
-        value_loss = compute_value_loss(cur_values, old_values, returns, self.args.value_clip)
+        value_loss, value_clipfrac = compute_value_loss(cur_values, old_values, returns, self.args.value_clip)
         value_loss = sum_of_sample_mean(value_loss, edge_lengths, loss_masks)
+        value_clipfrac = sum_of_sample_mean(value_clipfrac, edge_lengths, loss_masks)
 
-        reported = {"value_loss": value_loss.detach()}
+        reported = {
+            "value_loss": value_loss.detach(),
+            "value_clipfrac": value_clipfrac.detach(),
+        }
 
         loss = value_loss * self.dp_size / self.args.global_batch_size
         loss.backward()

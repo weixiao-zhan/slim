@@ -169,7 +169,7 @@ def compute_value_loss(
     old_values: torch.Tensor,
     returns: torch.Tensor,
     value_clip: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute clipped value loss for PPO critic training.
 
     Uses the standard PPO value clipping approach: the value prediction is
@@ -183,12 +183,14 @@ def compute_value_loss(
         value_clip: Clipping range for value predictions.
 
     Returns:
-        Per-token value loss (not yet reduced).
+        Per-token value loss and per-token clip fraction (1 where the clipped
+        squared error wins the max), neither yet reduced.
     """
     values_clipped = old_values + (cur_values - old_values).clamp(-value_clip, value_clip)
     vf_loss1 = (cur_values - returns) ** 2
     vf_loss2 = (values_clipped - returns) ** 2
-    return 0.5 * torch.max(vf_loss1, vf_loss2)
+    clipfrac = torch.gt(vf_loss2, vf_loss1).float()
+    return 0.5 * torch.max(vf_loss1, vf_loss2), clipfrac
 
 
 def get_grpo_returns(
