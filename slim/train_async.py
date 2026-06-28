@@ -53,9 +53,10 @@ def train(args):
                 logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_curr_ref) if should_train_actor else []
                 ray.get(values_refs + logprobs_refs)  # wait for both to finish
                 critic_train_handle = critic_model.async_train(rollout_id, rollout_data_curr_ref, values_refs)
-                if should_train_actor:
-                    ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
-                ray.get(critic_train_handle)
+                actor_train_handle = (
+                    actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs) if should_train_actor else []
+                )
+                ray.get(critic_train_handle + actor_train_handle)  # train both in parallel
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
 
