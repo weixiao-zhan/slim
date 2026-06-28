@@ -83,6 +83,9 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
         from sglang.srt.entrypoints.http_server import launch_server
 
     multiprocessing.set_start_method("spawn", force=True)
+    # This flag pin SGLang CUDA_VISIBLE_DEVICES per rank 
+    # Avoiss cuda:0 context leak before set_device (e.g. DeepGEMM/FP8 JIT warmup)
+    os.environ.setdefault("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
     server_args.host = server_args.host.strip("[]")
     # When the routing-replay capturer is enabled server-side, force the
     # per-request return_routed_experts flag to True. This is necessary
