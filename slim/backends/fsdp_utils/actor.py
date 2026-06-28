@@ -395,7 +395,7 @@ class ActorFSDPTrainer(FSDPTrainer):
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss
 
-        if self.args.use_kl_loss:
+        if self.args.kl_loss_coef != 0:
             ref_log_probs = torch.cat([batch["ref_log_probs"] for batch in unpacked_batches], dim=0)
             importance_ratio = None
             if self.args.use_unbiased_kl:
@@ -423,7 +423,7 @@ class ActorFSDPTrainer(FSDPTrainer):
                 flat_v = torch.cat(values, dim=0)
                 reported[f"mismatch/{key}"] = sum_of_sample_mean(flat_v, edge_lengths, loss_masks).detach()
 
-        if self.args.use_kl_loss:
+        if self.args.kl_loss_coef != 0:
             reported["kl_loss"] = kl_loss.detach()
 
         return loss, reported

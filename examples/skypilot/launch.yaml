@@ -180,7 +180,6 @@ run: | # shell
     --entropy-coef 0.00 \
     --kl-loss-coef 0.00 \
     --kl-loss-type low_var_kl \
-    --kl-coef 0.00 \
     \
     --optimizer adam \
     --lr 1e-5 \

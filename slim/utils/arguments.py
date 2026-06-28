@@ -657,12 +657,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
             parser.add_argument(
-                "--kl-coef",
-                type=float,
-                default=0.00,
-                help="KL penalty coefficient for reward shaping. This is applied to the reward signal before advantage calculation.",
-            )
-            parser.add_argument(
                 "--loss-type",
                 type=str,
                 choices=["policy_loss", "custom_loss"],
@@ -704,13 +698,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Advantage estimator to use.",
             )
             parser.add_argument(
-                "--use-kl-loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
-            )
-            parser.add_argument(
                 "--kl-loss-coef",
                 type=float,
                 default=0.0,
-                help="KL penalty coefficient for the loss function. This is added to the final PPO loss.",
+                help="KL penalty coefficient for the loss function. This is added to the final loss. ",
             )
             parser.add_argument(
                 "--use-unbiased-kl",
@@ -1170,7 +1161,7 @@ def slim_validate_args(args):
 
     args.eval_datasets = _resolve_eval_datasets(args)
 
-    if args.kl_coef != 0 or args.use_kl_loss:
+    if args.kl_loss_coef != 0:
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
 
@@ -1179,8 +1170,6 @@ def slim_validate_args(args):
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
-
-    assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 
     if args.mismatch_correction != "none" and args.old_logprob_source != "actor":
         raise ValueError("--mismatch-correction requires --old-logprob-source actor.")
