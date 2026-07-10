@@ -31,9 +31,13 @@ start_ray() {
     uv run ray start --head --node-ip-address "$MASTER_ADDR" --num-gpus "$NUM_GPUS" --disable-usage-stats
 }
 
+# Submit a training job to the running ray cluster and return immediately
+# (--no-wait). Jobs queue on the cluster: each one's driver blocks in
+# ray.get(pg.ready()) until the previous job's RolloutManager.dispose frees the
+# GPUs, so combos run sequentially without a per-combo cluster restart.
 run_train() {
     local train_args="$1"
-    local train_script="${2:-$REPO_DIR/train.py}"
+    local train_cmd="${2:-slim-train}"
     local ray_port="${RAY_DASHBOARD_PORT:-8265}"
 
     local runtime_env
@@ -61,7 +65,8 @@ print(json.dumps({'env_vars': env_vars}))
     uv run ray job submit \
         --address="http://127.0.0.1:${ray_port}" \
         --runtime-env-json="$runtime_env" \
-        -- python "$train_script" $train_args
+        --no-wait \
+        -- "$train_cmd" $train_args
 }
 
 wandb_args() {

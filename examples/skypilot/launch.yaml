@@ -136,7 +136,7 @@ run: | # shell
 
   uv run ray job submit --address="http://${MASTER_ADDR}:${RAY_DASHBOARD_PORT}" \
     --runtime-env-json="${RUNTIME_ENV_JSON}" \
-    -- python3 train.py \
+    -- slim-train \
     \
     --num-rollout 200 \
     --rollout-batch-size 32 \
@@ -180,7 +180,6 @@ run: | # shell
     --entropy-coef 0.00 \
     --kl-loss-coef 0.00 \
     --kl-loss-type low_var_kl \
-    --kl-coef 0.00 \
     \
     --optimizer adam \
     --lr 1e-5 \

@@ -1,5 +1,4 @@
 import dataclasses
-import itertools
 import logging
 import multiprocessing
 import os
@@ -417,6 +416,12 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
+        shutdown_refs = [engine.shutdown.remote() for engine in self.all_engines if engine is not None]
+        for ref in shutdown_refs:
+            try:
+                ray.get(ref)
+            except Exception as e:
+                logger.warning(f"Engine shutdown failed during dispose: {e}")
         logging_utils.finish_tracking(self.args)
 
     @property
@@ -975,7 +980,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
 
 def _resolve_sglang_config(args) -> SglangConfig:
     """Build a SglangConfig from args, choosing the right source."""
-    if getattr(args, "sglang_config", None) is not None:
+    if args.sglang_config is not None:
         config = SglangConfig.from_yaml(args.sglang_config)
         # Validate total GPUs match.
         expected = args.rollout_num_gpus
@@ -1109,28 +1114,6 @@ def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
     log_dict["rollout_time"] = rollout_time
     if max(non_generation_time) > 0:
         log_dict |= dict_add_prefix(compute_statistics(non_generation_time), "non_generation_time/")
-
-    def token_perf(response_lengths, non_generation_time, key=""):
-        max_response_length = max(response_lengths)
-        if args.rollout_num_gpus:
-            log_dict[f"{key}tokens_per_gpu_per_sec"] = sum(response_lengths) / rollout_time / args.rollout_num_gpus
-        log_dict[f"longest_{key}sample_tokens_per_sec"] = max_response_length / rollout_time
-
-        if max(non_generation_time) == 0:
-            return
-
-        ngt_for_longest = [
-            t for t, length in zip(non_generation_time, response_lengths, strict=True) if length == max_response_length
-        ]
-        mean_ngt = sum(ngt_for_longest) / len(ngt_for_longest)
-
-        log_dict[f"longest_{key}sample_non_generation_time"] = mean_ngt
-        log_dict[f"longest_{key}sample_tokens_per_sec_without_non_generation"] = max_response_length / (
-            rollout_time - mean_ngt
-        )
-
-    token_perf([ep.response_length for ep in episodes], non_generation_time, key="")
-    token_perf([ep.response_length for ep in episodes], non_generation_time, key="effective_")
 
     return log_dict
 

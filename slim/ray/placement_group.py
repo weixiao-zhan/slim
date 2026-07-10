@@ -6,7 +6,6 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from .actor_group import RayTrainGroup
-from .rollout import RolloutManager
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +136,13 @@ def create_placement_groups(args):
     }
 
 
-def allocate_train_group(args, num_gpus, pg):
+def allocate_train_group(args, num_gpus, pg, role):
     return RayTrainGroup(
         args=args,
         num_gpus=num_gpus,
         pg=pg,
         num_gpus_per_actor=0.4,
+        role=role,
     )
 
 
@@ -151,27 +151,34 @@ def create_training_models(args, pgs, rollout_manager):
         args=args,
         num_gpus=args.actor_num_gpus,
         pg=pgs["actor"],
+        role="actor",
     )
     if args.use_critic:
         critic_model = allocate_train_group(
             args=args,
             num_gpus=args.critic_num_gpus,
             pg=pgs["critic"],
+            role="critic",
         )
-        critic_init_handle = critic_model.async_init(args, role="critic", with_ref=False)
     else:
         critic_model = None
 
-    start_rollout_ids = ray.get(
-        actor_model.async_init(
-            args,
-            role="actor",
-            with_ref=args.kl_coef != 0 or args.use_kl_loss,
-        )
-    )
+    actor_with_ref = args.kl_loss_coef != 0
+
+    if not args.use_critic:
+        start_rollout_ids = ray.get(actor_model.async_init(args, role="actor", with_ref=actor_with_ref))
+    elif args.critic_colocate:
+        # critic shares actor GPUs, init sequentially to avoid contention
+        start_rollout_ids = ray.get(actor_model.async_init(args, role="actor", with_ref=actor_with_ref))
+        critic_start_rollout_ids = ray.get(critic_model.async_init(args, role="critic", with_ref=False))
+    else:
+        # critic on separate GPUs, init both in parallel
+        actor_init_handle = actor_model.async_init(args, role="actor", with_ref=actor_with_ref)
+        critic_init_handle = critic_model.async_init(args, role="critic", with_ref=False)
+        start_rollout_ids = ray.get(actor_init_handle)
+        critic_start_rollout_ids = ray.get(critic_init_handle)
 
     if args.use_critic:
-        critic_start_rollout_ids = ray.get(critic_init_handle)
         if not args.critic_train_only:
             actor_model.connect(critic_model)
         else:
@@ -193,6 +200,10 @@ def create_training_models(args, pgs, rollout_manager):
 
 
 def create_rollout_manager(args, pg):
+    # Imported here, where the Ray actor is built: the driver calls .remote()
+    # and does not run the sglang backend itself.
+    from .rollout import RolloutManager
+
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,

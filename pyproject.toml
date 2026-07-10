@@ -33,6 +33,10 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 
+[project.scripts]
+slim-train = "slim.train:main"
+slim-train-async = "slim.train_async:main"
+
 [project.optional-dependencies]
 dev = [
     "memray",

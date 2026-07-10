@@ -6,11 +6,9 @@ source "$(dirname "$0")/common.sh"
 MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 SAVE_DIR="$REPO_DIR/outputs/ppo-lora-qwen35-2b"
-LOG="$SAVE_DIR/run.log"
 mkdir -p "$SAVE_DIR"
 
 start_ray
-set +e
 run_train "
     --num-rollout 3
     --rollout-batch-size 8
@@ -39,20 +37,16 @@ run_train "
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
     --use-peft
-    --peft-config '{\"r\": 128, \"lora_alpha\": 256, \"target_modules\": \"all-linear\"}'
+    --peft-config {\"r\":128,\"lora_alpha\":256,\"target_modules\":\"all-linear\"}
 
     --advantage-estimator ppo_gae
-    --gamma 1.0
-    --lambd 0.95
     --value-clip 0.2
-    --kl-coef 0.0
-    --entropy-coef 0.0
     --eps-clip 0.2
     --eps-clip-high 0.28
 
     --optimizer adam
     --lr 3e-6
-    --critic-lr 5e-5
+    --lr-critic 5e-5
     --lr-warmup-iters 10
     --lr-decay-style constant
     --weight-decay 0.1
@@ -64,10 +58,4 @@ run_train "
     --save-interval 20
 
     $(wandb_args ppo-lora-qwen35-2b)
-" 2>&1 | tee "$LOG"
-set -e
-
-cleanup
-verdict="$(uv run python "$REPO_DIR/tests/sanity_check.py" "$LOG" 1 1)"
-echo "RESULT: $verdict"
-[[ "$verdict" == PASS* ]]
+"

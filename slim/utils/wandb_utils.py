@@ -4,6 +4,8 @@ from copy import deepcopy
 
 import wandb
 
+from slim.utils.misc import get_current_node_ip
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,7 +61,7 @@ def init_wandb_primary(args):
     }
 
     # Resume an existing run if --wandb-run-id was provided.
-    if getattr(args, "wandb_run_id", None):
+    if args.wandb_run_id:
         init_kwargs["id"] = args.wandb_run_id
         init_kwargs["resume"] = "allow"
 
@@ -67,7 +69,9 @@ def init_wandb_primary(args):
     if offline:
         init_kwargs["settings"] = wandb.Settings(mode="offline")
     else:
-        init_kwargs["settings"] = wandb.Settings(mode="shared", x_primary=True)
+        init_kwargs["settings"] = wandb.Settings(
+            mode="shared", x_primary=True, x_label=get_current_node_ip(), x_disable_stats=True
+        )
 
     # Add custom directory if specified
     if args.wandb_dir:
@@ -97,8 +101,13 @@ def _compute_config_for_logging(args):
 
 
 # https://docs.wandb.ai/guides/track/log/distributed-training/#track-all-processes-to-a-single-run
-def init_wandb_secondary(args, metrics_endpoints=None):
-    wandb_run_id = getattr(args, "wandb_run_id", None)
+def init_wandb_secondary(args, metrics_endpoints=None, disable_stats=False):
+    """Join an existing run as a secondary process.
+
+    ``disable_stats`` turns off built-in system metrics, used on the training
+    side where hardware telemetry is read from Ray instead.
+    """
+    wandb_run_id = args.wandb_run_id
     if wandb_run_id is None:
         return
 
@@ -119,13 +128,19 @@ def init_wandb_secondary(args, metrics_endpoints=None):
             mode="shared",
             x_primary=False,
             x_update_finish_state=False,
+            x_label=get_current_node_ip(),
+            x_disable_stats=disable_stats,
         )
 
     if metrics_endpoints:
         logger.info(f"Forward SGLang metrics to WandB: {metrics_endpoints}")
+        keep = (
+            r"sglang:(gen_throughput|num_running_reqs|num_queue_reqs"
+            r"|\w*token_usage|\w*available_tokens|cache_hit_rate|spec_accept_(rate|length))"
+        )
         settings_kwargs |= dict(
             x_stats_open_metrics_endpoints=dict(metrics_endpoints),
-            x_stats_open_metrics_filters={f"{name}.*": {} for name in metrics_endpoints},
+            x_stats_open_metrics_filters=[f"{name}.{keep}" for name in metrics_endpoints],
         )
 
     init_kwargs = {
