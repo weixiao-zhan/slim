@@ -59,15 +59,19 @@ class RayTrainGroup:
             **self.args.train_env_vars,
         }
 
-        from slim.backends.fsdp_utils import FSDPTrainRayActor
+        # Imported here, where the Ray actor is built, rather than at module top:
+        # the driver imports this module only to call .remote(), and does not run
+        # the FSDP backend itself.
+        from slim.backends.fsdp_utils import CriticFSDPTrainer, ActorFSDPTrainer
 
-        TrainRayActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(FSDPTrainRayActor)
+        trainer_cls = CriticFSDPTrainer if self.role == "critic" else ActorFSDPTrainer
+        TrainerActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(trainer_cls)
 
         # Create worker actors
         self._actor_handlers = []
         master_addr, master_port = None, None
         for rank in range(world_size):
-            actor = TrainRayActor.options(
+            actor = TrainerActor.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(

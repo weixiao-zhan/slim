@@ -59,18 +59,31 @@ uv run python tests/prepare_mixed.py
 
 ## Running
 
+Every script starts one ray cluster, then submits its job(s) with
+`ray job submit --no-wait` and exits. Jobs queue on the cluster: each job's
+driver blocks in `ray.get(pg.ready())` until the previous job's
+`RolloutManager.dispose` releases the GPUs, so a sweep's combos run sequentially without restarting ray between them.
+
 ```bash
-# Run a test (pick one) — each script handles ray start/stop
 bash tests/test_ppo_lora.sh
 bash tests/test_grpo_profile.sh
-
-# Sweeps run a matrix of combos and print a PASS/FAIL summary (see below)
 bash tests/sweep_placement.sh
 bash tests/sweep_dataset.sh
 bash tests/sweep_algo.sh
 bash tests/sweep_surrogate.sh
 bash tests/sweep_fp8.sh
 bash tests/sweep_moe_rollout.sh
+```
+
+Watch progress and grade externally via ray's own log management:
+
+```bash
+uv run ray job list                  # job ids + status
+uv run ray job logs <id> --follow    # stream one job
+# Grade a finished job: job success, finite actor/critic losses, non-degenerate
+# rollout reward, >=2 weight updates. Args are <expect_actor> <expect_critic> (0/1).
+uv run ray job logs <id> > out.log
+uv run python tests/sanity_check.py out.log <expect_actor> <expect_critic>
 ```
 
 ### on Blackwell (SM120)
@@ -84,13 +97,10 @@ SM120 need following treatment:
 
 Two kinds of tests live here:
 
-- **Sweeps** (`sweep_*.sh`) — each runs a matrix of combos along one axis on a
-  single 8-GPU node, grades every run with `tests/sanity_check.py` (job
-  success, finite actor/critic losses, non-degenerate rollout reward, ≥2 weight
-  updates), and prints a PASS/FAIL summary table. All combos share one
-  `COMMON_ARGS` block sized to **3 rollout steps × 8 prompts × 4 samples**,
-  `max-context-len 8192`, `max-tokens-per-gpu 8192`, FA3. Run all combos with no
-  args, or a subset by passing combo names.
+- **Sweeps** (`sweep_*.sh`) — each submits a matrix of combos along one axis on a
+  single 8-GPU node. All combos share one `COMMON_ARGS` block sized to **3 rollout
+  steps × 8 prompts × 4 samples**, `max-context-len 8192`, `max-tokens-per-gpu
+  8192`, FA3. Run all combos with no args, or a subset by passing combo names.
 - **Standalone tests** — single runs that exercise an orthogonal axis (precision,
   PEFT, profiling) not covered by a sweep.
 

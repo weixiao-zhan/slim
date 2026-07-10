@@ -14,7 +14,7 @@ class FSDPArgs:
     optimizer: str = "adam"  # Optimizer type: "adam" (AdamW)
     lr: float = 2e-5
     lr_warmup_init: float = 0.0
-    min_lr: float = 0.0
+    lr_min: float = 0.0
     lr_decay_style: str = "constant"
     lr_decay_iters: int | None = None
     lr_warmup_iters: int = 0
@@ -111,7 +111,7 @@ def fsdp_parse_args(extra_args_provider=None, ignore_unknown_args=False):
         raise ValueError(
             f"--compute-dtype must be one of {valid_compute}, got {args.compute_dtype!r}"
         )
-    if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "use_peft", False):
+    if args.fsdp_cpu_offload and args.use_peft:
         logger.warning(
             "--fsdp-cpu-offload and --use-peft would cause "
             "extremely slow weight sync due to merge/unmerge "

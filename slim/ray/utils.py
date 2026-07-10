@@ -2,8 +2,7 @@
 import os
 
 import ray
-import torch
-from slim.ray.ray_actor import RayActor
+from slim.ray.ray_worker import RayWorker
 
 
 # Refer to
@@ -30,13 +29,17 @@ def ray_noset_visible_devices(env_vars=os.environ):
 
 
 def get_physical_gpu_id():
+    # Imported here: this runs on a GPU worker, while the driver imports this
+    # module only for Lock and the NOSET env-var list.
+    import torch
+
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
     return str(props.uuid)
 
 
 @ray.remote
-class Lock(RayActor):
+class Lock(RayWorker):
     def __init__(self):
         self._locked = False  # False: unlocked, True: locked
 

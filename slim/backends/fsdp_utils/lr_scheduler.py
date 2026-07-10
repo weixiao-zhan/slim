@@ -79,26 +79,35 @@ class FSDPLRScheduler(LRScheduler):
         max_lr = param_group.get("max_lr", self.max_lr)
         min_lr = param_group.get("min_lr", self.min_lr)
 
+        # Per-group start_step: the group's schedule (warmup/decay) is measured
+        # relative to its own start. Before start_step the LR is pinned to 0
+        # (pure LR-gating). Groups without start_step use 0, so local_step ==
+        # last_epoch and behavior is unchanged.
+        start_step = param_group.get("start_step", 0)
+        local_step = self.last_epoch - start_step
+        if local_step < 0:
+            return 0.0
+
         # Use linear warmup for the initial part.
-        if self.lr_warmup_steps > 0 and self.last_epoch <= self.lr_warmup_steps:
-            return self.init_lr + ((max_lr - self.init_lr) * float(self.last_epoch) / float(self.lr_warmup_steps))
+        if self.lr_warmup_steps > 0 and local_step <= self.lr_warmup_steps:
+            return self.init_lr + ((max_lr - self.init_lr) * float(local_step) / float(self.lr_warmup_steps))
 
         # If the learning rate is constant, just return the initial value.
         if self.lr_decay_style == "constant":
             return max_lr
 
         # For any steps larger than `self.lr_decay_steps`, use `min_lr`.
-        if self.last_epoch > self.lr_decay_steps:
+        if local_step > self.lr_decay_steps:
             return min_lr
 
         # If we are done with the warmup period, use the decay style.
         if self.lr_decay_style == "inverse-square-root":
             warmup_steps = max(self.lr_warmup_steps, 1)
-            num_steps = max(self.last_epoch, 1)
+            num_steps = max(local_step, 1)
             lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
             return max(min_lr, lr)
 
-        num_steps_ = self.last_epoch - self.lr_warmup_steps
+        num_steps_ = local_step - self.lr_warmup_steps
         decay_steps_ = self.lr_decay_steps - self.lr_warmup_steps
         decay_ratio = float(num_steps_) / float(decay_steps_)
         assert decay_ratio >= 0.0
@@ -112,12 +121,13 @@ class FSDPLRScheduler(LRScheduler):
         elif self.lr_decay_style == "cosine":
             coeff = 0.5 * (math.cos(math.pi * decay_ratio) + 1.0)
         elif self.lr_decay_style == "WSD":
+            # The anneal is anchored to the global run end (last_epoch),
             wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
             if self.last_epoch <= wsd_anneal_start_:
                 coeff = 1.0
             else:
                 wsd_steps = self.last_epoch - wsd_anneal_start_
-                wsd_decay_ratio = float(wsd_steps) / float(self.wsd_decay_steps)
+                wsd_decay_ratio = min(1.0, float(wsd_steps) / float(self.wsd_decay_steps))
                 if self.lr_wsd_decay_style == "linear":
                     coeff = 1.0 - wsd_decay_ratio
                 elif self.lr_wsd_decay_style == "cosine":
@@ -170,7 +180,7 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         optimizer,
         init_lr=args.lr_warmup_init,
         max_lr=args.lr,
-        min_lr=args.min_lr,
+        min_lr=args.lr_min,
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style=args.lr_decay_style,

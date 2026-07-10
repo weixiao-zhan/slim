@@ -160,7 +160,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "JSON string of LoraConfig overrides for PEFT. "
                     'Defaults: {"r": 16, "lora_alpha": 32, "use_dora": false, '
                     '"target_modules": "all-linear", '
-                    '"exclude_modules": ["vision_tower", "multi_modal_projector"], '
+                    '"exclude_modules": ["visual", "vision_tower", "vision_model", "audio", "speech"], '
                     '"lora_dropout": 0.0, "bias": "none", "task_type": "CAUSAL_LM"}'
                 ),
             )
@@ -607,10 +607,44 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--calculate-per-token-loss", action="store_true")
             reset_arg(parser, "--lr", type=float, default=1e-6)
 
-            parser.add_argument("--num-critic-only-steps", type=int, default=0, help="Number of critic only steps")
+            parser.add_argument(
+                "--lr-actor",
+                type=float,
+                default=None,
+                help="Max LR for the actor (RL policy). Defaults to --lr.",
+            )
+            parser.add_argument(
+                "--lr-critic",
+                type=float,
+                default=None,
+                help="Max LR for the critic backbone. Defaults to --lr.",
+            )
+            parser.add_argument(
+                "--lr-critic-value-head",
+                type=float,
+                default=None,
+                help="Max LR for the critic value head. Defaults to --lr-critic.",
+            )
+            parser.add_argument(
+                "--lr-actor-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the actor (RL policy) starts training.",
+            )
+            parser.add_argument(
+                "--lr-critic-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic backbone learning rate leaves 0 (warmup begins).",
+            )
+            parser.add_argument(
+                "--lr-critic-value-head-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic value head learning rate leaves 0 (warmup begins).",
+            )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
-            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
             parser.add_argument("--critic-train-only", action="store_true", default=False, help="Only train critic")
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
@@ -622,12 +656,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729",
             )
             parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
-            parser.add_argument(
-                "--kl-coef",
-                type=float,
-                default=0.00,
-                help="KL penalty coefficient for reward shaping. This is applied to the reward signal before advantage calculation.",
-            )
             parser.add_argument(
                 "--loss-type",
                 type=str,
@@ -670,13 +698,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Advantage estimator to use.",
             )
             parser.add_argument(
-                "--use-kl-loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
-            )
-            parser.add_argument(
                 "--kl-loss-coef",
                 type=float,
                 default=0.0,
-                help="KL penalty coefficient for the loss function. This is added to the final PPO loss.",
+                help="KL penalty coefficient for the loss function. This is added to the final loss. ",
             )
             parser.add_argument(
                 "--use-unbiased-kl",
@@ -692,7 +717,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
-            parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
+            parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
                 "--disable-rewards-std-normalization",
@@ -1136,7 +1161,7 @@ def slim_validate_args(args):
 
     args.eval_datasets = _resolve_eval_datasets(args)
 
-    if args.kl_coef != 0 or args.use_kl_loss:
+    if args.kl_loss_coef != 0:
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
 
@@ -1145,8 +1170,6 @@ def slim_validate_args(args):
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
-
-    assert not (args.kl_coef != 0 and args.kl_loss_coef != 0), "Only one of kl_coef and kl_loss_coef can be set"
 
     if args.mismatch_correction != "none" and args.old_logprob_source != "actor":
         raise ValueError("--mismatch-correction requires --old-logprob-source actor.")
@@ -1197,8 +1220,12 @@ def slim_validate_args(args):
         args.critic_num_gpus_per_replica = args.critic_num_gpus or 1
     if args.critic_load is None:
         args.critic_load = args.load
-    if args.critic_lr is None:
-        args.critic_lr = args.lr
+    if args.lr_actor is None:
+        args.lr_actor = args.lr
+    if args.lr_critic is None:
+        args.lr_critic = args.lr
+    if args.lr_critic_value_head is None:
+        args.lr_critic_value_head = args.lr_critic
 
     # A replica size must evenly divide the role's GPU total.
     if args.actor_num_gpus:

@@ -131,20 +131,20 @@ def validate_args(args):
     if args.sglang_dp_size > 1:
         assert args.sglang_enable_dp_attention
 
-    if getattr(args, "router_ip", None):
+    if args.router_ip:
         args.router_ip = _wrap_ipv6(args.router_ip)
 
     # Mutual-exclusion checks for PD disaggregation / sglang-config.
     assert not (
-        getattr(args, "prefill_num_servers", None) is not None and args.rollout_external
+        args.prefill_num_servers is not None and args.rollout_external
     ), "prefill_num_servers cannot be set when rollout_external is set."
 
     assert not (
-        getattr(args, "sglang_config", None) is not None and args.rollout_external
+        args.sglang_config is not None and args.rollout_external
     ), "sglang_config cannot be set when rollout_external is set."
 
     assert not (
-        getattr(args, "sglang_config", None) is not None and getattr(args, "prefill_num_servers", None) is not None
+        args.sglang_config is not None and args.prefill_num_servers is not None
     ), "sglang_config and prefill_num_servers are mutually exclusive. Use server_groups in the YAML config instead."
 
 
