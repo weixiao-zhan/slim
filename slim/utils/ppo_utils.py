@@ -206,21 +206,37 @@ def get_grpo_returns(
 def vanilla_gae(
     rewards: torch.Tensor,
     values: torch.Tensor,
+    loss_mask: torch.Tensor,
     gamma: float,
     lambd: float,
 ):
+    """Compute GAE over policy-controlled edges.
+
+    Masked edges, such as prompt and tool-observation tokens, do not advance
+    the temporal recurrence. Their output advantages are zero.
+    """
+    if rewards.shape != values.shape or rewards.shape != loss_mask.shape:
+        raise ValueError(
+            f"rewards, values, and loss_mask must have the same shape, got "
+            f"{rewards.shape}, {values.shape}, and {loss_mask.shape}"
+        )
+
     B, T = rewards.shape
     device = rewards.device
     dtype = rewards.dtype
+    active_edges = loss_mask.to(device=device, dtype=torch.bool)
 
     lastgaelam = torch.zeros(B, device=device, dtype=dtype)
+    next_value = torch.zeros(B, device=device, dtype=dtype)
     adv_rev = []
 
     for t in reversed(range(T)):
-        next_value = values[:, t + 1] if t < T - 1 else 0.0
         delta = rewards[:, t] + gamma * next_value - values[:, t]
-        lastgaelam = delta + gamma * lambd * lastgaelam
-        adv_rev.append(lastgaelam)
+        candidate_gaelam = delta + gamma * lambd * lastgaelam
+        active = active_edges[:, t]
+        lastgaelam = torch.where(active, candidate_gaelam, lastgaelam)
+        next_value = torch.where(active, values[:, t], next_value)
+        adv_rev.append(torch.where(active, lastgaelam, torch.zeros_like(lastgaelam)))
 
     full_advantages = torch.stack(adv_rev[::-1], dim=1)  # [B, max_len]
     full_returns = full_advantages + values  # [B, max_len]

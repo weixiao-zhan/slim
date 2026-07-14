@@ -709,22 +709,40 @@ class FSDPTrainer(RayWorker):
         B = len(episodes)
         max_E = max(ep.num_edges for ep in episodes)
 
-        # Build [B, E] reward and value tensors (padded)
+        # Build [B, E] reward, value, and policy-edge tensors (padded)
         rewards_padded = torch.zeros(B, max_E)
         values_padded = torch.zeros(B, max_E)
+        loss_masks_padded = torch.zeros(B, max_E, dtype=torch.bool)
 
         for i, ep in enumerate(episodes):
             E = ep.num_edges
-            # Place reward at the last edge
-            rewards_padded[i, E - 1] = ep.reward
+            loss_mask = torch.as_tensor(ep.loss_mask, dtype=torch.bool)
+            active_edges = loss_mask.nonzero(as_tuple=False).flatten()
+            if active_edges.numel() == 0:
+                raise ValueError(f"Episode {i} has no policy-controlled edges")
+            # Environment rewards belong to the final policy action, not to a
+            # trailing prompt or observation edge.
+            rewards_padded[i, active_edges[-1]] = ep.reward
             values_padded[i, :E] = values[i].float()
+            loss_masks_padded[i, :E] = loss_mask
 
         advantages_padded, returns_padded = vanilla_gae(
-            rewards_padded, values_padded, self.args.gamma, self.args.lambd
+            rewards_padded,
+            values_padded,
+            loss_masks_padded,
+            self.args.gamma,
+            self.args.lambd,
         )
 
         if self.args.normalize_advantages:
-            advantages_flat = torch.cat([advantages_padded[i, : episodes[i].num_edges] for i in range(B)])
+            advantages_flat = torch.cat(
+                [
+                    advantages_padded[i, : episodes[i].num_edges][
+                        loss_masks_padded[i, : episodes[i].num_edges]
+                    ]
+                    for i in range(B)
+                ]
+            )
             # Global normalization across all DP ranks
             local_sum = advantages_flat.sum()
             local_sq_sum = (advantages_flat**2).sum()
@@ -733,7 +751,11 @@ class FSDPTrainer(RayWorker):
             dist.all_reduce(stats, op=dist.ReduceOp.SUM, group=self.dp_group)
             mean = stats[0] / stats[2]
             std = ((stats[1] / stats[2] - mean**2).clamp(min=0)).sqrt().clamp(min=1e-8)
-            advantages_padded = (advantages_padded - mean.cpu()) / std.cpu()
+            advantages_padded = torch.where(
+                loss_masks_padded,
+                (advantages_padded - mean.cpu()) / std.cpu(),
+                torch.zeros_like(advantages_padded),
+            )
 
         for i, ep in enumerate(episodes):
             E = ep.num_edges
@@ -949,7 +971,3 @@ class FSDPTrainer(RayWorker):
             pieces.append(torch.cat([text_axis, rope_axes], dim=0))  # [4, 1, n]
 
         return torch.cat(pieces, dim=-1)  # [4, 1, N]
-
-
-
-
