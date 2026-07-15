@@ -18,12 +18,12 @@ dependencies = [
     "qwen_vl_utils",
     "ray[default]",
     "requests",
-    "sglang==0.5.13.post1",
+    "sglang==0.5.15.post1",
     "sglang-router==0.3.2",
     "sympy",
     "torch==2.11.0",
     "tqdm",
-    "transformers==5.8.1",
+    "transformers==5.12.1",
     "wandb",
 ]
 classifiers = [

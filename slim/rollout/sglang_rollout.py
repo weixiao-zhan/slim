@@ -8,9 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-import sglang_router
 import torch
-from packaging.version import parse
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 
@@ -335,12 +333,8 @@ async def abort(args: Namespace) -> list[dict]:
     assert not state.aborted
     state.aborted = True
 
-    if parse(sglang_router.__version__) <= parse("0.2.1"):
-        response = await get(f"http://{args.router_ip}:{args.router_port}/list_workers")
-        urls = response["urls"]
-    else:
-        response = await get(f"http://{args.router_ip}:{args.router_port}/workers")
-        urls = [worker["url"] for worker in response["workers"]]
+    response = await get(f"http://{args.router_ip}:{args.router_port}/workers")
+    urls = [worker["url"] for worker in response["workers"]]
 
     while state.pendings:
         logger.info(f"Abort request for {urls}")
