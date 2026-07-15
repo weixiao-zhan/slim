@@ -4,11 +4,8 @@ import logging
 import multiprocessing
 import os
 import time
-from urllib.parse import quote
 
 import requests
-import sglang_router
-from packaging.version import parse
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
@@ -249,24 +246,16 @@ class SGLangEngine(RayWorker):
             return
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
-            if parse(sglang_router.__version__) <= parse("0.2.1"):
-                assert (
-                    self.worker_type == "regular"
-                ), "pd disaggregation is not supported in old router."
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/add_worker?url=http://{self.server_host}:{self.server_port}"
-                )
-            else:
-                payload = {
-                    "url": f"http://{self.server_host}:{self.server_port}",
-                    "worker_type": self.worker_type,
-                }
-                if self.worker_type == "prefill":
-                    payload["bootstrap_port"] = server_args_dict["disaggregation_bootstrap_port"]
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/workers",
-                    json=payload,
-                )
+            payload = {
+                "url": f"http://{self.server_host}:{self.server_port}",
+                "worker_type": self.worker_type,
+            }
+            if self.worker_type == "prefill":
+                payload["bootstrap_port"] = server_args_dict["disaggregation_bootstrap_port"]
+            response = requests.post(
+                f"http://{self.router_ip}:{self.router_port}/workers",
+                json=payload,
+            )
             response.raise_for_status()
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
@@ -371,27 +360,19 @@ class SGLangEngine(RayWorker):
         if self.worker_type != "encoder" and self.node_rank == 0:
             worker_url = f"http://{self.server_host}:{self.server_port}"
             response = None
-            if parse(sglang_router.__version__) <= parse("0.2.1"):
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url=http://{self.server_host}:{self.server_port}"
-                )
-            elif parse(sglang_router.__version__) < parse("0.3.0"):
-                worker_url = quote(worker_url, safe="")
-                response = requests.delete(f"http://{self.router_ip}:{self.router_port}/workers/{worker_url}")
-            else:
-                try:
-                    all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
-                    for worker in all_workers:
-                        if worker["url"] == worker_url:
-                            worker_id = worker["id"]
-                            response = requests.delete(
-                                f"http://{self.router_ip}:{self.router_port}/workers/{worker_id}"
-                            )
-                            break
-                    else:
-                        logger.warning(f"Worker {worker_url} not found in router during shutdown.")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch workers list or remove worker: {e}")
+            try:
+                all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
+                for worker in all_workers:
+                    if worker["url"] == worker_url:
+                        worker_id = worker["id"]
+                        response = requests.delete(
+                            f"http://{self.router_ip}:{self.router_port}/workers/{worker_id}"
+                        )
+                        break
+                else:
+                    logger.warning(f"Worker {worker_url} not found in router during shutdown.")
+            except Exception as e:
+                logger.warning(f"Failed to fetch workers list or remove worker: {e}")
 
             if response is not None:
                 response.raise_for_status()

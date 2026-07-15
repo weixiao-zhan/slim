@@ -1,22 +1,7 @@
-"""Per-arch HF model patches owned by the FSDP backend.
+"""Per-architecture routing replay support for the FSDP backend.
 
-Two orthogonal concerns live here, dispatched by HF ``model_type``:
-
-1. **Pre-build class patches** (``apply_hf_model_patches``): repo-owned monkey
-   patches that must replace HF class methods *before* ``from_pretrained``
-   instantiates any module — varlen DeltaNet for Qwen3.5, MoE router replay
-   for ``qwen3_5_moe``, etc. These are short-lived; once HF upstream fixes
-   the underlying gaps (e.g. issue #42638 for routing replay) the patch can
-   be retired by deleting the sibling file.
-
-2. **Routing-replay adapters** (``ROUTING_REPLAY_REGISTRY``): per-arch hooks
-   used by the trainer at runtime to stamp layer indices on built routers.
-   See ``RoutingReplayAdapter``.
-
-Adding a new arch: drop a new file under this package, register an adapter
-in ``ROUTING_REPLAY_REGISTRY`` and/or extend ``apply_hf_model_patches`` to
-call its class-level patcher, then add a top-level import below so
-registration runs.
+Adapters are selected by the Hugging Face ``model_type`` and can patch model
+classes before construction or register metadata on model instances.
 """
 
 from typing import Protocol
@@ -57,17 +42,7 @@ def apply_hf_model_patches(hf_config, args) -> "RoutingReplayAdapter | None":
     """
     model_type = getattr(hf_config, "model_type", None)
 
-    # Qwen3.5 / Qwen3.6 (dense + MoE) share Mamba-style linear_attention layers.
-    # Stock HF doesn't honor packed-sequence boundaries; patch before any
-    # decoder layer is built. The MoE variant uses model_type "qwen3_5_moe".
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
-        from .qwen3_5 import apply_qwen_deltanet_varlen_patch
-
-        apply_qwen_deltanet_varlen_patch()
-
-    # MoE routing replay: look up a per-arch adapter and apply its router
-    # patch now. Currently only Qwen3.5-MoE is wired; other archs return
-    # None and the trainer treats replay as off.
+    # Routing replay is currently implemented for Qwen3.5 MoE.
     if not args.use_rollout_routing_replay:
         return None
 

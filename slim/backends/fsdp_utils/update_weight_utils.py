@@ -10,19 +10,11 @@ import torch.distributed as dist
 from ray.actor import ActorHandle
 from torch.distributed.tensor import DTensor, Replicate
 
-try:
-    from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-except ImportError:
-    from sglang.srt.patch_torch import monkey_patch_torch_reductions  # type: ignore[import]
-
 from sglang.srt.utils import MultiprocessingSerializer
+from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
+from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from slim.utils.distributed_utils import get_gloo_group, init_process_group
-
-try:
-    from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket  # type: ignore[import]
-except ImportError:
-    from sglang.srt.model_executor.model_runner import FlattenedTensorBucket  # type: ignore[import]
 
 
 logger = logging.getLogger(__name__)

@@ -416,7 +416,12 @@ class RolloutManager:
     def dispose(self):
         for monitor in self._health_monitors:
             monitor.stop()
-        shutdown_refs = [engine.shutdown.remote() for engine in self.all_engines if engine is not None]
+        shutdown_refs = [
+            engine.shutdown.remote()
+            for server in self.servers.values()
+            for engine in server.all_engines
+            if engine is not None
+        ]
         for ref in shutdown_refs:
             try:
                 ray.get(ref)
