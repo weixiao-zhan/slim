@@ -1,7 +1,13 @@
-"""Per-architecture routing replay support for the FSDP backend.
+"""Per-architecture Hugging Face model patches owned by the FSDP backend.
 
-Adapters are selected by the Hugging Face ``model_type`` and can patch model
-classes before construction or register metadata on model instances.
+Two concerns live here, dispatched by Hugging Face ``model_type``:
+
+1. Pre-build class patches replace model methods before ``from_pretrained``
+   constructs the modules.
+2. Routing-replay adapters stamp runtime metadata on built model instances.
+
+New architectures register an adapter in ``ROUTING_REPLAY_REGISTRY`` and can
+expose a class patch through ``apply_hf_model_patches``.
 """
 
 from typing import Protocol
@@ -29,11 +35,9 @@ from . import qwen3_5  # noqa: E402, F401
 
 
 def apply_hf_model_patches(hf_config, args) -> "RoutingReplayAdapter | None":
-    """Apply HF class-level patches selected by ``hf_config.model_type``.
+    """Apply class-level patches selected by ``hf_config.model_type``.
 
-    Must run *before* ``from_pretrained`` instantiates any module: HF binds
-    method references at construction time, so replacing classes after the
-    fact only affects future instances.
+    This must run before ``from_pretrained`` constructs the model.
 
     Returns the routing-replay adapter (or ``None``) so the trainer can
     later call ``adapter.register_layer_indices(model)`` once the model is
@@ -41,6 +45,9 @@ def apply_hf_model_patches(hf_config, args) -> "RoutingReplayAdapter | None":
     registry lookup at instance-stamp time.
     """
     model_type = getattr(hf_config, "model_type", None)
+
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
+        qwen3_5.apply_qwen3_5_vision_packing_patch()
 
     # Routing replay is currently implemented for Qwen3.5 MoE.
     if not args.use_rollout_routing_replay:

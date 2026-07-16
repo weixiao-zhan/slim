@@ -5,7 +5,6 @@ import traceback
 from pathlib import Path
 
 import torch
-from viztracer import VizTracer
 
 from slim.utils.memory_utils import print_memory
 
@@ -20,6 +19,8 @@ def profile_rollout(args, rollout_id):
     if "rollout" not in args.profile_target or not (args.profile_step_start <= rollout_id < args.profile_step_end):
         yield
         return
+
+    from viztracer import VizTracer
 
     out_dir = Path(args.profile_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,8 @@ override the corresponding values derived from the reference config.
 
 Only block-FP8 is supported (e4m3, NxK blocks, per-block `*.weight_scale_inv`),
 matching slim's online rollout weight-sync. Per-tensor / per-channel FP8 are not
-supported.
+supported. `--config-only` creates a weightless FP8 model directory for SGLang
+dummy initialization; slim's first weight sync populates the model before use.
 
 python tools/convert_hf_to_fp8.py --model-dir MODEL_DIR --save-dir SAVE_DIR --ref-config REF_CONFIG
                            [--block-size [BLOCK_SIZE ...]] [--scale-fmt {ue8m0}] [--max-workers MAX_WORKERS]
@@ -54,6 +55,49 @@ def load_quant_recipe(ref_config):
     if cfg.get("quantization_config") is None:
         raise ValueError(f"No `quantization_config` found in reference config: {path}")
     return parse_quant_recipe(cfg["quantization_config"])
+
+
+def build_quantization_config(
+    block_size,
+    activation_scheme,
+    fmt,
+    scale_fmt=None,
+    keep_patterns=(),
+):
+    config = {
+        "activation_scheme": activation_scheme,
+        "fmt": fmt,
+        "quant_method": "fp8",
+        "weight_block_size": block_size,
+    }
+    if scale_fmt is not None:
+        config["scale_fmt"] = scale_fmt
+    if keep_patterns:
+        config["modules_to_not_convert"] = sorted(set(keep_patterns))
+    return config
+
+
+def copy_model_assets(input_path, output_path):
+    """Copy model metadata and processor assets without weight files."""
+    os.makedirs(output_path, exist_ok=True)
+    for filename in os.listdir(input_path):
+        source = os.path.join(input_path, filename)
+        if os.path.isdir(source) or filename.endswith((".safetensors", ".bin")):
+            continue
+        if filename in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+            continue
+        shutil.copyfile(source, os.path.join(output_path, filename))
+
+
+def write_quantization_config(input_path, output_path, quantization_config):
+    config_path = os.path.join(input_path, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Model config not found: {config_path}")
+    with open(config_path) as f:
+        config = json.load(f)
+    config["quantization_config"] = quantization_config
+    with open(os.path.join(output_path, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
 
 
 class ConversionResult:
@@ -144,22 +188,14 @@ def convert_fp8(
     kept_modules = sorted(set(result_collector.modules_to_not_convert) | set(keep_patterns))
     print(f"  Kept {len(result_collector.modules_to_not_convert)} source modules in source dtype; quantized the rest.")
 
-    quantization_config = {
-        "activation_scheme": activation_scheme,
-        "fmt": fmt,
-        "quant_method": "fp8",
-        "weight_block_size": block_size,
-    }
-    if scale_fmt is not None:
-        quantization_config["scale_fmt"] = scale_fmt
-    if len(kept_modules) > 0:
-        quantization_config["modules_to_not_convert"] = kept_modules
-
-    config_path = os.path.join(input_path, "config.json")
-    if os.path.exists(config_path):
-        cfg = json.load(open(config_path))
-        cfg["quantization_config"] = quantization_config
-        json.dump(cfg, open(os.path.join(output_path, "config.json"), "w"), indent=2)
+    quantization_config = build_quantization_config(
+        block_size,
+        activation_scheme,
+        fmt,
+        scale_fmt=scale_fmt,
+        keep_patterns=kept_modules,
+    )
+    write_quantization_config(input_path, output_path, quantization_config)
 
     index_dict = {"weight_map": result_collector.weight_map, "metadata": {"total_size": result_collector.param_count}}
     json.dump(index_dict, open(os.path.join(output_path, "model.safetensors.index.json"), "w"), indent=2)
@@ -177,6 +213,11 @@ if __name__ == "__main__":
     parser.add_argument("--block-size", type=int, nargs="*", default=None, help="eg. --block-size 128 128")
     parser.add_argument("--max-workers", type=int, default=1, help="Number of worker threads for parallel processing")
     parser.add_argument("--scale-fmt", type=str, default=None, choices=["ue8m0"])
+    parser.add_argument(
+        "--config-only",
+        action="store_true",
+        help="Copy model assets and write the FP8 config without materializing weights.",
+    )
     args = parser.parse_args()
 
     recipe = load_quant_recipe(args.ref_config)
@@ -204,13 +245,27 @@ if __name__ == "__main__":
     elif not os.path.isdir(args.save_dir):
         raise ValueError("The save_dir should be a directory.")
 
-    convert_fp8(
-        args.model_dir,
-        args.save_dir,
-        block_size,
-        max_workers=args.max_workers,
-        scale_fmt=scale_fmt,
-        keep_patterns=keep_patterns,
-        activation_scheme=activation_scheme,
-        fmt=fmt,
-    )
+    if args.config_only:
+        copy_model_assets(args.model_dir, args.save_dir)
+        write_quantization_config(
+            args.model_dir,
+            args.save_dir,
+            build_quantization_config(
+                block_size,
+                activation_scheme,
+                fmt,
+                scale_fmt=scale_fmt,
+                keep_patterns=keep_patterns,
+            ),
+        )
+    else:
+        convert_fp8(
+            args.model_dir,
+            args.save_dir,
+            block_size,
+            max_workers=args.max_workers,
+            scale_fmt=scale_fmt,
+            keep_patterns=keep_patterns,
+            activation_scheme=activation_scheme,
+            fmt=fmt,
+        )
