@@ -1,4 +1,16 @@
-"""Routing replay support for Hugging Face Qwen3.5 MoE models."""
+"""Packing and routing-replay support for Hugging Face Qwen3.5 models.
+
+The vision packing patch prevents text ``cu_seq_lens_*`` and ``max_length_*``
+kwargs from entering the vision encoder. Vision attention computes its own
+packing metadata from the image or video grid, while the language model keeps
+the text metadata.
+
+The MoE routing-replay adapter replaces router selections with rollout
+selections while preserving gradients through router probabilities.
+"""
+
+from functools import wraps
+from typing import Any, Callable
 
 import torch
 import torch.nn.functional as F
@@ -6,7 +18,41 @@ import torch.nn.functional as F
 from ..routing_replay import gather_replayed_topk
 from . import ROUTING_REPLAY_REGISTRY
 
+_VISION_PACKING_PATCHED = False
 _ROUTER_REPLAY_PATCHED = False
+_TEXT_PACKING_KWARGS = (
+    "cu_seq_lens_q",
+    "cu_seq_lens_k",
+    "max_length_q",
+    "max_length_k",
+)
+
+
+def _without_text_packing_kwargs(method: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        for name in _TEXT_PACKING_KWARGS:
+            kwargs.pop(name, None)
+        return method(self, *args, **kwargs)
+
+    return wrapped
+
+
+def apply_qwen3_5_vision_packing_patch() -> None:
+    """Keep text packing metadata out of dense and MoE vision encoders."""
+    global _VISION_PACKING_PATCHED
+    if _VISION_PACKING_PATCHED:
+        return
+
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Model
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeModel
+
+    for model_class in (Qwen3_5Model, Qwen3_5MoeModel):
+        for name in ("get_image_features", "get_video_features"):
+            method = getattr(model_class, name)
+            setattr(model_class, name, _without_text_packing_kwargs(method))
+
+    _VISION_PACKING_PATCHED = True
 
 
 def _patched_qwen3_5_moe_router_forward(self, hidden_states):

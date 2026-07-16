@@ -114,15 +114,11 @@ def add_sglang_arguments(parser):
 
 
 def validate_args(args):
-    args.sglang_dp_size = args.sglang_data_parallel_size
-    args.sglang_pp_size = args.sglang_pipeline_parallel_size
-    args.sglang_ep_size = args.sglang_expert_parallel_size
-
     # Compute effective TP size considering PP size
     if args.sglang_pp_size > 1:
         assert args.rollout_num_gpus_per_replica % args.sglang_pp_size == 0, (
             f"rollout_num_gpus_per_replica ({args.rollout_num_gpus_per_replica}) must be divisible by "
-            f"sglang_pipeline_parallel_size ({args.sglang_pp_size})"
+            f"sglang_pp_size ({args.sglang_pp_size})"
         )
         args.sglang_tp_size = args.rollout_num_gpus_per_replica // args.sglang_pp_size
     else:
@@ -159,16 +155,6 @@ def sglang_parse_args():
     """
     parser = argparse.ArgumentParser(add_help=False)
     add_sglang_arguments(parser)
-
-    # Compute default sglang_tensor_parallel_size from CLI args
-    temp_parser = argparse.ArgumentParser(add_help=False)
-    temp_parser.add_argument("--rollout-num-gpus-per-replica", type=int, default=1)
-    temp_parser.add_argument("--sglang-pp-size", type=int, default=1)
-    temp_parser.add_argument("--sglang-pipeline-parallel-size", type=int, default=1)
-    temp_args, _ = temp_parser.parse_known_args()
-    pp_size = temp_args.sglang_pp_size if temp_args.sglang_pp_size != 1 else temp_args.sglang_pipeline_parallel_size
-    sglang_tp_size = temp_args.rollout_num_gpus_per_replica // pp_size
-    parser.set_defaults(sglang_tensor_parallel_size=sglang_tp_size)
 
     args, _ = parser.parse_known_args()
     return args

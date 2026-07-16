@@ -1,14 +1,41 @@
 #!/usr/bin/env python3
-"""Install tuned SGLang kernel configs and configure CUDA IPC support.
+"""Patch installed SGLang for slim rollout and training.
 
 Run via: `uv run python patch_sglang.py` (uses the active venv's interpreter).
+
+Idempotent: each replacement is skipped if its new text is already present.
 """
 from __future__ import annotations
 
 import os
+import py_compile
 import subprocess
 import sys
 from pathlib import Path
+
+
+def patch_file(
+    path: Path,
+    replacements: list[tuple[str, str]],
+    log_reason: str = "",
+) -> bool:
+    """Apply exact text replacements and fail if an upstream anchor changed."""
+    text = path.read_text()
+    original = text
+    label = log_reason or path.name
+    for old, new in replacements:
+        if new in text:
+            continue
+        if old not in text:
+            print(f"  No match: {label}; anchor not found: {old[:80]!r}")
+            raise RuntimeError(f"Patch anchor not found in {path}: {old[:120]!r}")
+        text = text.replace(old, new, 1)
+    if text != original:
+        path.write_text(text)
+        print(f"  Applied: {label}")
+    else:
+        print(f"  Skipped (already applied): {label}")
+    return True
 
 
 def _install_configs(src_root: Path, dst_root: Path, label: str) -> int:
@@ -58,6 +85,66 @@ def install_triton_configs(sglang_dir: Path) -> None:
     )
 
 
+def patch_sglang_base_processor(base_processor: Path) -> bool:
+    """Decode JSON tensor envelopes before SGLang consumes processor output."""
+    constants_anchor = (
+        "_IPC_POOL_HANDLE_CACHE = envs.SGLANG_USE_IPC_POOL_HANDLE_CACHE.get()\n"
+    )
+    transport_helper = '''
+
+def _decode_slim_tensor_transport(value):
+    """Restore tensors encoded for JSON transport by slim."""
+    if isinstance(value, dict) and value.get("__tensor__") is True:
+        import base64
+
+        dtype_name = value.get("dtype")
+        dtype = getattr(torch, str(dtype_name), None)
+        if not isinstance(dtype, torch.dtype):
+            raise ValueError(f"Unsupported tensor transport dtype: {dtype_name!r}")
+
+        shape = value.get("shape")
+        if not isinstance(shape, list) or not all(
+            isinstance(size, int) and size >= 0 for size in shape
+        ):
+            raise ValueError(f"Invalid tensor transport shape: {shape!r}")
+
+        raw = base64.b64decode(value.get("data", ""), validate=True)
+        tensor = torch.frombuffer(bytearray(raw), dtype=dtype).clone()
+        expected_elements = 1
+        for size in shape:
+            expected_elements *= size
+        if tensor.numel() != expected_elements:
+            raise ValueError(
+                "Tensor transport size mismatch: "
+                f"decoded={tensor.numel()}, expected={expected_elements}"
+            )
+        return tensor.reshape(shape)
+    if isinstance(value, dict):
+        return {
+            key: _decode_slim_tensor_transport(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_decode_slim_tensor_transport(item) for item in value]
+    return value
+'''
+    data_anchor = "        all_loaded_data = base_output.organize_results()\n"
+    decoded_data = (
+        "        all_loaded_data = [\n"
+        "            (modality, _decode_slim_tensor_transport(item))\n"
+        "            for modality, item in base_output.organize_results()\n"
+        "        ]\n"
+    )
+    return patch_file(
+        base_processor,
+        [
+            (constants_anchor, constants_anchor + transport_helper),
+            (data_anchor, decoded_data),
+        ],
+        log_reason="base_processor.py processor-output tensor transport",
+    )
+
+
 def relax_ptrace_scope() -> None:
     """Set kernel.yama.ptrace_scope=0 (needed for Torch CUDA IPC weight sync).
 
@@ -85,7 +172,11 @@ def main() -> int:
     import sglang
 
     sglang_dir = Path(sglang.__file__).resolve().parent
+    base_processor = sglang_dir / "srt" / "multimodal" / "processors" / "base_processor.py"
+
+    patch_sglang_base_processor(base_processor)
     install_triton_configs(sglang_dir)
+    py_compile.compile(str(base_processor), doraise=True)
 
     relax_ptrace_scope()
     return 0
