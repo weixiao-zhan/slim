@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 from sglang_router.launch_router import RouterArgs
 
+from slim.backends.registry import TRAINING_BACKENDS
 from slim.backends.sglang_utils.arguments import sglang_parse_args
 from slim.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from slim.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
@@ -35,6 +36,12 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
     def add_slim_arguments(parser):
         # Ray
         def add_cluster_arguments(parser):
+            parser.add_argument(
+                "--training-backend",
+                choices=TRAINING_BACKENDS,
+                default="fsdp",
+                help="Distributed training backend.",
+            )
             parser.add_argument(
                 "--actor-num-gpus",
                 type=int,
@@ -1088,10 +1095,10 @@ def parse_args(add_custom_arguments=None):
     if not skip_sglang:
         sglang_ns = sglang_parse_args()
 
-    # Phase 2: Parse FSDP + slim args.
-    from slim.backends.fsdp_utils.arguments import fsdp_parse_args
+    # Phase 2: Parse the selected training backend + slim args.
+    from slim.backends.registry import parse_backend_args, validate_backend_args
 
-    args = fsdp_parse_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
+    args = parse_backend_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
 
     # Merge pre-parsed args into the main namespace
     for key, value in vars(pre).items():
@@ -1103,6 +1110,7 @@ def parse_args(add_custom_arguments=None):
             setattr(args, key, value)
 
     slim_validate_args(args)
+    validate_backend_args(args)
 
     if not args.debug_train_only:
         sglang_validate_args(args)

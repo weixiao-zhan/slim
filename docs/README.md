@@ -16,5 +16,6 @@ The basic training loop follows:
 | [SGLang Config](sglang-config.md) | Engine deployment, parameter pass-through, PD disaggregation, speculative decoding, FP8 inference, fault tolerance |
 | [Training Loss](training-loss.md) | Advantage estimators (PPO-GAE, GRPO, GSPO), policy surrogates, KL penalty, mismatch correction |
 | [Placement](placement.md) | GPU allocation, colocate modes, step timeline, weight update paths |
+| [Megatron Backend Design](megatron-backend.md) | Lightweight MCore backend contract for TP, SP, CP, non-interleaved PP, mixed VLM batches, and routing replay |
 | [Dev Utils](dev-utils.md) | Profiling, debugging, reproducibility, tests |
 | [Customization](customization.md) | All `--*-path` extension points, multi-turn/agentic adaptation |
