@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 source "$(dirname "$0")/common.sh"
 BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"

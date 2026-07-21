@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Placement sweep: exercise every (rollout_colocate, critic_colocate) combo plus
 # an HSDP control on a single 8-GPU node, on the small mixed (math+vision) dataset.
 #

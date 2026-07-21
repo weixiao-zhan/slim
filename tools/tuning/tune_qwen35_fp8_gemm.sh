@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Tune the block-FP8 W8A8 GEMM Triton kernel for the Qwen3.5 family's FUSED runtime
 # GEMM shapes on the local GPU, writing tuned configs into tools/triton_fp8_configs/.
 #

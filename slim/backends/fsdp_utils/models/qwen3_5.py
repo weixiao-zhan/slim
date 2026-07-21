@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Packing and routing-replay support for Hugging Face Qwen3.5 models.
 
 The vision packing patch prevents text ``cu_seq_lens_*`` and ``max_length_*``

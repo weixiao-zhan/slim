@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Patch installed SGLang for slim rollout and training.
 
 Run via: `uv run python patch_sglang.py` (uses the active venv's interpreter).

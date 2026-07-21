@@ -1,3 +1,6 @@
+# Source: https://github.com/THUDM/slime
+# SPDX-License-Identifier: Apache-2.0
+
 from collections import defaultdict
 from dataclasses import dataclass
 
