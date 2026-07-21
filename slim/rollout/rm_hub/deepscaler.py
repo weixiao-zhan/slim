@@ -1,3 +1,6 @@
+# Source: https://github.com/THUDM/slime
+# SPDX-License-Identifier: Apache-2.0
+
 from .math_utils import extract_answer, grade_answer_mathd, grade_answer_sympy
 
 

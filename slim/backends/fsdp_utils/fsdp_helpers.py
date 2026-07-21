@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FSDP wrapping and device/offload infrastructure for the FSDP backend."""
 
 import logging

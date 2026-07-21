@@ -1,3 +1,6 @@
+# Source: https://github.com/THUDM/slime
+# SPDX-License-Identifier: Apache-2.0
+
 from datetime import timedelta
 from typing import Any
 

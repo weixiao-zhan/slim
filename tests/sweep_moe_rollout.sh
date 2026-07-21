@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # MoE rollout-parallelism sweep: GSPO on Qwen3.5-MoE (Qwen3.6-35B-A3B) with rollout routing
 # replay (R3) always on, sweeping the sglang rollout parallelism layout on one 8-GPU node:
 #   tp1      -> tensor-parallel 1   (8 single-GPU replicas)

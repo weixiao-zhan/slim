@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FSDP trainer for the PPO value function (critic).
 
 Wraps a pretrained causal LM by replacing its lm_head with a scalar

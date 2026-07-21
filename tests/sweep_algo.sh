@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Algorithm sweep: GRPO / GSPO / PPO across the same mixed (math+vision) dataset on a
 # single 8-GPU node with Qwen3.5-2B. PPO additionally trains a critic (expect_critic=1).
 #

@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Per-architecture Hugging Face model patches owned by the FSDP backend.
 
 Two concerns live here, dispatched by Hugging Face ``model_type``:

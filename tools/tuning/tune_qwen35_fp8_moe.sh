@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Tune the block-FP8 W8A8 *fused-MoE* Triton kernel for Qwen3.5-35B-A3B's expert FFN on the
 # local GPU, writing the tuned config into tools/triton_moe_configs/triton_<ver>/.
 #

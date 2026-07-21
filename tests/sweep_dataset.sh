@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Dataset sweep: PPO across data modalities — text math (DAPO-17k) and vision (Geo3K) —
 # on a single 8-GPU node with Qwen3.5-2B.
 #

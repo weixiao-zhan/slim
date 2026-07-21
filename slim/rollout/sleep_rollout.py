@@ -1,3 +1,6 @@
+# Source: https://github.com/THUDM/slime
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import time
 

@@ -1,3 +1,6 @@
+# Source: https://github.com/THUDM/slime
+# SPDX-License-Identifier: Apache-2.0
+
 def calculate_embedding_flops(seqlen, hidden_size):
     return 2 * seqlen * hidden_size
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # FP8 sweep: GRPO + CIS on the mixed (math+vision) dataset, comparing the rollout-weight
 # precision against a bf16 baseline on a single 8-GPU node with Qwen3.5-2B:
 #   bf16       -> bf16 rollout weights (base case)

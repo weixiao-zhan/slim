@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Quantize a BF16 HF safetensors model to block-FP8, mimicking a reference recipe.
 
 The recipe (block size, activation_scheme, scale_fmt, and the exact

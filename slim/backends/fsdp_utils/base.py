@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Base FSDP trainer shared by the policy and critic roles.
 
 Holds the role-agnostic skeleton: distributed setup, device mesh, the shared

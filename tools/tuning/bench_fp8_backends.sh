@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Compare decode throughput of FP8 block-GEMM backends on the 4B FP8 checkpoint,
 # to decide which backend the rollout engine should use on this Blackwell (sm120) card.
 #

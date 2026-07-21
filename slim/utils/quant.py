@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Weight-only quantization shared by the offline converter
 (tools/convert_hf_to_fp8.py) and the online rollout weight-sync path
 (backends/fsdp_utils/update_weight_utils.py).
