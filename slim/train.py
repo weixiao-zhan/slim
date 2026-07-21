@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import ray
 
 from slim.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models

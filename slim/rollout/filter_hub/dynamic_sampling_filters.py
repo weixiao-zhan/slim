@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 
 from slim.rollout.filter_hub.base_types import DynamicFilterOutput

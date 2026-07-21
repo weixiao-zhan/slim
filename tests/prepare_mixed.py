@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prepare a mixed math (text) + geometry (vision) dataset for hybrid GRPO training.
 
 Combines two well-understood, fast-to-fetch sources:

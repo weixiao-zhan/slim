@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prepare DAPO-Math-17k dataset as parquet for GRPO training.
 
 Usage:

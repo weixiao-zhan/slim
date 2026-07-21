@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for slim/utils/quant.py — the shared weight quantizer used by both
 the offline converter (tools/convert_hf_to_fp8.py) and the online rollout weight sync.
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Surrogate sweep: GRPO with each policy-gradient surrogate objective — ppo_clip, is, tis,
 # cis — on the mixed (math+vision) dataset, single 8-GPU node, Qwen3.5-2B.
 #

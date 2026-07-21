@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # PPO + LoRA (PEFT) on the mixed (math+vision) dataset with Qwen3.5-2B. --use-peft applies
 # LoRA to both actor and critic. Actor, critic, and rollout all colocate on the 8-GPU node.
 source "$(dirname "$0")/common.sh"

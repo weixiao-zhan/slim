@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Pass/fail checker for a single sweep or test run.
 
 Usage: python tests/sanity_check.py <log_file> <expect_actor:0|1> <expect_critic:0|1>
