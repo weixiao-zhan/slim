@@ -18,3 +18,4 @@ The basic training loop follows:
 | [Placement](placement.md) | GPU allocation, colocate modes, step timeline, weight update paths |
 | [Dev Utils](dev-utils.md) | Profiling, debugging, reproducibility, tests |
 | [Customization](customization.md) | All `--*-path` extension points, multi-turn/agentic adaptation |
+| [NeMo AutoModel Backend Plan](Nemo-Automodel.md) | NeMo training backend scope, packed mixed-modality EP+CP design, migration phases, and acceptance criteria |
