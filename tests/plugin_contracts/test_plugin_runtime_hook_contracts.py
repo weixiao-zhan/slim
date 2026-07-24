@@ -144,7 +144,7 @@ HOOK_CASES = [
         "rollout_data_postprocess",
         "ROLLOUT_DATA_POSTPROCESS_PATH",
         "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
-        "slim/backends/fsdp_utils/policy.py",
+        "slim/backends/nemo/base.py",
         "self.rollout_data_postprocess(self.args)",
         ("args",),
         invoke_rollout_data_postprocess,

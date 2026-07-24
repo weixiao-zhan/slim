@@ -34,17 +34,13 @@ start_ray() {
     uv run ray start --head --node-ip-address "$MASTER_ADDR" --num-gpus "$NUM_GPUS" --disable-usage-stats
 }
 
-# Submit a training job to the running ray cluster and return immediately
-# (--no-wait). Jobs queue on the cluster: each one's driver blocks in
-# ray.get(pg.ready()) until the previous job's RolloutManager.dispose frees the
-# GPUs, so combos run sequentially without a per-combo cluster restart.
-run_train() {
+_submit_train() {
+    local wait_for_completion="$1"
+    shift
     local train_args="$1"
     local train_cmd="${2:-slim-train}"
-    local ray_port="${RAY_DASHBOARD_PORT:-8265}"
-
     local runtime_env
-    runtime_env=$(python -c "
+    runtime_env=$(uv run python -c "
 import json, subprocess
 def has_nvlink():
     try:
@@ -65,11 +61,26 @@ print(json.dumps({'env_vars': env_vars}))
 ")
 
     export no_proxy="127.0.0.1"
-    uv run ray job submit \
-        --address="http://127.0.0.1:${ray_port}" \
-        --runtime-env-json="$runtime_env" \
-        --no-wait \
-        -- "$train_cmd" $train_args
+    if [[ "$wait_for_completion" == "true" ]]; then
+        uv run ray job submit \
+            --runtime-env-json="$runtime_env" \
+            -- "$train_cmd" $train_args
+    else
+        uv run ray job submit \
+            --runtime-env-json="$runtime_env" \
+            --no-wait \
+            -- "$train_cmd" $train_args
+    fi
+}
+
+# Submit a training job to the running ray cluster and return immediately.
+run_train() {
+    _submit_train false "$@"
+}
+
+# Submit a training job and stream logs until it finishes.
+run_train_wait() {
+    _submit_train true "$@"
 }
 
 wandb_args() {

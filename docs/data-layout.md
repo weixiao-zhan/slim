@@ -86,7 +86,7 @@ After generation and reward assignment, `episode.ensure_edge_alignment()` valida
 After freeze, episodes are consumed by:
 
 1. **Normalization** — advantage and return computation over the batch.
-2. **Packing** — `pack_sequences` (`slim/backends/fsdp_utils/data_packing.py`) concatenates multiple episodes into dense batches with `cu_seqlens` for flash-attention, per-sequence `position_ids`, and cumulative edge-offset bookkeeping for slicing edge-aligned fields (`loss_masks`, `rollout_log_probs`, `advantages`, `returns`, `rollout_routed_experts`).
+2. **Packing** — `pack_sequences` (`slim/backends/nemo/data_packing.py`) concatenates multiple episodes into dense batches with `cu_seqlens` for flash-attention, per-sequence `position_ids`, and cumulative edge-offset bookkeeping for slicing edge-aligned fields (`loss_masks`, `rollout_log_probs`, `advantages`, `returns`, `rollout_routed_experts`).
 3. **Training loop** — packed batches are unpacked per micro-batch via `unpack_sequences`, which slices token-aligned fields by `cu_seqlens` and edge-aligned fields by cumulative edge offsets.
 
 ---

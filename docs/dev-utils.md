@@ -61,7 +61,7 @@ python tools/profile_rollout.py \
 
 ### Weight-update verification
 
-`--check-weight-update-equal` snapshots engine weights at startup, zeros them, then verifies the first FSDP→SGLang sync restores the exact values.
+`--check-weight-update-equal` snapshots engine weights at startup, zeros them, then verifies the first NeMo→SGLang sync restores the exact values.
 
 ### CUDA IMA debugging
 

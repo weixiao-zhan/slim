@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from slim.backends.fsdp_utils.base import FSDPTrainer
+from slim.backends.nemo.base import NeMoTrainer
 from slim.utils.ppo_utils import vanilla_gae
 from slim.utils.types import Episode
 
@@ -88,7 +88,7 @@ def test_vanilla_gae_validates_shapes():
 
 @pytest.mark.unit
 def test_ppo_reward_is_assigned_to_last_policy_edge():
-    trainer = object.__new__(FSDPTrainer)
+    trainer = object.__new__(NeMoTrainer)
     trainer.args = SimpleNamespace(gamma=1.0, lambd=1.0, normalize_advantages=False)
     episode = Episode(
         tokens=[10, 11, 12, 13],

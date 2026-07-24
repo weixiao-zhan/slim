@@ -1,7 +1,7 @@
 # slim Documentation
 
 slim is an on-policy RL training framework for vision language models.
-It orchestrates a **rollout engine** (SGLang) that generates sequences and a **training backend** (FSDP2) that updates the policy.
+It orchestrates a **rollout engine** (SGLang) that generates sequences and a **training backend** (NeMo AutoModel with FSDP2, context parallelism, and expert parallelism) that updates the policy.
 
 The basic training loop follows:
 1. Rollout engines generate sequences from prompts, recording tokens, and scores each sequence with reward into [Episodes](data-layout.md).
@@ -18,4 +18,4 @@ The basic training loop follows:
 | [Placement](placement.md) | GPU allocation, colocate modes, step timeline, weight update paths |
 | [Dev Utils](dev-utils.md) | Profiling, debugging, reproducibility, tests |
 | [Customization](customization.md) | All `--*-path` extension points, multi-turn/agentic adaptation |
-| [NeMo AutoModel Backend Plan](Nemo-Automodel.md) | NeMo training backend scope, packed mixed-modality EP+CP design, migration phases, and acceptance criteria |
+| [NeMo AutoModel Backend](Nemo-Automodel.md) | NeMo training backend scope, packed mixed-modality EP+CP design, loss normalization, checkpoints, and SGLang synchronization |

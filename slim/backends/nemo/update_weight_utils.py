@@ -6,12 +6,13 @@ import logging
 import socket
 from argparse import Namespace
 from collections.abc import Sequence
+from collections.abc import Iterator
 
 import ray
 import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 
 from sglang.srt.utils import MultiprocessingSerializer
 from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
@@ -19,8 +20,16 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from slim.utils.distributed_utils import get_gloo_group, init_process_group
 
+from .model import resolve_state_dict_adapter
 
 logger = logging.getLogger(__name__)
+
+
+def _full_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    tensor = tensor.to(device=device, non_blocking=True)
+    if isinstance(tensor, DTensor):
+        tensor = tensor.full_tensor()
+    return tensor
 
 
 class UpdateWeight(abc.ABC):
@@ -28,6 +37,7 @@ class UpdateWeight(abc.ABC):
         self.args = args
         self.model = model
         self.quantizer = quantizer
+        self.state_dict_adapter = resolve_state_dict_adapter(model)
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -40,14 +50,25 @@ class UpdateWeight(abc.ABC):
     ) -> None:
         pass
 
-    def update_weights(self, peft_remap: bool = False) -> None:
-        """Sync model weights to rollout engines.
+    def _hf_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
+        device = torch.device("cuda", torch.cuda.current_device())
+        for name, state_tensor in self.model.state_dict().items():
+            if name.endswith("_extra_state"):
+                continue
 
-        Args:
-            peft_remap: If True, the model is a merged PeftModel. Keys are remapped to
-                HF-compatible names and adapter-only keys are skipped. Caller is responsible
-                for calling merge_adapter() before and unmerge_adapter() after.
-        """
+            tensor = _full_tensor(state_tensor, device)
+            converted = self.state_dict_adapter.convert_single_tensor_to_hf(
+                name,
+                tensor,
+                exclude_key_regex=r".*_extra_state.*",
+                quantization=False,
+            )
+            for hf_name, hf_tensor in converted:
+                hf_tensor = _full_tensor(hf_tensor, device).contiguous()
+                yield hf_name, hf_tensor
+
+    def update_weights(self) -> None:
+        """Convert and stream the current policy weights to rollout engines."""
         self.weight_version += 1
 
         rank = dist.get_rank()
@@ -56,25 +77,9 @@ class UpdateWeight(abc.ABC):
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
-        peft_prefix = self.model.base_model.prefix if peft_remap else ""
-
         bucket = []
         bucket_size = 0
-        for name, param in self.model.state_dict().items():
-            if peft_remap:
-                name = name.removeprefix("base_model.model.").replace(".base_layer", "")
-                if peft_prefix and peft_prefix in name:
-                    continue
-                if "original_module" in name:
-                    continue
-
-            param = param.cuda()
-            if isinstance(param, DTensor):
-                param = param.redistribute(
-                    placements=[Replicate()] * param.device_mesh.ndim,
-                    async_op=True,
-                ).to_local()
-
+        for name, param in self._hf_tensors():
             named_tensors = self.quantizer.quantize(name, param) if self.quantizer else ((name, param),)
             for tensor_name, tensor in named_tensors:
                 tensor_size = tensor.numel() * tensor.element_size()
@@ -136,6 +141,9 @@ class UpdateWeightFromTensor(UpdateWeight):
         engine's local group.
         """
         self.rollout_engines = rollout_engines
+        self._ipc_gather_group = None
+        self._ipc_gather_src = None
+        self._ipc_engine = None
 
         if engine_gpu_counts is None:
             engine_gpu_counts = [self.args.rollout_num_gpus_per_replica] * len(rollout_engines)
@@ -180,64 +188,44 @@ class UpdateWeightFromTensor(UpdateWeight):
             )
 
     def update_bucket_weights(self, named_tensors, weight_version=None) -> None:
-        # Placeholder ranks (GPU slots reserved but no engine) have no gather group.
-        # gather_object is only collective among group members, so we skip entirely.
-        if self._ipc_gather_group is None:
-            return
+        if self._ipc_gather_group is not None:
+            monkey_patch_torch_reductions()
+            named_tensors_by_dtype = {}
+            for name, tensor in named_tensors:
+                named_tensors_by_dtype.setdefault(tensor.dtype, []).append((name, tensor))
 
-        monkey_patch_torch_reductions()
-        # Use flattened bucket approach for efficient weight transfer
-        logger.info("Using flattened tensor bucket")
-        # Group tensors by dtype
-        named_tensors_by_dtypes = {}
-        for name, tensor in named_tensors:
-            dtype = tensor.dtype
-            if dtype not in named_tensors_by_dtypes:
-                named_tensors_by_dtypes[dtype] = []
-            named_tensors_by_dtypes[dtype].append((name, tensor))
-
-        # Create flattened bucket for each dtype group
-        serialized_tensors = []
-        long_live_tensors = []
-        for _dtype, named_tensors in named_tensors_by_dtypes.items():
-            flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=named_tensors)
-            metadata = flattened_tensor_bucket.get_metadata()
-            flattened_tensor_data = {
-                "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
-                "metadata": metadata,
-            }
-            long_live_tensors.append(flattened_tensor_data)
-            serialized_tensors.append(MultiprocessingSerializer.serialize(flattened_tensor_data, output_str=True))
-
-        if self._ipc_gather_src == dist.get_rank():
-            # On rank 0, prepare a list to hold the gathered batches from all ranks.
-            gathered_serialized_batches = [None for _ in range(dist.get_world_size(self._ipc_gather_group))]
-        else:
-            gathered_serialized_batches = None
-
-        # Gather the serialized batches from all ranks to rank 0.
-        dist.gather_object(
-            obj=serialized_tensors,
-            object_gather_list=gathered_serialized_batches,
-            dst=self._ipc_gather_src,
-            group=self._ipc_gather_group,
-        )
-
-        if dist.get_rank() == self._ipc_gather_src:
-            # Handle flattened bucket format
-            # Each rank may have multiple dtype buckets
-            # TODO: here we assume all ranks have the same number of dtypes
-            num_dtypes = len(gathered_serialized_batches[0])
-            assert num_dtypes > 0
-            for i in range(num_dtypes):
-                kwargs = {
-                    "serialized_named_tensors": [tensors[i] for tensors in gathered_serialized_batches],
-                    "load_format": "flattened_bucket",
-                    "flush_cache": False,
-                    "weight_version": str(weight_version),
+            serialized_tensors = []
+            long_live_tensors = []
+            for tensors in named_tensors_by_dtype.values():
+                flattened = FlattenedTensorBucket(named_tensors=tensors)
+                payload = {
+                    "flattened_tensor": flattened.get_flattened_tensor(),
+                    "metadata": flattened.get_metadata(),
                 }
-                ref = self._ipc_engine.update_weights_from_tensor.remote(**kwargs)
-                ray.get(ref)
+                long_live_tensors.append(payload)
+                serialized_tensors.append(MultiprocessingSerializer.serialize(payload, output_str=True))
+
+            if self._ipc_gather_src == dist.get_rank():
+                gathered = [None for _ in range(dist.get_world_size(self._ipc_gather_group))]
+            else:
+                gathered = None
+            dist.gather_object(
+                obj=serialized_tensors,
+                object_gather_list=gathered,
+                dst=self._ipc_gather_src,
+                group=self._ipc_gather_group,
+            )
+
+            if dist.get_rank() == self._ipc_gather_src:
+                for index in range(len(gathered[0])):
+                    ray.get(
+                        self._ipc_engine.update_weights_from_tensor.remote(
+                            serialized_named_tensors=[tensors[index] for tensors in gathered],
+                            load_format="flattened_bucket",
+                            flush_cache=False,
+                            weight_version=str(weight_version),
+                        )
+                    )
 
         # Update engines on non-actor GPUs via NCCL broadcast
         if self._distributed_updater is not None:

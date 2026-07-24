@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qwen3.5 MoE actor steps with modality-skewed DP ranks across the CP/EP matrix.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MODEL_DIR="${NEMO_HETEROGENEOUS_MODEL_DIR:-$REPO_DIR/models/Qwen3.5-35B-A3B}"
+RESULT_DIR="${NEMO_HETEROGENEOUS_RESULT_DIR:-/tmp/slim-nemo-heterogeneous-multimodal}"
+ROLLOUT_SOURCE="${NEMO_HETEROGENEOUS_ROLLOUT_SOURCE:-/tmp/slim-nemo-grad-norm-matrix/rollout.pt}"
+ROLLOUT_DATA="$RESULT_DIR/rollout.pt"
+NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
+
+if [[ "$NUM_GPUS" -ne 8 ]]; then
+    echo "heterogeneous multimodal qualification requires exactly 8 GPUs, found $NUM_GPUS" >&2
+    exit 1
+fi
+if [[ ! -f "$ROLLOUT_SOURCE" ]]; then
+    echo "fixed rollout source not found: $ROLLOUT_SOURCE" >&2
+    exit 1
+fi
+
+mkdir -p "$RESULT_DIR"
+uv run python tests/prepare_nemo_heterogeneous_rollout.py \
+    --input "$ROLLOUT_SOURCE" \
+    --output "$ROLLOUT_DATA"
+
+run_case() {
+    local case_name="$1"
+    local cp_size="$2"
+    local ep_size="$3"
+    shift 3
+    local offload_args=()
+    if [[ "$ep_size" == "1" ]]; then
+        offload_args+=(--nemo-cpu-offload)
+    fi
+    env -u LD_LIBRARY_PATH uv run torchrun \
+        --standalone \
+        --nproc-per-node 8 \
+        tests/backends/nemo/run_training_qualification.py \
+        --checkpoint "$MODEL_DIR" \
+        --role actor \
+        --context-parallel-size "$cp_size" \
+        --expert-parallel-size "$ep_size" \
+        --heterogeneous-multimodal \
+        --rollout-data "$ROLLOUT_DATA" \
+        --max-tokens-per-gpu 2048 \
+        --output "$RESULT_DIR/$case_name.json" \
+        "${offload_args[@]}" \
+        "$@" \
+        2>&1 | tee "$RESULT_DIR/$case_name.log"
+}
+
+cd "$REPO_DIR"
+for topology in \
+    "cp1_ep4 1 4" \
+    "cp1_ep8 1 8"
+do
+    read -r topology_name cp_size ep_size <<<"$topology"
+    run_case "${topology_name}_frozen_vision" "$cp_size" "$ep_size"
+    run_case "${topology_name}_trainable_vision" "$cp_size" "$ep_size" --no-freeze-vision-tower
+done

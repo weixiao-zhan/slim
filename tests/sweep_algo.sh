@@ -32,9 +32,6 @@ COMMON_ARGS="
     --sglang-page-size 64
     --rollout-colocate
 
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192

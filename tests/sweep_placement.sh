@@ -31,9 +31,6 @@ COMMON_ARGS="
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
 
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
@@ -55,8 +52,8 @@ COMBOS[colocate_rollout]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-n
 COMBOS[colocate_critic]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4"
 COMBOS[colocate_critic_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4 --update-weights-interval 1"
 COMBOS[full_colocate]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-colocate"
-# HSDP control: 8 actor GPUs, 2-GPU replicas (replicate=4, shard=2), colocated rollout.
-COMBOS[grpo_hsdp]="slim-train|1|0|$GRPO_ARGS --actor-num-gpus 8 --actor-num-gpus-per-replica 2 --rollout-colocate"
+# HSDP control: 8 actor GPUs, replicated DP 4 and sharded DP 2, with colocated rollout.
+COMBOS[grpo_hsdp]="slim-train|1|0|$GRPO_ARGS --actor-num-gpus 8 --dp-replicate-size 4 --rollout-colocate"
 
 ORDER=(default default_async colocate_rollout colocate_critic colocate_critic_async full_colocate grpo_hsdp)
 

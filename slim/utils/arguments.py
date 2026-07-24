@@ -42,30 +42,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Total number of GPUs for the training actor.",
             )
             parser.add_argument(
-                "--actor-num-gpus-per-replica",
-                type=int,
-                default=None,
-                help=(
-                    "Number of GPUs each actor replica spans (the FSDP shard group size). "
-                    "Replica count is actor_num_gpus // actor_num_gpus_per_replica. "
-                    "Equal to actor_num_gpus -> a single full-shard FSDP replica; "
-                    "equal to 1 -> pure DDP; in between -> HSDP. Defaults to actor_num_gpus."
-                ),
-            )
-            parser.add_argument(
                 "--critic-num-gpus",
                 type=int,
                 default=None,
                 help="Total number of GPUs for the critic. Must equal actor_num_gpus. Defaults to actor_num_gpus.",
-            )
-            parser.add_argument(
-                "--critic-num-gpus-per-replica",
-                type=int,
-                default=None,
-                help=(
-                    "Number of GPUs each critic replica spans (the FSDP shard group size). "
-                    "Defaults to critic_num_gpus (single full-shard replica)."
-                ),
             )
 
             parser.add_argument(
@@ -146,26 +126,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
                         Supports Python regex syntax (re.search).
                         """,
-            )
-
-            # PEFT (LoRA/DoRA) support
-            parser.add_argument(
-                "--use-peft",
-                action="store_true",
-                default=False,
-                help="Apply PEFT (LoRA/DoRA) adapters to the model after loading.",
-            )
-            parser.add_argument(
-                "--peft-config",
-                type=json.loads,
-                default="{}",
-                help=(
-                    "JSON string of LoraConfig overrides for PEFT. "
-                    'Defaults: {"r": 16, "lora_alpha": 32, "use_dora": false, '
-                    '"target_modules": "all-linear", '
-                    '"exclude_modules": ["visual", "vision_tower", "vision_model", "audio", "speech"], '
-                    '"lora_dropout": 0.0, "bias": "none", "task_type": "CAUSAL_LM"}'
-                ),
             )
 
             return parser
@@ -1088,10 +1048,10 @@ def parse_args(add_custom_arguments=None):
     if not skip_sglang:
         sglang_ns = sglang_parse_args()
 
-    # Phase 2: Parse FSDP + slim args.
-    from slim.backends.fsdp_utils.arguments import fsdp_parse_args
+    # Phase 2: Parse NeMo + slim args.
+    from slim.backends.nemo.arguments import nemo_parse_args
 
-    args = fsdp_parse_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
+    args = nemo_parse_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
 
     # Merge pre-parsed args into the main namespace
     for key, value in vars(pre).items():
@@ -1217,10 +1177,6 @@ def slim_validate_args(args):
             )
     if args.critic_num_gpus is None:
         args.critic_num_gpus = args.actor_num_gpus
-    if args.actor_num_gpus_per_replica is None:
-        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
-    if args.critic_num_gpus_per_replica is None:
-        args.critic_num_gpus_per_replica = args.critic_num_gpus or 1
     if args.critic_load is None:
         args.critic_load = args.load
     if args.lr_actor is None:
@@ -1229,18 +1185,6 @@ def slim_validate_args(args):
         args.lr_critic = args.lr
     if args.lr_critic_value_head is None:
         args.lr_critic_value_head = args.lr_critic
-
-    # A replica size must evenly divide the role's GPU total.
-    if args.actor_num_gpus:
-        assert args.actor_num_gpus % args.actor_num_gpus_per_replica == 0, (
-            f"actor_num_gpus {args.actor_num_gpus} not divisible by "
-            f"actor_num_gpus_per_replica {args.actor_num_gpus_per_replica}"
-        )
-    if args.use_critic and args.critic_num_gpus:
-        assert args.critic_num_gpus % args.critic_num_gpus_per_replica == 0, (
-            f"critic_num_gpus {args.critic_num_gpus} not divisible by "
-            f"critic_num_gpus_per_replica {args.critic_num_gpus_per_replica}"
-        )
 
     # Actor and critic share one rollout-data split and pair rank-wise, so their
     # GPU totals must match (this also satisfies the --critic-colocate C == A rule).
@@ -1263,7 +1207,6 @@ def slim_validate_args(args):
             args.rollout_num_gpus = args.actor_num_gpus
         else:
             args.actor_num_gpus = args.rollout_num_gpus
-        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
         args.rollout_colocate = False
         args.critic_colocate = False
         if args.train_memory_margin_bytes > 0:

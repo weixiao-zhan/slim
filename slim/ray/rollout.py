@@ -44,6 +44,19 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Episode]:
+    path = Path(path_template.format(rollout_id=rollout_id))
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    records = payload.get("episodes") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
+        raise ValueError(f"debug rollout data at {path} must contain an episodes list")
+    episodes = [Episode(**record) for record in records]
+    for episode in episodes:
+        episode.ensure_edge_alignment()
+    logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
+    return episodes
+
+
 @dataclasses.dataclass
 class ServerGroup:
     """A group of homogeneous SGLang engines with the same configuration.
@@ -561,10 +574,14 @@ class RolloutManager:
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def _get_rollout_episodes(self, rollout_id) -> tuple[list[Episode], dict | None]:
-        with profile_rollout(self.args, rollout_id):
-            result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
-        metrics = result.metrics
-        episodes = result.episodes
+        if self.args.load_debug_rollout_data is not None:
+            episodes = _load_debug_rollout_episodes(self.args.load_debug_rollout_data, rollout_id)
+            metrics = None
+        else:
+            with profile_rollout(self.args, rollout_id):
+                result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+            metrics = result.metrics
+            episodes = result.episodes
 
         if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
             global_batch_size = self.args.global_batch_size
