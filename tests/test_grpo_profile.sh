@@ -30,9 +30,6 @@ run_train "
     --rollout-colocate
 
     --actor-num-gpus $NUM_GPUS
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192

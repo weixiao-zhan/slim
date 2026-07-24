@@ -43,9 +43,6 @@ COMMON_ARGS="
 
     --actor-num-gpus 4
     --critic-num-gpus 4
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
     --gradient-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 32768

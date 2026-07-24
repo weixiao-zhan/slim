@@ -163,9 +163,8 @@ run: | # shell
     --sglang-attention-backend fa3 \
     \
     --actor-num-gpus 2 \
-    --actor-num-gpus-per-replica 1 \
+    --dp-replicate-size 2 \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
-    --attn-implementation flash_attention_3 \
     --gradient-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 16384 \

@@ -145,17 +145,20 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
     if episode.has_multimodal and state.processor is None:
         raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
 
-    if isinstance(prompt, list) and state.processor:
-        # VLM processor + conversation
-        prompt_text = state.processor.apply_chat_template(
-            prompt,
-            tools=tools,
-            tokenize=False,
-            add_generation_prompt=True,
-            **state.chat_template_kwargs,
+    if episode.has_multimodal:
+        prompt_text = (
+            state.tokenizer.apply_chat_template(
+                prompt,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=True,
+                **state.chat_template_kwargs,
+            )
+            if isinstance(prompt, list)
+            else prompt
         )
         mm = {k: episode.example[k] for k in ("images", "videos", "audios") if episode.example.get(k)}
-        # Disable mm_token_type_ids — we synthesize it at training time from input_ids.
+        # Disable mm_token_type_ids because training synthesizes it from input_ids.
         processor_output = await asyncio.to_thread(
             state.processor,
             text=prompt_text,
@@ -170,11 +173,11 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
     elif isinstance(prompt, list):
-        # LLM tokenizer + conversation
         prompt_ids = state.tokenizer.apply_chat_template(
             prompt,
             tools=tools,
             tokenize=True,
+            return_dict=False,
             add_generation_prompt=True,
             **state.chat_template_kwargs,
         )

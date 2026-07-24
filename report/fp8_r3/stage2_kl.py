@@ -32,13 +32,11 @@ import json
 from pathlib import Path
 
 import numpy as np
-import torch
 
 import common as C
 
 
-def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: int, r3: bool, offload: bool,
-                    attn_impl: str = "sdpa"):
+def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: int, r3: bool, offload: bool):
     """Construct a full slim args Namespace via slim's own parser, with a synthetic argv.
 
     A forward-only actor: --debug-train-only skips sglang; --get-mismatch-metrics +
@@ -53,15 +51,6 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
         "--num-rollout", "1",
         "--rm-type", "math",
         "--actor-num-gpus", "1",
-        # SDPA for the training forward. The rollout-vs-training KL is set by precision (FP8-served
-        # rollout vs BF16 training), not by the attention kernel: SDPA matches FA4 to bf16 rounding
-        # noise (max|Δ|~0.016).
-        "--attn-implementation", attn_impl,
-        # --master-weight-dtype stays at slim's default (None = BF16 native weights, no fp32 master
-        # copy). fp32 master weights only stabilize backward + optimizer updates; this is a
-        # forward-only probe, so fp32 would just double the weight footprint (35B fp32 = 140 GB, won't
-        # fit one GPU). Valid values are (None, "fp32") only.
-        "--compute-dtype", "bf16",
         "--use-dynamic-batch-size",
         "--max-tokens-per-gpu", str(max_tokens_per_gpu),
         "--max-context-len", str(max_context_len),
@@ -74,7 +63,7 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
     if r3:
         argv.append("--use-rollout-routing-replay")
     if offload:
-        argv.append("--offload-train")
+        argv.append("--nemo-cpu-offload")
 
     from slim.utils.arguments import parse_args
 
@@ -130,8 +119,6 @@ def main():
     ap.add_argument("--max-context-len", type=int, default=16384)
     ap.add_argument("--max-tokens-per-gpu", type=int, default=16384)
     ap.add_argument("--offload-train", action="store_true", help="CPU-offload params (for BF16-35B)")
-    ap.add_argument("--attn-implementation", default="sdpa",
-                    help="training-forward attention (default sdpa; KL is precision-bound, not kernel-bound)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--src-dir", required=True,
                     help="stage-1 run dir to read records.jsonl/experts from (the caller points this "
@@ -154,14 +141,12 @@ def main():
     model_dir = C.MODELS[args_cli.model][0]  # bf16 dir
     slim_args = build_slim_args(
         model_dir, args_cli.max_context_len, args_cli.max_tokens_per_gpu, args_cli.r3, args_cli.offload_train,
-        attn_impl=args_cli.attn_implementation,
     )
 
     # --- bootstrap the actor (1-rank distributed group set up by torchrun) ---
-    # FSDPTrainRayActor is normally constructed inside a Ray actor (its base __init__ reads GPU ids
-    # via ray.get_gpu_ids()). Here we run standalone under torchrun, so bypass that base __init__ and
-    # set the env vars it would have set; then call .init() which does the dist + model setup.
-    from slim.backends.fsdp_utils.actor import FSDPTrainRayActor
+    # Run the NeMo trainer directly under torchrun while preserving the environment
+    # normally populated by its Ray actor constructor.
+    from slim.backends.nemo.actor import ActorNeMoTrainer
 
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -171,7 +156,7 @@ def main():
     os.environ["RANK"] = str(rank)
     os.environ.setdefault("LOCAL_RANK", os.environ.get("LOCAL_RANK", "0"))
 
-    actor = FSDPTrainRayActor.__new__(FSDPTrainRayActor)
+    actor = ActorNeMoTrainer.__new__(ActorNeMoTrainer)
     actor._world_size = world_size
     actor._rank = rank
     actor.master_addr = os.environ["MASTER_ADDR"]
@@ -186,15 +171,14 @@ def main():
     episodes = [ep for (_, _, ep) in episodes_meta]
 
     # pack_sequences needs _advantages/_returns; set dummies exactly as the real compute_log_probs does.
-    from slim.backends.fsdp_utils.actor import _init_dummy_advantages
+    from slim.backends.nemo.data_packing import init_dummy_advantages
 
-    _init_dummy_advantages(episodes)
+    init_dummy_advantages(episodes)
     # global_batch_size must cover all episodes in one "rollout" so _packed_data packs them together.
     actor.args.global_batch_size = len(episodes)
 
     packed_batches, _ = actor._packed_data(episodes)
-    actor._compute_log_prob("actor", packed_batches, store_prefix="actor_old_")
-    actor._deactivate_routing_replay()
+    actor._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
 
     # --- per-token AND sequence-level K3 KL over generated edges ---
     # Unpack each packed batch into per-episode edge-aligned tensors (exactly as the actor's
@@ -206,7 +190,7 @@ def main():
     #                   s_bar = Δ_seq / L, then kl_k3_seq = exp(s_bar) - s_bar - 1 (one per seq).
     # Both are the K3 estimator (exp(x)-x-1). Normalizing by L keeps the sequence ratio O(1)
     # regardless of length (the raw Σ_i Δ_i exponentiates an unbounded sum and is tail-explosive).
-    from slim.backends.fsdp_utils.data_packing import unpack_sequences
+    from slim.backends.nemo.data_packing import unpack_sequences
     from slim.utils.mismatch import compute_mismatch_metrics
 
     all_kl = []                       # pooled per-token, across all sequences
@@ -223,7 +207,7 @@ def main():
             actor.args, train_log_probs=train_lps, rollout_log_probs=rollout_lps, loss_masks=masks
         )
         for kl_t, train_t, roll_t, mask_t in zip(
-            m.get("kl_k3", []), train_lps, rollout_lps, masks
+            m.get("kl_k3", []), train_lps, rollout_lps, masks, strict=True
         ):
             sel = mask_t.bool().cpu()
             kl = kl_t.float().cpu()[sel].numpy()
@@ -259,7 +243,6 @@ def main():
         np.save(out_dir / "delta_per_sequence.npy", seq_delta_arr)
         summary = {
             "run": run_key,
-            "attn_implementation": slim_args.attn_implementation,
             "n_sequences": int(seq_kl_arr.size),
             "n_tokens": int(flat_kl.size),
             # per-token (per-step) K3 of the realized tokens. Heavy-tailed (median ~0, std dominated

@@ -1,7 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Learning rate scheduler for FSDP training."""
+"""Learning rate scheduler for NeMo AutoModel training."""
 
 import logging
 import math
@@ -13,8 +13,8 @@ from torch.optim.lr_scheduler import LRScheduler
 logger = logging.getLogger(__name__)
 
 
-class FSDPLRScheduler(LRScheduler):
-    """Learning rate scheduler for FSDP training.
+class NeMoLRScheduler(LRScheduler):
+    """Iteration-based learning rate scheduler for NeMo training.
 
     Args:
         optimizer (torch.optim.Optimizer): The optimizer to be used.
@@ -153,7 +153,7 @@ class FSDPLRScheduler(LRScheduler):
         return [self._get_lr_for_group(group) for group in self.optimizer.param_groups]
 
 
-def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
+def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> NeMoLRScheduler:
     """Create and configure the learning-rate scheduler.
 
     This configures iteration-based schedules derived from the global batch size
@@ -164,7 +164,7 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         optimizer (torch.optim.Optimizer): Optimizer bound to the model.
 
     Returns:
-        FSDPLRScheduler: Initialized scheduler bound to ``optimizer``.
+        NeMoLRScheduler: Initialized scheduler bound to ``optimizer``.
     """
     args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
     if args.lr_decay_iters is None:
@@ -177,7 +177,7 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
     else:
         lr_warmup_steps = args.lr_warmup_iters
-    lr_scheduler = FSDPLRScheduler(
+    lr_scheduler = NeMoLRScheduler(
         optimizer,
         init_lr=args.lr_warmup_init,
         max_lr=args.lr,

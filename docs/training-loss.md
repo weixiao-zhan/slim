@@ -7,7 +7,7 @@ The training loop then computes advantages $A_{i,t}$ and updates $\pi_\theta$ vi
 
 Denote $\pi(x_{i,t})$: shorthand for $\pi(x_{i,t} | x_{i,<t})$;
 $\pi_\theta$: the training policy; 
-$\pi_\text{old}$: the policy used for generation running on FSDP backend;
+$\pi_\text{old}$: the actor policy used to compute the importance-ratio baseline;
 $\pi_\text{rollout}$: the policy used for generation running on SGLang; 
 $\pi_\text{ref}$: frozen reference.
 
