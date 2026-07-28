@@ -8,13 +8,13 @@ Each role declares an overall GPU total. Actor and critic each form one distribu
 
 | role | overall total | topology |
 |---|---|---|
-| actor   | `--actor-num-gpus` (`A`) | FSDP2 with `--context-parallel-size`, `--expert-model-parallel-size`, and `--dp-replicate-size` |
-| critic  | `--critic-num-gpus` (`C`) | FSDP2 with `--context-parallel-size`, `--expert-model-parallel-size`, and `--dp-replicate-size` |
+| actor   | `--actor-num-gpus` (`A`) | FSDP2 with `--context-parallel-size` and `--expert-model-parallel-size` |
+| critic  | `--critic-num-gpus` (`C`) | FSDP2 with `--context-parallel-size` and `--expert-model-parallel-size` |
 | rollout | `--rollout-num-gpus` (`R`) | `--rollout-num-gpus-per-replica`; replica count is `R / rollout_num_gpus_per_replica` |
 
 | role | within its distributed world | data parallelism |
 |---|---|---|
-| actor / critic | FSDP2 with context parallelism and optional expert parallelism | data-parallel mesh, optionally replicated via `--dp-replicate-size` |
+| actor / critic | FSDP2 with context parallelism and optional expert parallelism | pure FSDP across each complete training world |
 | rollout | one sglang engine with TP <br> and optional PP / EP / PD-disaggregation | router-balanced (DP) |
 
 

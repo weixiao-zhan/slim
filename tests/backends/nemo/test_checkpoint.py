@@ -92,9 +92,9 @@ def test_build_checkpointer_uses_role_specific_automodel_config(
     from nemo_automodel.components.checkpoint.config import CheckpointingConfig
 
     monkeypatch.setattr(CheckpointingConfig, "build", fake_build)
+    monkeypatch.setattr("slim.backends.nemo.checkpoint.dist.get_rank", lambda: 5)
     trainer = SimpleNamespace(
         role=role,
-        dp_cp_rank=5,
         moe_mesh=object(),
         mesh_context=SimpleNamespace(process_group=object()),
         _checkpoint_save_dir=str(tmp_path),

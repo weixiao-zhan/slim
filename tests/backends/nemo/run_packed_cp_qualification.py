@@ -14,10 +14,11 @@ from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
+from transformers import AutoConfig
 
 from slim.backends.nemo.forward import model_forward, prepare_forward
 from slim.backends.nemo.loss import selective_log_probs
-from slim.backends.nemo.model import build_policy_model
+from slim.backends.nemo.models import build_model, validate_config
 from slim.backends.nemo.topology import NeMoTopology
 
 MAX_LOG_PROB_DELTA = 0.3
@@ -46,7 +47,6 @@ def _arguments() -> argparse.Namespace:
 def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
     return SimpleNamespace(
         activation_checkpointing=activation_checkpointing,
-        nemo_cpu_offload=False,
         defer_fsdp_grad_sync=False,
         distributed_timeout_minutes=30,
         nemo_linear_backend="torch",
@@ -212,7 +212,10 @@ def main() -> None:
     )
     setup = topology.build(args)
     device_mesh = setup.mesh_context.device_mesh
-    model = build_policy_model(
+    config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
+    validate_config(config, topology)
+    model = build_model(
+        config,
         args,
         cli.checkpoint,
         setup,

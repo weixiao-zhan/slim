@@ -32,10 +32,6 @@ run_case() {
     local cp_size="$2"
     local ep_size="$3"
     shift 3
-    local offload_args=()
-    if [[ "$ep_size" == "1" ]]; then
-        offload_args+=(--nemo-cpu-offload)
-    fi
     env -u LD_LIBRARY_PATH uv run torchrun \
         --standalone \
         --nproc-per-node 8 \
@@ -48,7 +44,6 @@ run_case() {
         --rollout-data "$ROLLOUT_DATA" \
         --max-tokens-per-gpu 2048 \
         --output "$RESULT_DIR/$case_name.json" \
-        "${offload_args[@]}" \
         "$@" \
         2>&1 | tee "$RESULT_DIR/$case_name.log"
 }

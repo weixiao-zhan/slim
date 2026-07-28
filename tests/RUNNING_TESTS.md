@@ -105,7 +105,7 @@ Two kinds of tests live here:
 
 | Sweep | Axis | Combos | Model |
 |-------|------|--------|-------|
-| `sweep_placement.sh` | (rollout-colocate, critic-colocate) placement | 6 PPO combos + HSDP control | Qwen3.5-2B |
+| `sweep_placement.sh` | (rollout-colocate, critic-colocate) placement | 6 PPO combos | Qwen3.5-2B |
 | `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-2B |
 | `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-2B |
 | `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-2B |

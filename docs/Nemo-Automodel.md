@@ -30,6 +30,8 @@ The pinned revision supplies Qwen3.5 CP token sharding verbs, block-diagonal att
 
 ## Model Construction
 
+Backend-level model, forward, packing, and trainer modules are model-independent. Model-family validation, construction, position IDs, and computation-graph patches are registered under `slim.backends.nemo.models`; the Qwen3.5 implementation lives in `models/qwen3_5.py`.
+
 Policy and reference models are created with:
 
 ```python
@@ -42,27 +44,27 @@ AutoModel applies the parameter freeze configuration before sharding and optimiz
 
 Training constructs the policy without MTP layers. SGLang retains the checkpoint's draft weights through its draft-weight backup while policy updates stream the trained backbone.
 
-The critic uses the same AutoModel backbone and a Slim scalar value head. The value head is FSDP2-sharded with the same precision and offload policies as the backbone.
+The critic uses the same AutoModel backbone and a Slim scalar value head. The value head is FSDP2-sharded with the same precision policy as the backbone.
 
 There is no direct Transformers `AutoModelFor*` training path.
 
 ## Topology
 
-Let \(W\) be world size, \(C\) context-parallel size, and \(D_r\) replicated data-parallel size. The sharded data-parallel size is:
-
-$$
-D_s = \frac{W}{C D_r}
-$$
-
-The logical data-parallel size used to partition episodes is:
+Let \(W\) be world size and \(C\) be context-parallel size. The logical data-parallel size used to partition episodes is:
 
 $$
 D = \frac{W}{C}
 $$
 
-The root mesh always contains the replicated data-parallel dimension. AutoModel uses a one-dimensional FSDP mesh when \(D_r = 1\) and a two-dimensional HSDP mesh when \(D_r > 1\). Packed multimodal branch synchronization uses the flattened `dp_shard_cp` group, so ranks that share an FSDP shard group follow the same vision-tower collective path without synchronizing independent HSDP replicas.
+AutoModel's root mesh contains a size-one `dp_replicate` axis, a `dp_shard` axis of size \(D\), and a `cp` axis of size \(C\). Dense parameters use the flattened `dp_shard_cp` FSDP mesh:
 
-Expert parallelism is composed over the AutoModel MoE mesh. It is not an additional world-size factor. Expert parameters are excluded from the transformer block's ordinary FSDP unit. EP assigns expert subsets to ranks, while an orthogonal `ep_shard` mesh may FSDP-shard each subset across its data-parallel copies.
+$$
+D C = W
+$$
+
+Every dense parameter is therefore FSDP-sharded across the complete training world. Packed multimodal branch synchronization uses the same `dp_shard_cp` group.
+
+Expert parallelism is composed over the AutoModel MoE mesh and is not an additional world-size factor. For expert-parallel size \(E\), the MoE mesh is `[ep_shard=W/E, ep=E]`. Expert parameters are excluded from the transformer block's ordinary FSDP unit. EP assigns expert subsets to ranks, while `ep_shard` FSDP-shards each subset.
 
 Slim assigns its Gloo process group to AutoModel's `MeshContext.process_group`. Distributed checkpoint planning and metadata exchange therefore use the control-plane group rather than allocating rank-zero NCCL planning tensors.
 
@@ -71,9 +73,7 @@ Relevant arguments are:
 ```text
 --context-parallel-size
 --expert-model-parallel-size
---dp-replicate-size
 --activation-checkpointing
---nemo-cpu-offload
 ```
 
 The backend does not expose TP, PP, sequence-parallel, or optimizer selection arguments. It rejects dense Qwen3.5 with EP greater than one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.

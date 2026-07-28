@@ -8,6 +8,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from torch.distributed.nn.functional import all_reduce as differentiable_all_reduce
 
 
 _LOGPROB_BLOCK_SIZE = 32768
@@ -173,9 +174,7 @@ def cp_sum(tensor: torch.Tensor, cp_group, *, differentiable: bool) -> torch.Ten
     ):
         return tensor
     if differentiable:
-        from torch.distributed.nn.functional import all_reduce
-
-        return all_reduce(tensor, group=cp_group)
+        return differentiable_all_reduce(tensor, group=cp_group)
     output = tensor.clone()
     torch.distributed.all_reduce(output, group=cp_group)
     return output

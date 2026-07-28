@@ -649,7 +649,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "Replay rollout-time MoE expert routing during training. Captures top-k expert "
                     "indices from sglang via enable_return_routed_experts and forces the actor's "
                     "router to gather scores at those same indices. Eliminates train/inference "
-                    "expert-selection mismatch on MoE models. Currently wired for Qwen3.5-MoE."
+                    "expert-selection mismatch when supported by the selected training model family."
                 ),
             )
             parser.add_argument(

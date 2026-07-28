@@ -165,7 +165,6 @@ run: | # shell
     --rollout-colocate \
     \
     --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
-    --dp-replicate-size ${SKYPILOT_NUM_NODES} \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --activation-checkpointing \
     --use-dynamic-batch-size \

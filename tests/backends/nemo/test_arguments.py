@@ -17,7 +17,6 @@ def _args(**overrides):
     values = {
         "context_parallel_size": 1,
         "expert_model_parallel_size": 1,
-        "dp_replicate_size": 1,
         "actor_num_gpus": 8,
         "world_size": 8,
         "nemo_linear_backend": "torch",

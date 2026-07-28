@@ -163,7 +163,6 @@ run: | # shell
     --sglang-attention-backend fa3 \
     \
     --actor-num-gpus 2 \
-    --dp-replicate-size 2 \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --activation-checkpointing \
     --use-dynamic-batch-size \
