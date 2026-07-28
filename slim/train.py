@@ -40,7 +40,7 @@ def train(args):
         ray.get(rollout_manager.eval.remote(rollout_id=0))
 
     def save(rollout_id):
-        if (not args.use_critic) or (rollout_id >= args.lr_actor_start_step and not args.critic_train_only):
+        if not args.critic_train_only:
             actor_model.save_model(
                 rollout_id,
                 force_sync=rollout_id == args.num_rollout - 1,
@@ -65,22 +65,20 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            should_train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
+            train_actor = not args.critic_train_only
             if args.critic_colocate:
                 values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
                 ray.get(values_refs)
                 ray.get(critic_model.async_train(rollout_id, rollout_data_ref, values_refs))
-                if should_train_actor:
+                if train_actor:
                     ray.get(actor_model.compute_log_probs(rollout_id, rollout_data_ref))
                     ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
             else:
                 values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
-                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref) if should_train_actor else []
+                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref) if train_actor else []
                 ray.get(values_refs + logprobs_refs)  # wait for both to finish
                 critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
-                actor_train_handle = (
-                    actor_model.async_train(rollout_id, rollout_data_ref, values_refs) if should_train_actor else []
-                )
+                actor_train_handle = actor_model.async_train(rollout_id, rollout_data_ref, values_refs) if train_actor else []
                 ray.get(critic_train_handle + actor_train_handle)  # train both in parallel
         else:
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))

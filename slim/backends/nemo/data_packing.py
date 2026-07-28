@@ -5,11 +5,8 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 
-from slim.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slim.utils.types import Episode
 
 EDGE_FIELDS = frozenset(
@@ -69,30 +66,91 @@ def _optional_edge_field(episodes: list[Episode], indices: list[int], name: str,
     return torch.cat([_as_tensor(value, dtype=dtype) for value in values])
 
 
+def build_token_budget_partitions(
+    lengths: list[int],
+    max_tokens_per_pack: int,
+    *,
+    num_packs: int | None = None,
+) -> list[list[int]]:
+    """Partition sequences without exceeding the physical-pack token budget."""
+    if max_tokens_per_pack < 1:
+        raise ValueError("max_tokens_per_pack must be at least 1")
+    if not lengths:
+        return []
+    if any(length < 1 for length in lengths):
+        raise ValueError("sequence lengths must be at least 1")
+    oversized = [index for index, length in enumerate(lengths) if length > max_tokens_per_pack]
+    if oversized:
+        index = oversized[0]
+        raise ValueError(
+            f"sequence {index} has {lengths[index]} tokens, exceeding the physical-pack budget "
+            f"{max_tokens_per_pack}"
+        )
+
+    partitions: list[list[int]] = []
+    totals: list[int] = []
+    for index in sorted(range(len(lengths)), key=lambda item: (-lengths[item], item)):
+        for partition_index, total in enumerate(totals):
+            if total + lengths[index] <= max_tokens_per_pack:
+                partitions[partition_index].append(index)
+                totals[partition_index] += lengths[index]
+                break
+        else:
+            partitions.append([index])
+            totals.append(lengths[index])
+
+    if num_packs is None:
+        return partitions
+    if num_packs < len(partitions):
+        raise ValueError(
+            f"num_packs {num_packs} is below the minimum budget-safe pack count {len(partitions)}"
+        )
+    if num_packs > len(lengths):
+        raise ValueError(f"num_packs {num_packs} exceeds sequence count {len(lengths)}")
+
+    while len(partitions) < num_packs:
+        splittable = [index for index, partition in enumerate(partitions) if len(partition) > 1]
+        if not splittable:
+            raise RuntimeError(f"cannot split {len(partitions)} packs into {num_packs}")
+        partition_index = max(splittable, key=lambda index: totals[index])
+        partition = partitions[partition_index]
+        total = totals[partition_index]
+        split_position = min(
+            range(len(partition)),
+            key=lambda position: (
+                abs(total - 2 * lengths[partition[position]]),
+                partition[position],
+            ),
+        )
+        sequence_index = partition.pop(split_position)
+        totals[partition_index] -= lengths[sequence_index]
+        partitions.append([sequence_index])
+        totals.append(lengths[sequence_index])
+
+    return partitions
+
+
 def pack_sequences(
     episodes: list[Episode],
-    max_tokens_per_gpu: int | None = None,
-    num_packs: int | None = None,
+    partitions: list[list[int]] | None = None,
 ) -> list[dict]:
-    """Balance episodes into CPU-resident physical packs."""
+    """Build CPU-resident physical packs from explicit episode partitions."""
     if not episodes:
         return []
-    if num_packs is not None and num_packs < 1:
-        raise ValueError("num_packs must be at least 1")
-    if max_tokens_per_gpu is not None and max_tokens_per_gpu < 1:
-        raise ValueError("max_tokens_per_gpu must be at least 1")
 
     lengths = [len(episode.tokens) for episode in episodes]
     if any(length < 2 for length in lengths):
         raise ValueError("every training episode must contain at least two tokens")
-    if num_packs is not None:
-        partition_count = min(num_packs, len(episodes))
-    elif max_tokens_per_gpu is not None:
-        partition_count = min(len(episodes), max(1, math.ceil(sum(lengths) / max_tokens_per_gpu)))
+    if partitions is None:
+        partitions = [list(range(len(episodes)))]
     else:
-        partition_count = 1
+        partitions = [list(partition) for partition in partitions]
+        if not partitions or any(not partition for partition in partitions):
+            raise ValueError("partitions must contain one or more non-empty packs")
+        indices = [index for partition in partitions for index in partition]
+        if sorted(indices) != list(range(len(episodes))):
+            raise ValueError("partitions must contain every episode index exactly once")
 
-    partitions = get_seqlen_balanced_partitions(lengths, k_partitions=partition_count, equal_size=False)
     packs: list[dict] = []
     for indices in partitions:
         cu_seqlens = [0]
@@ -128,8 +186,7 @@ def pack_sequences(
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
             "edge_lengths": edge_lengths,
             "response_lengths": [episodes[index].response_length for index in indices],
-            "rewards": torch.tensor([episodes[index].reward for index in indices], dtype=torch.float32),
-            "raw_reward": [episodes[index].reward for index in indices],
+            "reward": [episodes[index].reward for index in indices],
             "_episode_indices": list(indices),
         }
 
@@ -299,4 +356,11 @@ def build_token_slot_fields(pack: dict) -> dict[str, torch.Tensor]:
         value = pack.get(name)
         if isinstance(value, torch.Tensor) and value.numel() > 0:
             fields[name] = edge_to_token_slots(value, pack["cu_seqlens"], fill=fill).unsqueeze(0)
+    for name, value in pack.get("_mismatch_metrics", {}).items():
+        if isinstance(value, torch.Tensor) and value.numel() > 0:
+            fields[f"mismatch/{name}"] = edge_to_token_slots(
+                value,
+                pack["cu_seqlens"],
+                fill=0,
+            ).unsqueeze(0)
     return fields

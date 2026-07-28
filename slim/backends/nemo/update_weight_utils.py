@@ -137,8 +137,8 @@ class UpdateWeightFromTensor(UpdateWeight):
     ) -> None:
         """Attach rollout engines and create per-engine IPC (Gloo) groups.
 
-        Sets the gather source rank, engine handle, and `tp_rank` within the
-        engine's local group.
+        Sets the gather source rank and engine handle within the engine's local
+        group.
         """
         self.rollout_engines = rollout_engines
         self._ipc_gather_group = None
@@ -176,7 +176,6 @@ class UpdateWeightFromTensor(UpdateWeight):
                 self._ipc_gather_src = start_rank
                 self._ipc_gather_group = new_group
                 self._ipc_engine = engine
-                self.tp_rank = dist.get_rank() - start_rank
 
         self._distributed_updater = None
         if distributed_engines:
@@ -244,7 +243,6 @@ class UpdateWeightFromDistributed(UpdateWeight):
     ) -> None:
         """On rank 0, initialize a temporary NCCL group for parameter broadcast."""
         self.rollout_engines = rollout_engines
-        self.rollout_engine_lock = rollout_engine_lock
 
         # For TP:
         #   1. AllGather parameters to rank 0

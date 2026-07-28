@@ -60,7 +60,6 @@ def test_topology_uses_automodel_default_mixed_precision(monkeypatch):
     topology = NeMoTopology(world_size=8, context_parallel_size=2)
     args = SimpleNamespace(
         activation_checkpointing=False,
-        gradient_checkpointing=False,
         nemo_cpu_offload=False,
         defer_fsdp_grad_sync=True,
         distributed_timeout_minutes=10,
@@ -73,3 +72,4 @@ def test_topology_uses_automodel_default_mixed_precision(monkeypatch):
     assert policy.output_dtype is torch.bfloat16
     assert policy.reduce_dtype is torch.float32
     assert policy.cast_forward_inputs is True
+    assert captured["strategy"].reshard_after_forward is True

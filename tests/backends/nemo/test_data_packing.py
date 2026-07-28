@@ -8,9 +8,12 @@ from slim.backends.nemo.data_packing import (
     build_document_ids,
     build_model_batch,
     build_source_labels,
+    build_token_budget_partitions,
+    build_token_slot_fields,
     edge_to_token_slots,
     pack_sequences,
     token_slots_to_edges,
+    unpack_sequences,
 )
 from slim.utils.types import Episode
 
@@ -50,6 +53,20 @@ def test_edge_token_slot_round_trip_preserves_trailing_dimensions():
 
 
 @pytest.mark.unit
+def test_custom_mismatch_metrics_are_built_as_token_slot_fields():
+    pack = {
+        "cu_seqlens": torch.tensor([0, 3, 5], dtype=torch.int32),
+        "_mismatch_metrics": {
+            "rs_keep": torch.tensor([1.0, 0.0, 0.5]),
+        },
+    }
+
+    fields = build_token_slot_fields(pack)
+
+    assert fields["mismatch/rs_keep"].tolist() == [[1.0, 0.0, 0.0, 0.5, 0.0]]
+
+
+@pytest.mark.unit
 def test_document_ids_include_zero_only_for_physical_padding():
     ids = build_document_ids(torch.tensor([0, 2, 5], dtype=torch.int32), total_length=7)
 
@@ -63,11 +80,12 @@ def test_pack_sequences_stays_on_cpu_and_emits_indexed_mask_for_multiple_documen
         _episode([4, 5], [1], reward=2.0),
     ]
 
-    pack = pack_sequences(episodes, num_packs=1)[0]
+    pack = pack_sequences(episodes)[0]
     batch = build_model_batch(pack)
 
     assert all(not value.is_cuda for value in pack.values() if isinstance(value, torch.Tensor))
     assert pack["edge_lengths"] == [2, 1]
+    assert [episode["reward"] for episode in unpack_sequences(pack)] == [1.0, 2.0]
     assert batch["input_ids"].shape == (1, 5)
     assert batch["_packed_seq_ids"].tolist() == [[1, 1, 1, 2, 2]]
     assert batch["labels"].tolist() == [[2, 3, -100, 5, -100]]
@@ -75,7 +93,7 @@ def test_pack_sequences_stays_on_cpu_and_emits_indexed_mask_for_multiple_documen
 
 @pytest.mark.unit
 def test_single_document_uses_the_same_indexed_batch_contract():
-    pack = pack_sequences([_episode([1, 2, 3], [1, 1])], num_packs=1)[0]
+    pack = pack_sequences([_episode([1, 2, 3], [1, 1])])[0]
 
     batch = build_model_batch(pack)
 
@@ -89,3 +107,14 @@ def test_pack_sequences_validates_every_edge_field():
 
     with pytest.raises(ValueError, match="loss_mask length"):
         pack_sequences([episode])
+
+
+@pytest.mark.unit
+def test_token_budget_partitions_remain_safe_when_pack_count_is_synchronized():
+    lengths = [2, 7, 7, 8, 8]
+
+    partitions = build_token_budget_partitions(lengths, 16, num_packs=3)
+
+    assert len(partitions) == 3
+    assert sorted(index for partition in partitions for index in partition) == list(range(len(lengths)))
+    assert all(sum(lengths[index] for index in partition) <= 16 for partition in partitions)

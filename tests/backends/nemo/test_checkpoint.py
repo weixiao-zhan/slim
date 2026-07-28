@@ -10,6 +10,7 @@ from slim.backends.nemo.checkpoint import (
     _initialize_missing_adamw_state,
     _save_consolidated_processor,
     build_checkpointer,
+    finalize_load,
     is_hf_checkpoint,
     resolve_checkpoint_dir,
 )
@@ -36,6 +37,34 @@ def test_hf_checkpoint_is_not_treated_as_training_resume(tmp_path):
 
     assert is_hf_checkpoint(tmp_path)
     assert resolve_checkpoint_dir(str(tmp_path), SimpleNamespace(ckpt_step=None)) is None
+
+
+@pytest.mark.unit
+def test_fresh_scheduler_resumes_from_optimizer_global_step(monkeypatch, tmp_path):
+    trainer = SimpleNamespace(
+        role="critic",
+        global_step=0,
+        lr_scheduler=SimpleNamespace(last_epoch=0),
+        args=SimpleNamespace(
+            no_load_rng=True,
+            no_load_lr_scheduler=True,
+            lr_scheduler_start_step=None,
+            start_rollout_id=0,
+        ),
+    )
+    payload = {
+        "checkpoint_dir": tmp_path,
+        "metadata": {"global_step": 12, "next_rollout_id": 4},
+        "iteration": 4,
+    }
+    monkeypatch.setattr("slim.backends.nemo.checkpoint.dist.barrier", lambda: None)
+    monkeypatch.setattr("slim.backends.nemo.checkpoint.torch.cuda.is_available", lambda: False)
+
+    finalize_load(trainer, payload)
+
+    assert trainer.global_step == 12
+    assert trainer.lr_scheduler.last_epoch == 12
+    assert trainer.args.start_rollout_id == 4
 
 
 @pytest.mark.unit

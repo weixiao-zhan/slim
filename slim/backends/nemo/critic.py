@@ -19,7 +19,7 @@ from .base import NeMoTrainer
 from .data_packing import init_dummy_advantages, token_slots_to_edges, unpack_sequences
 from .forward import model_forward, prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
-from .model import CriticModel, build_critic_model, build_optimizer
+from .model import CriticModel, build_critic_model, build_optimizer, final_hidden_state
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,6 @@ class CriticNeMoTrainer(NeMoTrainer):
         self.value_head = modules.value_head
         self._checkpoint_model = CriticModel(self.model, self.value_head)
 
-        steps_per_rollout = self._steps_per_rollout()
         backbone_parameters = [
             parameter for parameter in self.model.parameters() if parameter.requires_grad
         ]
@@ -63,12 +62,10 @@ class CriticNeMoTrainer(NeMoTrainer):
             {
                 "params": backbone_parameters,
                 "max_lr": self.args.lr_critic,
-                "start_step": self.args.lr_critic_start_step * steps_per_rollout,
             },
             {
                 "params": head_parameters,
                 "max_lr": self.args.lr_critic_value_head,
-                "start_step": self.args.lr_critic_value_head_start_step * steps_per_rollout,
             },
         ]
         self.optimizer = build_optimizer(
@@ -88,10 +85,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         model_batch["output_hidden_states"] = True
         model_batch["logits_to_keep"] = 1
         output = model_forward(self.model, model_batch)
-        hidden_states = getattr(output, "hidden_states", None)
-        if not hidden_states:
-            raise RuntimeError("Qwen3.5 critic backbone did not return hidden states")
-        return self.value_head(hidden_states[-1])
+        return self.value_head(final_hidden_state(output))
 
     def compute_values(self, rollout_id: int, rollout_data_ref: list) -> list[torch.Tensor]:
         del rollout_id

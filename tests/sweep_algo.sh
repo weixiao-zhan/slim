@@ -32,12 +32,11 @@ COMMON_ARGS="
     --sglang-page-size 64
     --rollout-colocate
 
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
     --old-logprob-source rollout
-    --optimizer adam
     --lr 1e-6
     --hf-checkpoint $MODEL_DIR
 "

@@ -5,36 +5,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-
-
-class _PackedCPModelMeshContext:
-    """Expose the training mesh while reserving CP for the packed runtime."""
-
-    def __init__(self, mesh_context) -> None:
-        self._mesh_context = mesh_context
-
-    def parallelize_axis_kwargs(self) -> dict[str, object]:
-        kwargs = self._mesh_context.parallelize_axis_kwargs()
-        kwargs["cp_axis_name"] = None
-        return kwargs
-
-    def __getattr__(self, name):
-        return getattr(self._mesh_context, name)
-
-
-def _model_distributed_setup(distributed_setup):
-    mesh_context = distributed_setup.mesh_context
-    axis_kwargs = mesh_context.parallelize_axis_kwargs()
-    if axis_kwargs["cp_axis_name"] is None or axis_kwargs["ep_axis_name"] is None:
-        return distributed_setup
-    return replace(
-        distributed_setup,
-        mesh_context=_PackedCPModelMeshContext(mesh_context),
-    )
+from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 
 
 def text_config(config):
@@ -91,7 +66,7 @@ def register_qwen3_5_moe_parallel_strategy() -> None:
         register_parallel_strategy(name=model_name)(Qwen3_5ParallelizationStrategy)
 
 
-def _use_demand_fsdp_unsharding(model: nn.Module) -> int:
+def _disable_fsdp_backward_prefetch(model: nn.Module) -> int:
     from torch.distributed.fsdp import FSDPModule
 
     count = 0
@@ -113,7 +88,7 @@ def build_policy_model(
 
     register_qwen3_5_moe_parallel_strategy()
     kwargs = {
-        "distributed_setup": _model_distributed_setup(distributed_setup),
+        "distributed_setup": distributed_setup,
         "backend": build_backend_config(args),
         "attn_implementation": "sdpa",
         "has_packed_sequence": True,
@@ -131,7 +106,7 @@ def build_policy_model(
     if routing_replay:
         kwargs["moe_overrides"] = {"enable_routing_replay": True}
     model = NeMoAutoModelForImageTextToText.from_pretrained(checkpoint, **kwargs)
-    _use_demand_fsdp_unsharding(model)
+    _disable_fsdp_backward_prefetch(model)
     from .packed_cp import install_qwen3_5_packed_cp
 
     install_qwen3_5_packed_cp(model, distributed_setup.mesh_context.device_mesh)
@@ -167,14 +142,20 @@ class ScalarValueHead(nn.Module):
         return self.proj(hidden_states.to(dtype=self.proj.weight.dtype)).squeeze(-1).float()
 
 
+def final_hidden_state(output) -> torch.Tensor:
+    """Normalize AutoModel dense and MoE final-hidden-state output contracts."""
+    final_state = get_final_hidden_states(output)
+    if final_state is None:
+        raise RuntimeError("Qwen3.5 critic backbone did not return final hidden states")
+    if not isinstance(final_state, torch.Tensor):
+        raise TypeError(f"expected final hidden state tensor, got {type(final_state).__name__}")
+    return final_state
+
+
 @dataclass
 class CriticModules:
     backbone: nn.Module
     value_head: nn.Module
-
-    @property
-    def parts(self) -> list[nn.Module]:
-        return [self.backbone, self.value_head]
 
 
 class CriticModel(nn.Module):
@@ -187,10 +168,7 @@ class CriticModel(nn.Module):
 
     def forward(self, **kwargs) -> torch.Tensor:
         output = self.backbone(logits_to_keep=1, output_hidden_states=True, **kwargs)
-        hidden_states = getattr(output, "hidden_states", None)
-        if not hidden_states:
-            raise RuntimeError("Qwen3.5 critic backbone did not return final hidden states")
-        return self.value_head(hidden_states[-1])
+        return self.value_head(final_hidden_state(output))
 
 
 def build_critic_model(args, checkpoint: str, distributed_setup) -> CriticModules:

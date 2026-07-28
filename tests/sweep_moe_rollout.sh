@@ -38,7 +38,7 @@ COMMON_ARGS="
     --rollout-colocate
 
     --actor-num-gpus 8
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
@@ -49,7 +49,6 @@ COMMON_ARGS="
     --eps-clip-high 4e-4
     --use-rollout-routing-replay
 
-    --optimizer adam
     --lr 1e-5
     --lr-warmup-iters 0
     --lr-decay-style constant

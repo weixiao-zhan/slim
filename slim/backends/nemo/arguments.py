@@ -9,14 +9,13 @@ import argparse
 import dataclasses
 from dataclasses import dataclass
 from types import UnionType
-from typing import get_args, get_origin, get_type_hints
+from typing import Literal, get_args, get_origin, get_type_hints
 
 import yaml
 
 
 @dataclass
 class NeMoArgs:
-    optimizer: str = "adam"
     lr: float = 2e-5
     lr_warmup_init: float = 0.0
     lr_min: float = 0.0
@@ -32,24 +31,19 @@ class NeMoArgs:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1e-8
-    warmup_ratio: float = 0.03
 
-    tensor_model_parallel_size: int = 1
-    pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     dp_replicate_size: int = 1
-    sequence_parallel: bool = False
 
-    nemo_linear_backend: str = "torch"
-    nemo_rms_norm_backend: str = "torch_fp32"
-    nemo_experts_backend: str = "torch_mm"
-    nemo_dispatcher: str = "torch"
+    nemo_linear_backend: Literal["torch", "te"] = "torch"
+    nemo_rms_norm_backend: Literal["torch", "torch_fp32", "te"] = "torch_fp32"
+    nemo_experts_backend: Literal["torch", "te", "gmm", "torch_mm"] = "torch_mm"
+    nemo_dispatcher: Literal["torch", "deepep", "hybridep", "uccl_ep"] = "torch"
     freeze_vision_tower: bool = True
     freeze_audio_tower: bool = True
     freeze_language_model: bool = False
     activation_checkpointing: bool = False
-    gradient_checkpointing: bool = False
     defer_fsdp_grad_sync: bool = False
     nemo_cpu_offload: bool = False
 
@@ -59,17 +53,18 @@ class NeMoArgs:
     no_load_rng: bool = False
 
     wandb_project: str = "slim-nemo"
-    wandb_run_name: str | None = None
-    deterministic_mode: bool = False
     config: str | None = None
 
 
 def _field_type(field: dataclasses.Field, type_hints: dict[str, object]):
     field_type = type_hints[field.name]
     origin = get_origin(field_type)
-    if origin in (UnionType,):
+    if origin is UnionType:
         members = [member for member in get_args(field_type) if member is not type(None)]
         return members[0] if members else str
+    if origin is Literal:
+        choices = get_args(field_type)
+        return type(choices[0]) if choices else str
     return field_type
 
 
@@ -85,7 +80,9 @@ def _parse_nemo_cli(extra_args_provider=None, ignore_unknown_args=False):
         if field_type is bool:
             parser.add_argument(flag, action=argparse.BooleanOptionalAction, default=field.default)
         else:
-            parser.add_argument(flag, type=field_type, default=field.default)
+            annotation = type_hints[field.name]
+            choices = get_args(annotation) if get_origin(annotation) is Literal else None
+            parser.add_argument(flag, type=field_type, choices=choices, default=field.default)
 
     if extra_args_provider is not None:
         parser = extra_args_provider(parser)
@@ -115,19 +112,21 @@ def nemo_parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
 
 def validate_args(args) -> None:
-    tp = args.tensor_model_parallel_size
-    pp = args.pipeline_model_parallel_size
+    type_hints = get_type_hints(NeMoArgs)
+    for field in dataclasses.fields(NeMoArgs):
+        annotation = type_hints[field.name]
+        if get_origin(annotation) is not Literal:
+            continue
+        choices = get_args(annotation)
+        value = getattr(args, field.name)
+        if value not in choices:
+            raise ValueError(f"{field.name} must be one of {choices}, got {value!r}")
+
     cp = args.context_parallel_size
     ep = args.expert_model_parallel_size
     dp_replicate = args.dp_replicate_size
     world_size = getattr(args, "actor_num_gpus", None) or getattr(args, "world_size", 0)
 
-    if tp != 1:
-        raise ValueError("tensor_model_parallel_size must be 1")
-    if pp != 1:
-        raise ValueError("pipeline_model_parallel_size must be 1")
-    if args.sequence_parallel:
-        raise ValueError("sequence_parallel is not supported; use context_parallel_size")
     for name, value in (
         ("context_parallel_size", cp),
         ("expert_model_parallel_size", ep),
@@ -140,15 +139,5 @@ def validate_args(args) -> None:
             f"world size {world_size} must be divisible by context_parallel_size * dp_replicate_size "
             f"({cp * dp_replicate})"
         )
-    if args.nemo_linear_backend != "torch":
-        raise ValueError("nemo_linear_backend must be torch")
-    if args.nemo_rms_norm_backend != "torch_fp32":
-        raise ValueError("nemo_rms_norm_backend must be torch_fp32")
-    if args.nemo_experts_backend != "torch_mm":
-        raise ValueError("nemo_experts_backend must be torch_mm")
-    if args.nemo_dispatcher != "torch":
-        raise ValueError("nemo_dispatcher must be torch")
-    if args.optimizer != "adam":
-        raise ValueError("optimizer must be adam")
     if args.checkpoint_save_consolidated not in ("false", "final", "every"):
         raise ValueError("checkpoint_save_consolidated must be false, final, or every")

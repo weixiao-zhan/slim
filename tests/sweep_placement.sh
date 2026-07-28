@@ -31,11 +31,10 @@ COMMON_ARGS="
     --sglang-mamba-scheduler-strategy extra_buffer
     --sglang-page-size 64
 
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
-    --optimizer adam
     --lr 1e-6
     --hf-checkpoint $MODEL_DIR
 "
@@ -47,10 +46,10 @@ GRPO_ARGS="--advantage-estimator grpo --disable-rewards-std-normalization"
 # combo -> "train_cmd|expect_actor|expect_critic|cluster_args"
 declare -A COMBOS
 COMBOS[default]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 2 --critic-num-gpus 2 --rollout-num-gpus 4"
-COMBOS[default_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 2 --critic-num-gpus 2 --rollout-num-gpus 4 --update-weights-interval 1"
+COMBOS[default_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 2 --critic-num-gpus 2 --rollout-num-gpus 4"
 COMBOS[colocate_rollout]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --rollout-colocate"
 COMBOS[colocate_critic]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4"
-COMBOS[colocate_critic_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4 --update-weights-interval 1"
+COMBOS[colocate_critic_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4"
 COMBOS[full_colocate]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-colocate"
 # HSDP control: 8 actor GPUs, replicated DP 4 and sharded DP 2, with colocated rollout.
 COMBOS[grpo_hsdp]="slim-train|1|0|$GRPO_ARGS --actor-num-gpus 8 --dp-replicate-size 4 --rollout-colocate"

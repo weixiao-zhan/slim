@@ -179,7 +179,6 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
     iteration = payload["iteration"]
     if metadata:
         trainer.global_step = int(metadata.get("global_step", trainer.global_step))
-        trainer.micro_step = int(metadata.get("micro_step", trainer.micro_step))
         next_rollout = metadata.get("next_rollout_id")
         if next_rollout is not None:
             trainer.args.start_rollout_id = int(next_rollout)
@@ -188,7 +187,7 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
 
     start_step = trainer.args.lr_scheduler_start_step
     if start_step is None and trainer.args.no_load_lr_scheduler:
-        start_step = iteration
+        start_step = trainer.global_step
     if start_step is not None:
         trainer.lr_scheduler.last_epoch = int(start_step)
         logger.info("LR scheduler last_epoch set to %d", start_step)
@@ -298,7 +297,6 @@ def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
                 "rollout_id": rollout_id,
                 "next_rollout_id": rollout_id + 1,
                 "global_step": trainer.global_step,
-                "micro_step": trainer.micro_step,
                 "world_size": dist.get_world_size(),
                 "timestamp": time.time(),
             },

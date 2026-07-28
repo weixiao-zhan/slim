@@ -46,7 +46,6 @@ def _arguments() -> argparse.Namespace:
 def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
     return SimpleNamespace(
         activation_checkpointing=activation_checkpointing,
-        gradient_checkpointing=False,
         nemo_cpu_offload=False,
         defer_fsdp_grad_sync=False,
         distributed_timeout_minutes=30,
@@ -78,8 +77,7 @@ def _pack(first_document: list[int]) -> dict:
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "edge_lengths": [first_end - 1, len(second_document) - 1],
         "response_lengths": [first_end - 1, len(second_document) - 1],
-        "rewards": torch.ones(2, dtype=torch.float32),
-        "raw_reward": [1.0, 1.0],
+        "reward": [1.0, 1.0],
         "_episode_indices": [0, 1],
     }
 
