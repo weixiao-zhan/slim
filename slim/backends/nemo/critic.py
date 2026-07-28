@@ -16,16 +16,18 @@ from slim.utils.ppo_utils import compute_value_loss
 from slim.utils.timer import timer
 
 from .base import NeMoTrainer
+from .checkpoint import is_hf_checkpoint
 from .data_packing import init_dummy_advantages, token_slots_to_edges, unpack_sequences
 from .forward import model_forward, prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
 from .model import CriticModel, build_critic_model, build_optimizer, final_hidden_state
+from .models import build_model
 
 logger = logging.getLogger(__name__)
 
 
 class CriticNeMoTrainer(NeMoTrainer):
-    """Train a scalar value head over a NeMo Qwen3.5 backbone."""
+    """Train a scalar value head over a NeMo AutoModel backbone."""
 
     _train_log_prefix = "train/critic"
 
@@ -34,8 +36,6 @@ class CriticNeMoTrainer(NeMoTrainer):
         return [self.model, self.value_head]
 
     def _resolve_checkpoint_paths(self) -> str:
-        from .checkpoint import is_hf_checkpoint
-
         self._checkpoint_load_dir = self.args.critic_load
         self._checkpoint_save_dir = self.args.critic_save
         if self.args.critic_load and is_hf_checkpoint(self.args.critic_load):
@@ -43,9 +43,15 @@ class CriticNeMoTrainer(NeMoTrainer):
         return self.args.hf_checkpoint
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
-        modules = build_critic_model(
+        backbone = build_model(
+            self.hf_config,
             self.args,
             checkpoint_path,
+            self.distributed_setup,
+            routing_replay=False,
+        )
+        modules = build_critic_model(
+            backbone,
             self.distributed_setup,
         )
         self.model = modules.backbone

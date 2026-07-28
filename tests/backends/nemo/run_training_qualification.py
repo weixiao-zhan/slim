@@ -16,6 +16,7 @@ from types import MethodType, SimpleNamespace
 import pynvml
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.moe.router_replay import RouterReplay
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 
@@ -33,7 +34,7 @@ from slim.backends.nemo.data_packing import (
 from slim.backends.nemo.forward import model_forward, prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
 from slim.backends.nemo.lr_scheduler import get_lr_scheduler
-from slim.backends.nemo.model import is_moe_config
+from slim.backends.nemo.models import validate_config
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.types import Episode
@@ -94,7 +95,6 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--heterogeneous-multimodal", action="store_true")
     parser.add_argument("--rollout-data", type=Path)
     parser.add_argument("--max-tokens-per-gpu", type=int, default=2048)
-    parser.add_argument("--nemo-cpu-offload", action="store_true")
     parser.add_argument(
         "--freeze-vision-tower",
         action=argparse.BooleanOptionalAction,
@@ -124,7 +124,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         custom_loss_function_path=None,
         defer_fsdp_grad_sync=False,
         distributed_timeout_minutes=30,
-        dp_replicate_size=1,
         entropy_coef=0.0,
         eps_clip=0.2,
         eps_clip_c=None,
@@ -154,7 +153,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr_wsd_decay_iters=None,
         lr_wsd_decay_style=None,
         mismatch_correction="none",
-        nemo_cpu_offload=cli.nemo_cpu_offload,
         nemo_dispatcher="torch",
         nemo_experts_backend="torch_mm",
         nemo_linear_backend="torch",
@@ -437,9 +435,10 @@ def _build_trainer(
     trainer.role = cli.role
     trainer.with_ref = cli.role == "actor" and cli.checkpoint_dir is not None
     trainer.global_step = 0
-    trainer.is_moe = is_moe_config(AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True))
+    trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)
+    validate_config(trainer.hf_config, trainer.topology)
     record("topology_built")
 
     backend_module = actor_module if cli.role == "actor" else critic_module
@@ -525,13 +524,12 @@ def _optimizer_digest(optimizer: torch.optim.Optimizer) -> list[tuple[int, str, 
 
 def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.Tensor, int]:
     prepared = prepare_forward(trainer.model, trainer.device_mesh, pack, padding_token_id=0)
-    replay_count = len(trainer.router_replay.instances)
+    replay_count = len(RouterReplay.instances())
     if replay_count:
-        with trainer.router_replay.activate() as replay_type:
-            with torch.no_grad(), replay_type.record(), prepared.context_factory():
-                output = model_forward(trainer.model, prepared.model_batch)
-                local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
-            recorded = replay_type.collect()
+        with torch.no_grad(), RouterReplay.record(), prepared.context_factory():
+            output = model_forward(trainer.model, prepared.model_batch)
+            local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
+        recorded = RouterReplay.collect()
         local_routes = torch.stack(recorded, dim=1).unsqueeze(0)
         full_routes = prepared.gather(local_routes, fill=0)
         pack["rollout_routed_experts"] = token_slots_to_edges(
@@ -554,9 +552,10 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
     return full_log_probs.detach().cpu(), replay_count
 
 
-def _install_replay_counters(trainer: ActorNeMoTrainer) -> list[int]:
-    counts = [0] * len(trainer.router_replay.instances)
-    for index, handle in enumerate(trainer.router_replay.instances):
+def _install_replay_counters() -> list[int]:
+    instances = RouterReplay.instances()
+    counts = [0] * len(instances)
+    for index, handle in enumerate(instances):
         original = handle.apply
 
         def counted(self, indices, *, _index=index, _original=original):
@@ -573,7 +572,7 @@ def _install_replay_counters(trainer: ActorNeMoTrainer) -> list[int]:
 def _train_actor(trainer: ActorNeMoTrainer, packs: list[dict]) -> tuple[dict, float, list[int]]:
     for pack in packs:
         _record_actor_inputs(trainer, pack)
-    replay_counts = _install_replay_counters(trainer)
+    replay_counts = _install_replay_counters()
     trainer.optimizer.zero_grad(set_to_none=True)
     global_sequences, global_tokens = count_global_denominators(
         packs,
@@ -833,7 +832,7 @@ def main() -> None:
     modality_layout = _validate_modality_layout(trainer, uses_vision, packs) if cli.heterogeneous_multimodal else []
     vision_forward_counter = _install_vision_forward_counter(trainer) if cli.heterogeneous_multimodal else None
     vision_before = _local_parameter_snapshot(trainer.model, "visual.patch_embed.proj.weight") if cli.heterogeneous_multimodal else None
-    tracked_parameter = _local_parameter if cli.nemo_cpu_offload else _full_parameter
+    tracked_parameter = _full_parameter
     if cli.role == "actor":
         tracked_suffix = "linear_attn.norm.weight"
         tracked_name, tracked_before = tracked_parameter(trainer.model, tracked_suffix)
@@ -844,7 +843,7 @@ def main() -> None:
         if cli.routing_replay:
             if not replay_counts or min(replay_counts) < 2:
                 raise RuntimeError(f"routing replay did not remain active through activation-checkpoint recomputation: minimum calls per layer={min(replay_counts, default=0)}")
-            if any(handle.target_indices is not None for handle in trainer.router_replay.instances):
+            if any(handle.target_indices is not None for handle in RouterReplay.instances()):
                 raise RuntimeError("routing replay targets were not cleared after backward")
     else:
         if len(packs) != 1:

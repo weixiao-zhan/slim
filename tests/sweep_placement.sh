@@ -2,8 +2,8 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Placement sweep: exercise every (rollout_colocate, critic_colocate) combo plus
-# an HSDP control on a single 8-GPU node, on the small mixed (math+vision) dataset.
+# Placement sweep: exercise every (rollout_colocate, critic_colocate) combo on
+# the small mixed (math+vision) dataset.
 #
 # Usage:  bash tests/sweep_placement.sh [combo_name ...]
 #   With no args, runs every combo. With args, runs only the named combos.
@@ -41,7 +41,6 @@ COMMON_ARGS="
 
 # Single-line: these are embedded in COMBOS specs split by `read`, which stops at newlines.
 PPO_ARGS="--advantage-estimator ppo_gae --value-clip 0.2 --eps-clip 0.2 --eps-clip-high 0.28 --lr-critic 5e-5"
-GRPO_ARGS="--advantage-estimator grpo --disable-rewards-std-normalization"
 
 # combo -> "train_cmd|expect_actor|expect_critic|cluster_args"
 declare -A COMBOS
@@ -51,10 +50,8 @@ COMBOS[colocate_rollout]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-n
 COMBOS[colocate_critic]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4"
 COMBOS[colocate_critic_async]="slim-train-async|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-num-gpus 4"
 COMBOS[full_colocate]="slim-train|1|1|$PPO_ARGS --actor-num-gpus 4 --critic-num-gpus 4 --critic-colocate --rollout-colocate"
-# HSDP control: 8 actor GPUs, replicated DP 4 and sharded DP 2, with colocated rollout.
-COMBOS[grpo_hsdp]="slim-train|1|0|$GRPO_ARGS --actor-num-gpus 8 --dp-replicate-size 4 --rollout-colocate"
 
-ORDER=(default default_async colocate_rollout colocate_critic colocate_critic_async full_colocate grpo_hsdp)
+ORDER=(default default_async colocate_rollout colocate_critic colocate_critic_async full_colocate)
 
 # Allow running a subset by name.
 if [[ $# -gt 0 ]]; then

@@ -12,6 +12,7 @@ import random
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.moe.router_replay import RouterReplay
 from tqdm import tqdm
 
 from slim.utils.data import process_rollout_data
@@ -23,6 +24,7 @@ from slim.utils.quant import Quantizer
 from slim.utils.timer import Timer, timer
 
 from .base import NeMoTrainer, _move_module
+from .checkpoint import is_hf_checkpoint
 from .data_packing import (
     EDGE_FIELDS,
     init_dummy_advantages,
@@ -38,8 +40,9 @@ from .loss import (
     selective_log_probs,
     sequence_mean_at_tokens,
 )
-from .model import build_optimizer, build_policy_model
-from .routing_replay import RouterReplayRegistry
+from .model import build_optimizer
+from .models import build_model
+from .routing_replay import replay_router_targets
 from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTensor
 
 logger = logging.getLogger(__name__)
@@ -51,8 +54,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     _train_log_prefix = "train/actor"
 
     def _resolve_checkpoint_paths(self) -> str:
-        from .checkpoint import is_hf_checkpoint
-
         self._checkpoint_load_dir = self.args.load
         self._checkpoint_save_dir = self.args.save
         if self.args.load and is_hf_checkpoint(self.args.load):
@@ -60,18 +61,14 @@ class ActorNeMoTrainer(NeMoTrainer):
         return self.args.hf_checkpoint
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
-        if self.args.use_rollout_routing_replay and not self.is_moe:
-            raise ValueError("rollout routing replay requires Qwen3.5 MoE")
-
-        routing_replay = self.is_moe and self.args.use_rollout_routing_replay
-        RouterReplayRegistry.begin_model_build()
-        self.model = build_policy_model(
+        RouterReplay.clear_registry()
+        self.model = build_model(
+            self.hf_config,
             self.args,
             checkpoint_path,
             self.distributed_setup,
-            routing_replay=routing_replay,
+            routing_replay=self.args.use_rollout_routing_replay,
         )
-        self.router_replay = RouterReplayRegistry.finish_model_build()
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         self.optimizer = build_optimizer(
             self.args,
@@ -85,14 +82,12 @@ class ActorNeMoTrainer(NeMoTrainer):
         if not os.path.isdir(checkpoint_path):
             raise ValueError(f"reference checkpoint must be a local directory: {checkpoint_path}")
 
-        actor_was_moved = False
-        if not self.args.nemo_cpu_offload:
-            _move_module(self.model, "cpu")
-            clear_memory()
-            dist.barrier(group=get_gloo_group())
-            actor_was_moved = True
+        _move_module(self.model, "cpu")
+        clear_memory()
+        dist.barrier(group=get_gloo_group())
 
-        ref_model = build_policy_model(
+        ref_model = build_model(
+            self.hf_config,
             self.args,
             checkpoint_path,
             self.distributed_setup,
@@ -100,11 +95,9 @@ class ActorNeMoTrainer(NeMoTrainer):
         )
         ref_model.eval()
         ref_model.requires_grad_(False)
-        if not self.args.nemo_cpu_offload:
-            _move_module(ref_model, "cpu")
-            if actor_was_moved:
-                _move_module(self.model, torch.device("cuda", torch.cuda.current_device()))
-            dist.barrier(group=get_gloo_group())
+        _move_module(ref_model, "cpu")
+        _move_module(self.model, torch.device("cuda", torch.cuda.current_device()))
+        dist.barrier(group=get_gloo_group())
         return ref_model
 
     def _post_model_setup(self) -> None:
@@ -140,7 +133,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         if active_model is None:
             raise RuntimeError("reference log probabilities requested without a reference model")
 
-        swapped = is_reference and not self.args.nemo_cpu_offload
+        swapped = is_reference
         if swapped:
             _move_module(self.model, "cpu")
             clear_memory()
@@ -161,7 +154,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                     )
                     replay_enabled = not is_reference and self.args.use_rollout_routing_replay
                     targets = self._routing_targets(prepared, required=replay_enabled)
-                    with prepared.context_factory(), self.router_replay.replay(targets if replay_enabled else None):
+                    with prepared.context_factory(), replay_router_targets(targets if replay_enabled else None):
                         output = model_forward(active_model, prepared.model_batch)
                         local_log_probs = selective_log_probs(
                             output.logits,
@@ -451,7 +444,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         with (
             self._sync_context(is_final),
             prepared.context_factory(),
-            self.router_replay.replay(targets if replay_enabled else None),
+            replay_router_targets(targets if replay_enabled else None),
         ):
             output = model_forward(self.model, prepared.model_batch)
             if self.args.loss_type == "custom_loss":

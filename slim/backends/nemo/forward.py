@@ -8,9 +8,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
 
 from .data_packing import build_model_batch, build_token_slot_fields
-from .packed_cp import build_packed_cp_sharder, build_packed_position_ids
+from .models import build_packed_position_ids
+from .packed_cp import build_packed_cp_sharder
 
 
 def move_to_device(value, device):
@@ -58,6 +60,4 @@ def prepare_forward(
 
 
 def model_forward(model, model_batch: dict):
-    from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
-
     return model(**filter_forward_kwargs(model, model_batch))

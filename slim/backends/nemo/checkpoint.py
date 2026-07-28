@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.checkpoint.config import CheckpointingConfig
+from nemo_automodel.components.checkpoint.stateful_wrappers import ModelState
 
 logger = logging.getLogger(__name__)
 _ITERATION_DIR_PATTERN = re.compile(r"iter_(\d+)$")
@@ -88,8 +90,6 @@ def _checkpoint_root(trainer: Any) -> str:
 
 def build_checkpointer(trainer: Any):
     """Build the pinned AutoModel checkpointer for a trainer."""
-    from nemo_automodel.components.checkpoint.config import CheckpointingConfig
-
     is_actor = trainer.role == "actor"
     config = CheckpointingConfig(
         checkpoint_dir=_checkpoint_root(trainer),
@@ -102,7 +102,7 @@ def build_checkpointer(trainer: Any):
     )
     process_group = getattr(trainer.mesh_context, "process_group", None)
     return config.build(
-        dp_rank=trainer.dp_cp_rank,
+        dp_rank=dist.get_rank(),
         tp_rank=0,
         pp_rank=0,
         moe_mesh=trainer.moe_mesh,
@@ -111,7 +111,7 @@ def build_checkpointer(trainer: Any):
 
 
 def _has_rank_state(trainer: Any, checkpoint_dir: Path, state_name: str) -> bool:
-    path = checkpoint_dir / state_name / f"{state_name}_dp_rank_{trainer.dp_cp_rank}.pt"
+    path = checkpoint_dir / state_name / f"{state_name}_dp_rank_{dist.get_rank()}.pt"
     return path.exists()
 
 
@@ -164,8 +164,6 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
         and trainer.ref_model is not None
         and (checkpoint_dir / "reference").exists()
     ):
-        from nemo_automodel.components.checkpoint.stateful_wrappers import ModelState
-
         trainer.checkpointer.load_distributed_state(
             ModelState(trainer.ref_model),
             "reference",
@@ -280,8 +278,6 @@ def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
         )
 
     if trainer.role == "actor" and trainer.ref_model is not None:
-        from nemo_automodel.components.checkpoint.stateful_wrappers import ModelState
-
         trainer.checkpointer.save_distributed_state(
             ModelState(trainer.ref_model),
             "reference",

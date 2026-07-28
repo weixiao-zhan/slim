@@ -7,6 +7,7 @@ import ray
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from slim.backends.nemo import ActorNeMoTrainer, CriticNeMoTrainer
 from slim.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 from slim.utils.env_utils import get_nvidia_ld_library_path
 
@@ -61,11 +62,6 @@ class RayTrainGroup:
             **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }
-
-        # Imported here, where the Ray actor is built, rather than at module top:
-        # the driver imports this module only to call .remote(), and does not run
-        # the NeMo backend itself.
-        from slim.backends.nemo import CriticNeMoTrainer, ActorNeMoTrainer
 
         trainer_cls = CriticNeMoTrainer if self.role == "critic" else ActorNeMoTrainer
         TrainerActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(trainer_cls)

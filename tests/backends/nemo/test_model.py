@@ -6,15 +6,25 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from slim.backends.nemo.model import (
+from slim.backends.nemo.model import final_hidden_state
+from slim.backends.nemo.models.qwen3_5 import (
     _disable_fsdp_backward_prefetch,
-    build_policy_model,
-    final_hidden_state,
+    build_model,
     register_qwen3_5_moe_parallel_strategy,
+    validate_config,
 )
 
 
 NUM_GPUS = 0
+
+
+@pytest.mark.unit
+def test_qwen3_5_validation_rejects_unsupported_models():
+    with pytest.raises(ValueError, match="does not support"):
+        validate_config(
+            SimpleNamespace(model_type="unsupported"),
+            SimpleNamespace(expert_model_parallel_size=1),
+        )
 
 
 @pytest.mark.unit
@@ -36,12 +46,12 @@ def test_policy_model_disables_fsdp_backward_prefetch(monkeypatch):
         def set_modules_to_backward_prefetch(self, modules):
             calls.append(modules)
 
-    monkeypatch.setattr("torch.distributed.fsdp.FSDPModule", FakeFSDPModule)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.FSDPModule", FakeFSDPModule)
     first = FakeFSDPModule()
     second = FakeFSDPModule()
     model = nn.Sequential(first, second)
 
-    assert _disable_fsdp_backward_prefetch(model) == 2
+    _disable_fsdp_backward_prefetch(model)
     assert calls == [[first], [second]]
 
 
@@ -80,9 +90,12 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
     from nemo_automodel import NeMoAutoModelForImageTextToText
 
     monkeypatch.setattr(NeMoAutoModelForImageTextToText, "from_pretrained", fake_from_pretrained)
-    monkeypatch.setattr("slim.backends.nemo.model.build_backend_config", fake_backend_config)
-    monkeypatch.setattr("slim.backends.nemo.model._disable_fsdp_backward_prefetch", lambda model: 0)
-    monkeypatch.setattr("slim.backends.nemo.packed_cp.install_qwen3_5_packed_cp", lambda *args: None)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.build_backend_config", fake_backend_config)
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.qwen3_5._disable_fsdp_backward_prefetch",
+        lambda model: 0,
+    )
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.install_packed_cp", lambda *args: None)
 
     args = SimpleNamespace(
         freeze_vision_tower=True,
@@ -98,7 +111,8 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
             },
         ),
     )
-    result = build_policy_model(
+    result = build_model(
+        SimpleNamespace(model_type="qwen3_5_moe"),
         args,
         "/models/qwen3.5",
         distributed_setup=distributed_setup,

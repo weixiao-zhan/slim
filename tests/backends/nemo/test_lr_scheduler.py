@@ -47,10 +47,15 @@ def test_critic_uses_independent_backbone_and_value_head_lrs(monkeypatch):
     )
     trainer.distributed_setup = object()
     trainer.device_mesh = object()
+    trainer.hf_config = object()
     backbone = torch.nn.Linear(4, 4, bias=False)
     value_head = torch.nn.Linear(4, 1, bias=False)
     captured = {}
 
+    monkeypatch.setattr(
+        "slim.backends.nemo.critic.build_model",
+        lambda *_args, **_kwargs: backbone,
+    )
     monkeypatch.setattr(
         "slim.backends.nemo.critic.build_critic_model",
         lambda *_args: CriticModules(backbone=backbone, value_head=value_head),

@@ -70,10 +70,6 @@ do
     if [[ -n "$ONLY_CASE" && "$case_name" != "$ONLY_CASE" ]]; then
         continue
     fi
-    offload_args=""
-    if [[ "$ep_size" == "1" ]]; then
-        offload_args="--nemo-cpu-offload"
-    fi
     start_ray
     run_train_wait "
         --load-debug-rollout-data $ROLLOUT_DATA
@@ -89,7 +85,6 @@ do
         --actor-num-gpus 8
         --context-parallel-size $cp_size
         --expert-model-parallel-size $ep_size
-        $offload_args
         --activation-checkpointing
         --use-dynamic-batch-size
         --max-tokens-per-gpu $MAX_TOKENS_PER_GPU

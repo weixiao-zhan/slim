@@ -9,16 +9,18 @@ import torch
 import torch.nn as nn
 
 from slim.backends.nemo.base import NeMoTrainer
-from slim.backends.nemo.packed_cp import (
+from slim.backends.nemo.models.qwen3_5 import (
     _dummy_visual_inputs,
     _global_media_presence,
     _install_attention_dispatch,
     _install_moe_cp,
     _install_primary_shard,
     _vision_sync_group,
-    build_packed_cp_sharder,
     build_packed_position_ids,
-    install_qwen3_5_packed_cp,
+    install_packed_cp,
+)
+from slim.backends.nemo.packed_cp import (
+    build_packed_cp_sharder,
     make_packed_cp_batch_and_ctx,
 )
 from slim.utils.types import Episode
@@ -114,7 +116,7 @@ def test_vision_sync_uses_flat_dp_shard_cp_group(monkeypatch):
         calls.append((mesh, name))
         return flat_dp_shard_cp_mesh
 
-    monkeypatch.setattr("slim.backends.nemo.packed_cp.flat_mesh", fake_flat_mesh)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.flat_mesh", fake_flat_mesh)
 
     assert _vision_sync_group(device_mesh) is group
     assert calls == [(device_mesh, "dp_shard_cp")]
@@ -141,14 +143,12 @@ def test_dummy_visual_inputs_form_one_merged_token():
 
 @pytest.mark.unit
 def test_packed_runtime_attaches_cp_mesh_to_moe_routers(monkeypatch):
-    import nemo_automodel.components.moe.layers as moe_layers
-
     class FakeMoE(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.cp_mesh = None
 
-    monkeypatch.setattr(moe_layers, "MoE", FakeMoE)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.MoE", FakeMoE)
     model = torch.nn.Sequential(FakeMoE())
     cp_mesh = object()
 
@@ -159,23 +159,28 @@ def test_packed_runtime_attaches_cp_mesh_to_moe_routers(monkeypatch):
 
 @pytest.mark.unit
 def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
-    import nemo_automodel.components.distributed.blockdiag_cp as blockdiag_cp
-
     calls = []
     model = nn.Module()
     model.backend = SimpleNamespace(attn="sdpa")
-    cp_mesh = object()
+    model.config = SimpleNamespace(model_type="qwen3_5")
+    cp_mesh = SimpleNamespace(size=lambda: 1)
     device_mesh = {"cp": cp_mesh}
 
-    monkeypatch.setattr(blockdiag_cp, "configure_cp_varlen", lambda **kwargs: calls.append(kwargs))
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._vision_sync_group", lambda mesh: object())
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_attention_dispatch", lambda model: None)
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_gdn_dispatch", lambda model, mesh: None)
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_moe_cp", lambda model, mesh: None)
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_synchronized_vision", lambda model, group: None)
-    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_primary_shard", lambda model, mesh: None)
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.qwen3_5.configure_cp_varlen",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._vision_sync_group", lambda mesh: object())
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_attention_dispatch", lambda model: None)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_gdn_dispatch", lambda model, mesh: None)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_moe_cp", lambda model, mesh: None)
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.qwen3_5._install_synchronized_vision",
+        lambda model, group: None,
+    )
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_primary_shard", lambda model, mesh: None)
 
-    install_qwen3_5_packed_cp(model, device_mesh)
+    install_packed_cp(model, device_mesh)
 
     assert calls == [{"attn_backend": "flash", "kv_exchange": "halo"}]
     assert model.cp_mesh is cp_mesh
@@ -316,7 +321,6 @@ def test_image_grid_hws_is_promoted_for_positions_and_forward():
 
 @pytest.mark.unit
 def test_dense_attention_dispatches_to_block_diagonal_runtime(monkeypatch):
-    from nemo_automodel.components.distributed import blockdiag_cp
     from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
 
     attention = Qwen3NextAttention.__new__(Qwen3NextAttention)
@@ -327,8 +331,14 @@ def test_dense_attention_dispatches_to_block_diagonal_runtime(monkeypatch):
     model.add_module("self_attn", attention)
     _install_attention_dispatch(model)
 
-    monkeypatch.setattr(blockdiag_cp, "current_blockdiag_cp_state", lambda: object())
-    monkeypatch.setattr(blockdiag_cp, "cp_blockdiag_sdpa", lambda *args, **kwargs: "packed")
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.qwen3_5.current_blockdiag_cp_state",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.qwen3_5.cp_blockdiag_sdpa",
+        lambda *args, **kwargs: "packed",
+    )
 
     tensor = torch.zeros(1)
     assert attention.attn_func(tensor, tensor, tensor) == "packed"
@@ -437,8 +447,7 @@ def test_cp1_uses_padded_block_diagonal_state(monkeypatch):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("is_moe", [False, True])
-def test_dense_and_moe_use_the_same_physical_pack_count(monkeypatch, is_moe):
+def test_physical_pack_count_is_model_independent(monkeypatch):
     trainer = NeMoTrainer.__new__(NeMoTrainer)
     trainer.args = Namespace(
         global_batch_size=4,
@@ -447,7 +456,6 @@ def test_dense_and_moe_use_the_same_physical_pack_count(monkeypatch, is_moe):
     )
     trainer.dp_size = 1
     trainer.dp_group = object()
-    trainer.is_moe = is_moe
     monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
 

@@ -18,10 +18,8 @@ def test_topology_derives_logical_data_parallel_size():
         world_size=16,
         context_parallel_size=2,
         expert_model_parallel_size=4,
-        dp_replicate_size=2,
     )
 
-    assert topology.dp_shard_size == 4
     assert topology.logical_dp_size == 8
 
 
@@ -60,7 +58,6 @@ def test_topology_uses_automodel_default_mixed_precision(monkeypatch):
     topology = NeMoTopology(world_size=8, context_parallel_size=2)
     args = SimpleNamespace(
         activation_checkpointing=False,
-        nemo_cpu_offload=False,
         defer_fsdp_grad_sync=True,
         distributed_timeout_minutes=10,
     )
@@ -73,3 +70,4 @@ def test_topology_uses_automodel_default_mixed_precision(monkeypatch):
     assert policy.reduce_dtype is torch.float32
     assert policy.cast_forward_inputs is True
     assert captured["strategy"].reshard_after_forward is True
+    assert captured["parallelism_sizes"].dp_replicate_size == 1

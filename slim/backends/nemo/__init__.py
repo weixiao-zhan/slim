@@ -3,7 +3,10 @@
 
 """NeMo AutoModel training backend."""
 
-from importlib import import_module
+from .actor import ActorNeMoTrainer
+from .arguments import nemo_parse_args, validate_args
+from .base import NeMoTrainer
+from .critic import CriticNeMoTrainer
 
 __all__ = [
     "ActorNeMoTrainer",
@@ -12,21 +15,3 @@ __all__ = [
     "nemo_parse_args",
     "validate_args",
 ]
-
-_EXPORTS = {
-    "ActorNeMoTrainer": (".actor", "ActorNeMoTrainer"),
-    "CriticNeMoTrainer": (".critic", "CriticNeMoTrainer"),
-    "NeMoTrainer": (".base", "NeMoTrainer"),
-    "nemo_parse_args": (".arguments", "nemo_parse_args"),
-    "validate_args": (".arguments", "validate_args"),
-}
-
-
-def __getattr__(name):
-    try:
-        module_name, attribute_name = _EXPORTS[name]
-    except KeyError as error:
-        raise AttributeError(name) from error
-    value = getattr(import_module(module_name, __name__), attribute_name)
-    globals()[name] = value
-    return value

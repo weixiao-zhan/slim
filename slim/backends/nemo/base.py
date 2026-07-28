@@ -17,6 +17,15 @@ from itertools import accumulate
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.distributed.utils import get_sync_ctx
+from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler
+from nemo_automodel.components.training.utils import (
+    get_expert_tp_replication_factor,
+    prepare_after_first_microbatch,
+    prepare_for_final_backward,
+    prepare_for_grad_accumulation,
+    scale_grads_and_clip_grad_norm,
+)
 from transformers import AutoConfig
 
 import slim.utils.eval_config
@@ -39,10 +48,9 @@ from .data_packing import (
     unpack_sequences,
     update_packed_advantages,
 )
-from .grad_clip import clip_cpu_offloaded_grad_norm
 from .lr_scheduler import get_lr_scheduler
-from .model import is_moe_config, validate_model_config
-from .topology import NeMoTopology, flat_mesh, mesh_rank
+from .models import validate_config
+from .topology import NeMoTopology, mesh_rank
 
 logger = logging.getLogger(__name__)
 
@@ -107,18 +115,15 @@ class NeMoTrainer(RayWorker):
         self.mesh_context.process_group = get_gloo_group()
         self.device_mesh = self.mesh_context.device_mesh
         self.moe_mesh = self.mesh_context.moe_mesh
-        self.dp_mesh = flat_mesh(self.device_mesh, "dp")
-        self.dp_cp_mesh = flat_mesh(self.device_mesh, "dp_cp")
+        self.dp_mesh = self.device_mesh["dp_shard"]
         self.cp_mesh = self.device_mesh["cp"]
         self.dp_group = self.dp_mesh.get_group()
-        self.dp_cp_group = self.dp_cp_mesh.get_group()
         self.cp_group = self.cp_mesh.get_group()
         self.dp_size = self.dp_mesh.size()
         self.dp_rank = mesh_rank(self.dp_mesh)
-        self.dp_cp_rank = mesh_rank(self.dp_cp_mesh)
         self.cp_size = self.cp_mesh.size()
         self.cp_rank = mesh_rank(self.cp_mesh)
-        self.backward_group_size = self.dp_cp_mesh.size()
+        self.backward_group_size = dist.get_world_size()
         logger.info(
             "NeMo topology rank=%d world=%d logical_dp=%d dp_rank=%d cp=%d cp_rank=%d ep=%d",
             dist.get_rank(),
@@ -143,7 +148,7 @@ class NeMoTrainer(RayWorker):
         if args.debug_rollout_only:
             return 0
 
-        self._need_offload = (args.rollout_colocate or args.critic_colocate) and not args.nemo_cpu_offload
+        self._need_offload = args.rollout_colocate or args.critic_colocate
         if dist.get_rank() == 0:
             init_tracking(args, primary=False, disable_stats=True)
         if args.start_rollout_id is None:
@@ -160,8 +165,7 @@ class NeMoTrainer(RayWorker):
                     self.processor = load_processor(model_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
-        validate_model_config(self.hf_config, self.topology)
-        self.is_moe = is_moe_config(self.hf_config)
+        validate_config(self.hf_config, self.topology)
         self.global_step = 0
         self._create_model_and_optimizer(model_checkpoint)
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
@@ -374,9 +378,6 @@ class NeMoTrainer(RayWorker):
             episode._values = values[index].tolist()
 
     def _begin_gradient_accumulation(self) -> None:
-        from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler
-        from nemo_automodel.components.training.utils import prepare_for_grad_accumulation
-
         prepare_for_grad_accumulation(self.model_parts, pp_enabled=False)
         MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
             float(self.backward_group_size),
@@ -384,19 +385,13 @@ class NeMoTrainer(RayWorker):
         )
 
     def _prepare_final_backward(self) -> None:
-        from nemo_automodel.components.training.utils import prepare_for_final_backward
-
         prepare_for_final_backward(self.model_parts, pp_enabled=False)
 
     def _after_first_microbatch(self) -> None:
-        from nemo_automodel.components.training.utils import prepare_after_first_microbatch
-
         prepare_after_first_microbatch()
 
     @contextlib.contextmanager
     def _sync_context(self, is_final_microbatch: bool):
-        from nemo_automodel.components.distributed.utils import get_sync_ctx
-
         with ExitStack() as stack:
             for model_part in self.model_parts:
                 stack.enter_context(
@@ -409,18 +404,12 @@ class NeMoTrainer(RayWorker):
             yield
 
     def _optimizer_step(self) -> float:
-        from nemo_automodel.components.training.utils import (
-            get_expert_tp_replication_factor,
-            scale_grads_and_clip_grad_norm,
-        )
-
         self.checkpointer.maybe_wait_for_staging()
         ep_axis_name = None
         if self.moe_mesh is not None and "ep" in self.moe_mesh.mesh_dim_names:
             ep_axis_name = "ep"
-        max_grad_norm = None if self.args.nemo_cpu_offload else self.args.clip_grad
         grad_norm = scale_grads_and_clip_grad_norm(
-            max_grad_norm,
+            self.args.clip_grad,
             self.model_parts,
             norm_type=2.0,
             pp_enabled=False,
@@ -432,11 +421,6 @@ class NeMoTrainer(RayWorker):
             dp_group_size=self.backward_group_size,
             expert_tp_replication_factor=get_expert_tp_replication_factor(self.model_parts, self.device_mesh),
         )
-        if self.args.nemo_cpu_offload:
-            grad_norm = clip_cpu_offloaded_grad_norm(
-                (parameter for model_part in self.model_parts for parameter in model_part.parameters()),
-                self.args.clip_grad,
-            )
         self.optimizer.step()
         self.lr_scheduler.step()
         self.optimizer.zero_grad(set_to_none=True)
@@ -450,7 +434,7 @@ class NeMoTrainer(RayWorker):
         reduced = {}
         for key, value in metrics.items():
             tensor = value.detach().float().clone()
-            dist.all_reduce(tensor, group=self.dp_cp_group)
+            dist.all_reduce(tensor)
             reduced[key] = tensor.item()
         return reduced
 

@@ -34,7 +34,6 @@ class NeMoArgs:
 
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
-    dp_replicate_size: int = 1
 
     nemo_linear_backend: Literal["torch", "te"] = "torch"
     nemo_rms_norm_backend: Literal["torch", "torch_fp32", "te"] = "torch_fp32"
@@ -45,7 +44,6 @@ class NeMoArgs:
     freeze_language_model: bool = False
     activation_checkpointing: bool = False
     defer_fsdp_grad_sync: bool = False
-    nemo_cpu_offload: bool = False
 
     checkpoint_save_consolidated: str = "final"
     checkpoint_cpu_offload: bool = False
@@ -124,20 +122,19 @@ def validate_args(args) -> None:
 
     cp = args.context_parallel_size
     ep = args.expert_model_parallel_size
-    dp_replicate = args.dp_replicate_size
     world_size = getattr(args, "actor_num_gpus", None) or getattr(args, "world_size", 0)
 
     for name, value in (
         ("context_parallel_size", cp),
         ("expert_model_parallel_size", ep),
-        ("dp_replicate_size", dp_replicate),
     ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1")
-    if world_size and world_size % (cp * dp_replicate):
+    if world_size and world_size % cp:
         raise ValueError(
-            f"world size {world_size} must be divisible by context_parallel_size * dp_replicate_size "
-            f"({cp * dp_replicate})"
+            f"world size {world_size} must be divisible by context_parallel_size ({cp})"
         )
+    if world_size and world_size % ep:
+        raise ValueError(f"world size {world_size} must be divisible by expert_model_parallel_size ({ep})")
     if args.checkpoint_save_consolidated not in ("false", "final", "every"):
         raise ValueError("checkpoint_save_consolidated must be false, final, or every")
