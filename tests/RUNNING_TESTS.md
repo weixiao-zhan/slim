@@ -4,7 +4,7 @@
 
 ```bash
 # Install dependencies.
-# AutoModel, FLA, causal-conv1d, FlashAttention-2, and FlashAttention-3 are core dependencies.
+# AutoModel, FLA, FlashAttention-2, and FlashAttention-3 are core dependencies.
 uv sync --extra dev
 ```
 

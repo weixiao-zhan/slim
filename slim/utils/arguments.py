@@ -103,30 +103,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
             )
-            parser.add_argument(
-                "--train-memory-margin-bytes",
-                type=int,
-                default=1024**3,
-                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
-            )
-            parser.add_argument(
-                "--only-train-params-name-list",
-                type=str,
-                nargs="*",
-                default=None,
-                help="""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN.
-                        Supports Python regex syntax (re.search).
-                        """,
-            )
-            parser.add_argument(
-                "--freeze-params-name-list",
-                type=str,
-                nargs="*",
-                default=None,
-                help="""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
-                        Supports Python regex syntax (re.search).
-                        """,
-            )
 
             return parser
 
@@ -273,22 +249,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
-                ),
-            )
-            parser.add_argument(
-                "--update-weights-interval",
-                type=int,
-                default=1,
-                help="Interval for updating the weights",
-            )
-
-            parser.add_argument(
-                "--rollout-data-postprocess-path",
-                type=str,
-                default=None,
-                help=(
-                    "The called after we have all the rollout data including log_probs. "
-                    "It may be helpful for updating loss mask."
                 ),
             )
             parser.add_argument(
@@ -458,16 +418,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "Note: this value should typically be close to `max_response_len`."
                 ),
             )
-            parser.add_argument(
-                "--log-probs-max-tokens-per-gpu",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum number of tokens per GPU for calculating log probs. "
-                    "This is used to calculate the log probs of the responses during rollout, "
-                    "and should be set to a larger value than `max_tokens_per_gpu` if you want better performance. "
-                ),
-            )
             return parser
 
         def add_eval_arguments(parser):
@@ -587,24 +537,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=float,
                 default=None,
                 help="Max LR for the critic value head. Defaults to --lr-critic.",
-            )
-            parser.add_argument(
-                "--lr-actor-start-step",
-                type=int,
-                default=0,
-                help="Rollout step at which the actor (RL policy) starts training.",
-            )
-            parser.add_argument(
-                "--lr-critic-start-step",
-                type=int,
-                default=0,
-                help="Rollout step at which the critic backbone learning rate leaves 0 (warmup begins).",
-            )
-            parser.add_argument(
-                "--lr-critic-value-head-start-step",
-                type=int,
-                default=0,
-                help="Rollout step at which the critic value head learning rate leaves 0 (warmup begins).",
             )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
@@ -733,13 +665,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Dotted path to a custom mismatch correction function.",
             )
-            parser.add_argument(
-                "--custom-pg-loss-reducer-function-path",
-                type=str,
-                default=None,
-                help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, pg_kl_k3, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
-            )
-
             return parser
 
         def add_router_arguments(parser):
@@ -1147,8 +1072,6 @@ def slim_validate_args(args):
 
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
-        if args.log_probs_max_tokens_per_gpu is None:
-            args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
@@ -1209,9 +1132,6 @@ def slim_validate_args(args):
             args.actor_num_gpus = args.rollout_num_gpus
         args.rollout_colocate = False
         args.critic_colocate = False
-        if args.train_memory_margin_bytes > 0:
-            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
-            args.train_memory_margin_bytes = 0
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
@@ -1269,10 +1189,6 @@ def slim_validate_args(args):
         assert args.num_rollout is not None, (
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
-
-
-    if args.only_train_params_name_list and args.freeze_params_name_list:
-        raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
 
     if args.loss_type == "custom_loss" and args.custom_loss_function_path is None:
         raise ValueError("--loss-type custom_loss requires --custom-loss-function-path.")

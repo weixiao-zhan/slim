@@ -209,7 +209,7 @@ class ActorNeMoTrainer(NeMoTrainer):
 
         batches = unpack_sequences(pack)
         correction = load_function(self.args.custom_mismatch_correction_function_path)
-        weights, masks, _ = correction(
+        weights, masks, custom_metrics = correction(
             args=self.args,
             train_log_probs=[batch["actor_old_log_probs"] for batch in batches],
             rollout_log_probs=[batch["rollout_log_probs"] for batch in batches],
@@ -219,6 +219,11 @@ class ActorNeMoTrainer(NeMoTrainer):
             pack["mismatch_weights"] = torch.cat([torch.as_tensor(value) for value in weights])
         if masks is not None:
             pack["mismatch_masks"] = torch.cat([torch.as_tensor(value) for value in masks])
+        if custom_metrics:
+            pack["_mismatch_metrics"] = {
+                name: torch.cat([torch.as_tensor(value) for value in values])
+                for name, values in custom_metrics.items()
+            }
 
     def _normalize_policy(
         self,
@@ -378,6 +383,16 @@ class ActorNeMoTrainer(NeMoTrainer):
             ).detach()
             metrics["mismatch/log_prob_abs_diff"] = self._normalize_sequence(
                 mismatch_ratio.abs(),
+                mask,
+                document_ids,
+                num_documents,
+                global_sequences,
+            ).detach()
+        for name, values in fields.items():
+            if not name.startswith("mismatch/"):
+                continue
+            metrics[name] = self._normalize_sequence(
+                values,
                 mask,
                 document_ids,
                 num_documents,

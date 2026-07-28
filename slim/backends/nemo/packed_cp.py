@@ -13,6 +13,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from .topology import flat_mesh
+
 
 def _blockdiag_attention(self, query, key, value, **attn_kwargs):
     from nemo_automodel.components.distributed.blockdiag_cp import (
@@ -124,6 +126,11 @@ def _global_media_presence(
     if dist.get_world_size(group) > 1:
         dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=group)
     return bool(flags[0].item()), bool(flags[1].item())
+
+
+def _vision_sync_group(device_mesh):
+    """Return the FSDP-shard group that aligns multimodal forward branches."""
+    return flat_mesh(device_mesh, "dp_shard_cp").get_group()
 
 
 def _dummy_visual_inputs(model: torch.nn.Module, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -294,14 +301,15 @@ def _install_primary_shard(model: torch.nn.Module, cp_mesh) -> None:
 
 def install_qwen3_5_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     """Install one packed attention, GDN, and primary-token path for Qwen3.5."""
+    from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
+
     backend = getattr(model, "backend", None)
     if getattr(backend, "attn", None) != "sdpa":
         raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
 
-    from nemo_automodel.components.distributed.mesh_utils import get_fsdp_dp_mesh
-
+    configure_cp_varlen(attn_backend="flash", kv_exchange="halo")
     cp_mesh = device_mesh["cp"]
-    vision_sync_group = get_fsdp_dp_mesh(device_mesh).get_group()
+    vision_sync_group = _vision_sync_group(device_mesh)
     model.cp_mesh = cp_mesh
     _install_attention_dispatch(model)
     _install_gdn_dispatch(model, cp_mesh)

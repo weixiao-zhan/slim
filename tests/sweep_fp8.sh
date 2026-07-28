@@ -39,7 +39,7 @@ COMMON_ARGS="
     --rollout-colocate
 
     --actor-num-gpus $NUM_GPUS
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
@@ -50,7 +50,6 @@ COMMON_ARGS="
     --eps-clip 1
     --eps-clip-high 1
 
-    --optimizer adam
     --lr 1e-6
     --lr-decay-style constant
 "

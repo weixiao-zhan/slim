@@ -15,19 +15,15 @@ NUM_GPUS = 0
 
 def _args(**overrides):
     values = {
-        "tensor_model_parallel_size": 1,
-        "pipeline_model_parallel_size": 1,
         "context_parallel_size": 1,
         "expert_model_parallel_size": 1,
         "dp_replicate_size": 1,
-        "sequence_parallel": False,
         "actor_num_gpus": 8,
         "world_size": 8,
         "nemo_linear_backend": "torch",
         "nemo_rms_norm_backend": "torch_fp32",
         "nemo_experts_backend": "torch_mm",
         "nemo_dispatcher": "torch",
-        "optimizer": "adam",
         "checkpoint_save_consolidated": "final",
     }
     values.update(overrides)
@@ -40,6 +36,7 @@ def test_optional_cli_types_resolve_from_postponed_annotations():
     by_name = {field.name: field for field in fields(NeMoArgs)}
 
     assert _field_type(by_name["lr_decay_iters"], type_hints) is int
+    assert _field_type(by_name["nemo_linear_backend"], type_hints) is str
     assert by_name["freeze_vision_tower"].default is True
     assert by_name["freeze_audio_tower"].default is True
     assert by_name["freeze_language_model"].default is False
@@ -82,22 +79,51 @@ def test_freeze_tower_cli_flags(monkeypatch, flags, expected):
 
 
 @pytest.mark.unit
+def test_backend_cli_accepts_automodel_choices(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "nemo",
+            "--nemo-linear-backend",
+            "te",
+            "--nemo-rms-norm-backend",
+            "te",
+            "--nemo-experts-backend",
+            "gmm",
+            "--nemo-dispatcher",
+            "deepep",
+        ],
+    )
+
+    args = _parse_nemo_cli()
+
+    assert (args.nemo_linear_backend, args.nemo_rms_norm_backend) == ("te", "te")
+    assert (args.nemo_experts_backend, args.nemo_dispatcher) == ("gmm", "deepep")
+
+
+@pytest.mark.unit
 def test_validate_args_accepts_cp_ep_topology():
-    validate_args(_args(context_parallel_size=2, expert_model_parallel_size=4))
+    validate_args(
+        _args(
+            context_parallel_size=2,
+            expert_model_parallel_size=4,
+            nemo_linear_backend="te",
+            nemo_rms_norm_backend="te",
+            nemo_experts_backend="gmm",
+            nemo_dispatcher="deepep",
+        )
+    )
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"tensor_model_parallel_size": 2}, "tensor_model_parallel_size"),
-        ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size"),
-        ({"sequence_parallel": True}, "sequence_parallel"),
         ({"context_parallel_size": 3}, "must be divisible"),
-        ({"nemo_linear_backend": "te"}, "nemo_linear_backend"),
-        ({"nemo_rms_norm_backend": "te"}, "nemo_rms_norm_backend"),
-        ({"nemo_experts_backend": "te"}, "nemo_experts_backend"),
-        ({"nemo_dispatcher": "deepep"}, "nemo_dispatcher"),
+        ({"nemo_linear_backend": "invalid"}, "nemo_linear_backend"),
+        ({"nemo_rms_norm_backend": "invalid"}, "nemo_rms_norm_backend"),
+        ({"nemo_experts_backend": "invalid"}, "nemo_experts_backend"),
+        ({"nemo_dispatcher": "invalid"}, "nemo_dispatcher"),
     ],
 )
 def test_validate_args_rejects_unsupported_settings(overrides, message):

@@ -30,7 +30,7 @@ run_train "
     --rollout-colocate
 
     --actor-num-gpus $NUM_GPUS
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
@@ -46,7 +46,6 @@ run_train "
     --eps-clip 1
     --eps-clip-high 1
 
-    --optimizer adam
     --lr 3e-6
     --lr-warmup-iters 0
     --lr-decay-style constant

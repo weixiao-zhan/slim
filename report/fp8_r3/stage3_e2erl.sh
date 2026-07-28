@@ -43,7 +43,7 @@ COMMON_ARGS="
 
     --actor-num-gpus 4
     --critic-num-gpus 4
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 32768
 
@@ -54,16 +54,12 @@ COMMON_ARGS="
     --eps-clip-high 0.28
     --value-clip 0.2
 
-    --optimizer adam
     --lr 1e-5
     --lr-decay-style WSD
     --lr-wsd-decay-style cosine
     --lr-warmup-iters 5
     --lr-wsd-decay-iters 5
     --lr-critic-value-head 5e-5
-    --lr-critic-value-head-start-step 0
-    --lr-critic-start-step 10
-    --lr-actor-start-step 10
 "
 
 declare -A COMBOS

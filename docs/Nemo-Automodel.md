@@ -36,7 +36,7 @@ Policy and reference models are created with:
 NeMoAutoModelForImageTextToText.from_pretrained(...)
 ```
 
-`BackendConfig` uses an internal `sdpa` model dispatch, torch linear layers, torch fp32 RMS normalization, `torch_mm` experts, and the torch dispatcher. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. This is an internal implementation choice rather than a training argument. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Slim exposes no separate parameter-storage or compute-dtype controls and passes no dtype override during model loading. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer is built over the resulting distributed parameters.
+`BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults `torch`, `torch_fp32`, `torch_mm`, and `torch` are the qualified configuration. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, and cross-layer backward prefetch is disabled to bound peak memory. Slim exposes no separate parameter-storage or compute-dtype controls and passes no dtype override during model loading. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer is AdamW over the resulting distributed parameters.
 
 AutoModel applies the parameter freeze configuration before sharding and optimizer construction. Vision and audio towers are frozen by default, while the language model is trainable. `--no-freeze-vision-tower` and `--no-freeze-audio-tower` opt those towers into training, and `--freeze-language-model` restricts training to enabled non-language towers.
 
@@ -60,7 +60,9 @@ $$
 D = \frac{W}{C}
 $$
 
-Expert parallelism is composed over the AutoModel MoE mesh. It is not an additional world-size factor.
+The root mesh always contains the replicated data-parallel dimension. AutoModel uses a one-dimensional FSDP mesh when \(D_r = 1\) and a two-dimensional HSDP mesh when \(D_r > 1\). Packed multimodal branch synchronization uses the flattened `dp_shard_cp` group, so ranks that share an FSDP shard group follow the same vision-tower collective path without synchronizing independent HSDP replicas.
+
+Expert parallelism is composed over the AutoModel MoE mesh. It is not an additional world-size factor. Expert parameters are excluded from the transformer block's ordinary FSDP unit. EP assigns expert subsets to ranks, while an orthogonal `ep_shard` mesh may FSDP-shard each subset across its data-parallel copies.
 
 Slim assigns its Gloo process group to AutoModel's `MeshContext.process_group`. Distributed checkpoint planning and metadata exchange therefore use the control-plane group rather than allocating rank-zero NCCL planning tensors.
 
@@ -74,7 +76,7 @@ Relevant arguments are:
 --nemo-cpu-offload
 ```
 
-The backend rejects TP or PP greater than one, sequence parallelism, dense Qwen3.5 with EP greater than one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
+The backend does not expose TP, PP, sequence-parallel, or optimizer selection arguments. It rejects dense Qwen3.5 with EP greater than one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
 
 ## Unified Batch Interface
 
@@ -107,10 +109,10 @@ No label or RL edge crosses a document boundary.
 `--max-tokens-per-gpu` is the target post-CP token budget for one rank. Dynamic packing therefore targets a physical pack length of:
 
 $$
-T_{\mathrm{pack}} \approx C T_{\mathrm{GPU}}
+T_{\mathrm{pack}} \le C T_{\mathrm{GPU}}
 $$
 
-For CP2 and `--max-tokens-per-gpu 8192`, the packer targets approximately 16K physical tokens and each CP rank receives approximately 8K tokens. Individual episodes are not split, so an episode longer than the physical target can exceed this budget.
+For CP2 and `--max-tokens-per-gpu 8192`, each physical pack contains at most 16K tokens before CP sharding. The packer uses budget-aware first-fit decreasing partitions and only splits existing partitions when DP ranks need a synchronized pack count. Individual episodes are not split, so an episode longer than the physical budget is rejected.
 
 ## Context Parallel Layouts
 
@@ -241,7 +243,7 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --actor-num-gpus 8 \
   --context-parallel-size 2 \
   --expert-model-parallel-size 8 \
-  --gradient-checkpointing \
+  --activation-checkpointing \
   --use-dynamic-batch-size \
   --max-tokens-per-gpu 8192 \
   --advantage-estimator grpo \
@@ -250,7 +252,6 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --use-rollout-routing-replay \
   --eps-clip 0.2 \
   --eps-clip-high 0.28 \
-  --optimizer adam \
   --lr 1e-5 \
   --lr-warmup-iters 0 \
   --lr-decay-style constant \

@@ -167,7 +167,7 @@ run: | # shell
     --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
     --dp-replicate-size ${SKYPILOT_NUM_NODES} \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
-    --gradient-checkpointing \
+    --activation-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 12288 \
     \
@@ -180,7 +180,6 @@ run: | # shell
     --kl-loss-coef 0.00 \
     --kl-loss-type low_var_kl \
     \
-    --optimizer adam \
     --lr 1e-5 \
     --lr-warmup-iters 10 \
     --lr-decay-style constant \

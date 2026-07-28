@@ -90,7 +90,7 @@ do
         --context-parallel-size $cp_size
         --expert-model-parallel-size $ep_size
         $offload_args
-        --gradient-checkpointing
+        --activation-checkpointing
         --use-dynamic-batch-size
         --max-tokens-per-gpu $MAX_TOKENS_PER_GPU
         --advantage-estimator grpo
@@ -99,7 +99,6 @@ do
         --old-logprob-source actor
         --eps-clip 0.2
         --eps-clip-high 0.28
-        --optimizer adam
         --lr 3e-6
         --lr-warmup-iters 0
         --lr-decay-style constant

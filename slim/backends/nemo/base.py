@@ -22,11 +22,10 @@ from transformers import AutoConfig
 import slim.utils.eval_config
 from slim.ray.ray_worker import RayWorker
 from slim.utils import logging_utils, train_dump_utils, train_metric_utils
-from slim.utils.data import get_minimum_num_micro_batch_size, process_rollout_data
+from slim.utils.data import process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.logging_utils import configure_logger, init_tracking
 from slim.utils.memory_utils import clear_memory
-from slim.utils.misc import load_function
 from slim.utils.ppo_utils import vanilla_gae
 from slim.utils.processing_utils import load_processor, load_tokenizer
 from slim.utils.profile_utils import TrainProfiler
@@ -34,7 +33,12 @@ from slim.utils.timer import Timer, inverse_timer, timer, with_defer
 from slim.utils.types import Episode
 
 from . import checkpoint
-from .data_packing import pack_sequences, unpack_sequences, update_packed_advantages
+from .data_packing import (
+    build_token_budget_partitions,
+    pack_sequences,
+    unpack_sequences,
+    update_packed_advantages,
+)
 from .grad_clip import clip_cpu_offloaded_grad_norm
 from .lr_scheduler import get_lr_scheduler
 from .model import is_moe_config, validate_model_config
@@ -159,24 +163,16 @@ class NeMoTrainer(RayWorker):
         validate_model_config(self.hf_config, self.topology)
         self.is_moe = is_moe_config(self.hf_config)
         self.global_step = 0
-        self.micro_step = 0
         self._create_model_and_optimizer(model_checkpoint)
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
         self.checkpointer = checkpoint.build_checkpointer(self)
         checkpoint_payload = checkpoint.load(self)
         self._post_model_setup()
 
-        self.critic_handle = None
         self._pending_episodes = None
         self._pending_packed_batches = None
         self._pending_grad_accum = None
-        self.rollout_data_postprocess = (
-            load_function(args.rollout_data_postprocess_path)
-            if args.rollout_data_postprocess_path
-            else None
-        )
         checkpoint.finalize_load(self, checkpoint_payload)
-        self.max_tokens_per_gpu = args.max_tokens_per_gpu
         self.sleep()
         self.prof.on_init_end()
         return int(args.start_rollout_id)
@@ -200,17 +196,10 @@ class NeMoTrainer(RayWorker):
     def _maybe_update_ref_model(self, rollout_id: int) -> None:
         pass
 
-    def connect_actor_critic(self, critic_handle) -> None:
-        self.critic_handle = critic_handle
-
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
         if not self.args.debug_rollout_only and dist.get_rank() == 0:
             ray.get(rollout_manager.set_train_parallel_config.remote(self.train_parallel_config))
-
-    def clear_memory(self):
-        if not self.args.debug_rollout_only:
-            clear_memory()
 
     @timer
     def sleep(self) -> None:
@@ -250,17 +239,29 @@ class NeMoTrainer(RayWorker):
             chunk = episodes[start : start + local_batch_size]
             if self.args.use_dynamic_batch_size:
                 physical_pack_token_budget = self.args.max_tokens_per_gpu * self.cp_size
-                pack_count = get_minimum_num_micro_batch_size(
+                partitions = build_token_budget_partitions(
                     [len(episode.tokens) for episode in chunk],
                     physical_pack_token_budget,
                 )
             else:
-                pack_count = max(1, len(chunk) // self.args.micro_batch_size)
+                partitions = [
+                    list(range(offset, min(offset + self.args.micro_batch_size, len(chunk))))
+                    for offset in range(0, len(chunk), self.args.micro_batch_size)
+                ]
 
-            count = torch.tensor(pack_count, dtype=torch.int, device=torch.cuda.current_device())
+            count = torch.tensor(len(partitions), dtype=torch.int, device=torch.cuda.current_device())
             dist.all_reduce(count, op=dist.ReduceOp.MAX, group=self.dp_group)
             pack_count = int(count.item())
-            chunk_batches = pack_sequences(chunk, num_packs=pack_count)
+            if self.args.use_dynamic_batch_size:
+                partitions = build_token_budget_partitions(
+                    [len(episode.tokens) for episode in chunk],
+                    physical_pack_token_budget,
+                    num_packs=pack_count,
+                )
+            elif len(partitions) != pack_count:
+                raise RuntimeError("fixed microbatch counts differ across data-parallel ranks")
+
+            chunk_batches = pack_sequences(chunk, partitions=partitions)
             if len(chunk_batches) != pack_count:
                 raise RuntimeError(f"requested {pack_count} synchronized packs but built {len(chunk_batches)}")
             for batch in chunk_batches:
@@ -291,12 +292,10 @@ class NeMoTrainer(RayWorker):
                 self._pending_packed_batches = None
                 self._pending_grad_accum = None
             else:
-                if self.rollout_data_postprocess is not None:
-                    self.rollout_data_postprocess(self.args)
                 episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
                 packed_batches = None
                 grad_accum = None
-            values = ray.get(values_refs[self.dp_rank]) if values_refs is not None else None
+            values = ray.get(values_refs[dist.get_rank()]) if values_refs is not None else None
             self._train_core(rollout_id, episodes, values, packed_batches, grad_accum)
 
         train_metric_utils.log_perf_data_raw(
@@ -373,9 +372,6 @@ class NeMoTrainer(RayWorker):
             episode._advantages = advantages[index, :edge_count].tolist()
             episode._returns = returns[index, :edge_count].tolist()
             episode._values = values[index].tolist()
-
-    def _steps_per_rollout(self) -> int:
-        return self.args.rollout_batch_size * self.args.n_samples_per_prompt // self.args.global_batch_size
 
     def _begin_gradient_accumulation(self) -> None:
         from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler

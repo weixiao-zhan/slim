@@ -15,8 +15,10 @@ from slim.backends.nemo.packed_cp import (
     _install_attention_dispatch,
     _install_moe_cp,
     _install_primary_shard,
+    _vision_sync_group,
     build_packed_cp_sharder,
     build_packed_position_ids,
+    install_qwen3_5_packed_cp,
     make_packed_cp_batch_and_ctx,
 )
 from slim.utils.types import Episode
@@ -102,6 +104,23 @@ def test_global_media_presence_uses_remote_modality_flags(monkeypatch):
 
 
 @pytest.mark.unit
+def test_vision_sync_uses_flat_dp_shard_cp_group(monkeypatch):
+    device_mesh = object()
+    group = object()
+    flat_dp_shard_cp_mesh = SimpleNamespace(get_group=lambda: group)
+    calls = []
+
+    def fake_flat_mesh(mesh, name):
+        calls.append((mesh, name))
+        return flat_dp_shard_cp_mesh
+
+    monkeypatch.setattr("slim.backends.nemo.packed_cp.flat_mesh", fake_flat_mesh)
+
+    assert _vision_sync_group(device_mesh) is group
+    assert calls == [(device_mesh, "dp_shard_cp")]
+
+
+@pytest.mark.unit
 def test_dummy_visual_inputs_form_one_merged_token():
     model = SimpleNamespace(
         config=SimpleNamespace(
@@ -136,6 +155,30 @@ def test_packed_runtime_attaches_cp_mesh_to_moe_routers(monkeypatch):
     _install_moe_cp(model, cp_mesh)
 
     assert model[0].cp_mesh is cp_mesh
+
+
+@pytest.mark.unit
+def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
+    import nemo_automodel.components.distributed.blockdiag_cp as blockdiag_cp
+
+    calls = []
+    model = nn.Module()
+    model.backend = SimpleNamespace(attn="sdpa")
+    cp_mesh = object()
+    device_mesh = {"cp": cp_mesh}
+
+    monkeypatch.setattr(blockdiag_cp, "configure_cp_varlen", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._vision_sync_group", lambda mesh: object())
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_attention_dispatch", lambda model: None)
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_gdn_dispatch", lambda model, mesh: None)
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_moe_cp", lambda model, mesh: None)
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_synchronized_vision", lambda model, group: None)
+    monkeypatch.setattr("slim.backends.nemo.packed_cp._install_primary_shard", lambda model, mesh: None)
+
+    install_qwen3_5_packed_cp(model, device_mesh)
+
+    assert calls == [{"attn_backend": "flash", "kv_exchange": "halo"}]
+    assert model.cp_mesh is cp_mesh
 
 
 class _FakeCPMesh:

@@ -25,13 +25,16 @@ from slim.backends.nemo import critic as critic_module
 from slim.backends.nemo.actor import ActorNeMoTrainer
 from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.critic import CriticNeMoTrainer
-from slim.backends.nemo.data_packing import pack_sequences, token_slots_to_edges
+from slim.backends.nemo.data_packing import (
+    build_token_budget_partitions,
+    pack_sequences,
+    token_slots_to_edges,
+)
 from slim.backends.nemo.forward import model_forward, prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
 from slim.backends.nemo.lr_scheduler import get_lr_scheduler
 from slim.backends.nemo.model import is_moe_config
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
-from slim.utils.data import get_minimum_num_micro_batch_size
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.types import Episode
 
@@ -132,7 +135,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         freeze_vision_tower=cli.freeze_vision_tower,
         get_mismatch_metrics=False,
         global_batch_size=8,
-        gradient_checkpointing=False,
         hf_checkpoint=cli.checkpoint,
         kl_loss_coef=0.0,
         kl_loss_type="low_var_kl",
@@ -141,9 +143,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr=1e-2,
         lr_actor=1e-2,
         lr_critic=1e-2,
-        lr_critic_start_step=0,
         lr_critic_value_head=1e-2,
-        lr_critic_value_head_start_step=0,
         lr_decay_iters=None,
         lr_decay_style="constant",
         lr_min=0.0,
@@ -212,8 +212,7 @@ def _pack(processor=None) -> dict:
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "edge_lengths": [first_end - 1, len(second_document) - 1],
         "response_lengths": [first_end - 1, len(second_document) - 1],
-        "rewards": torch.ones(2, dtype=torch.float32),
-        "raw_reward": [1.0, 1.0],
+        "reward": [1.0, 1.0],
         "_episode_indices": [0, 1],
     }
     if multimodal_inputs:
@@ -302,14 +301,19 @@ def _rollout_training_packs(
         dp_size=trainer.dp_size,
     )
     token_budget = cli.max_tokens_per_gpu * trainer.cp_size
-    pack_count = get_minimum_num_micro_batch_size(
+    partitions = build_token_budget_partitions(
         [len(episode.tokens) for episode in local_episodes],
         token_budget,
     )
-    synchronized_count = torch.tensor(pack_count, dtype=torch.int32, device=torch.cuda.current_device())
+    synchronized_count = torch.tensor(len(partitions), dtype=torch.int32, device=torch.cuda.current_device())
     dist.all_reduce(synchronized_count, op=dist.ReduceOp.MAX, group=trainer.dp_group)
     pack_count = int(synchronized_count.item())
-    return pack_sequences(local_episodes, num_packs=pack_count), uses_vision
+    partitions = build_token_budget_partitions(
+        [len(episode.tokens) for episode in local_episodes],
+        token_budget,
+        num_packs=pack_count,
+    )
+    return pack_sequences(local_episodes, partitions=partitions), uses_vision
 
 
 def _validate_modality_layout(
@@ -433,7 +437,6 @@ def _build_trainer(
     trainer.role = cli.role
     trainer.with_ref = cli.role == "actor" and cli.checkpoint_dir is not None
     trainer.global_step = 0
-    trainer.micro_step = 0
     trainer.is_moe = is_moe_config(AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True))
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)
@@ -673,8 +676,8 @@ def _save_and_reload(
 
     tracked_name, tracked_before = _full_parameter(trainer.checkpoint_model, tracked_suffix)
     scheduler_before = trainer.lr_scheduler.state_dict()
-    trainer.micro_step = 7
-    checkpoint.save(trainer, rollout_id=3, force_sync=True)
+    saved_rollout_id = 3
+    checkpoint.save(trainer, rollout_id=saved_rollout_id, force_sync=True)
     snapshot = _memory_snapshot("checkpoint_saved")
     if snapshot is not None:
         memory_snapshots.append(snapshot)
@@ -715,8 +718,12 @@ def _save_and_reload(
         raise RuntimeError("optimizer state changed across checkpoint resume")
     if resumed.lr_scheduler.state_dict() != scheduler_before:
         raise RuntimeError("scheduler state changed across checkpoint resume")
-    if resumed.global_step != 1 or resumed.micro_step != 7 or resumed.args.start_rollout_id != 4:
-        raise RuntimeError(f"checkpoint metadata did not resume exactly: global_step={resumed.global_step}, micro_step={resumed.micro_step}, start_rollout_id={resumed.args.start_rollout_id}")
+    expected_start_rollout_id = saved_rollout_id + 1
+    if resumed.global_step != 1 or resumed.args.start_rollout_id != expected_start_rollout_id:
+        raise RuntimeError(
+            "checkpoint metadata did not resume exactly: "
+            f"global_step={resumed.global_step}, start_rollout_id={resumed.args.start_rollout_id}"
+        )
     torch.testing.assert_close(torch.rand(8), expected_cpu_random, rtol=0, atol=0)
     torch.testing.assert_close(
         torch.rand(8, device=torch.cuda.current_device()).cpu(),

@@ -48,7 +48,7 @@ run_train_wait "
     --actor-num-gpus 8
     --context-parallel-size 2
     --expert-model-parallel-size 8
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
@@ -60,7 +60,6 @@ run_train_wait "
     --eps-clip 0.2
     --eps-clip-high 0.28
 
-    --optimizer adam
     --lr 3e-6
     --lr-warmup-iters 0
     --lr-decay-style constant

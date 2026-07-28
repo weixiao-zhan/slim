@@ -58,13 +58,14 @@ class NeMoTopology:
         from nemo_automodel.components.distributed.mesh import ParallelismSizes
         from torch.distributed.fsdp import CPUOffloadPolicy
 
-        activation_checkpointing = args.activation_checkpointing or args.gradient_checkpointing
+        activation_checkpointing = args.activation_checkpointing
         strategy = FSDP2Config(
             sequence_parallel=False,
             patch_is_packed_sequence=False,
             offload_policy=CPUOffloadPolicy() if args.nemo_cpu_offload else None,
             activation_checkpointing=activation_checkpointing,
             defer_fsdp_grad_sync=args.defer_fsdp_grad_sync,
+            reshard_after_forward=True,
         )
         sizes = ParallelismSizes(
             dp_size=None,

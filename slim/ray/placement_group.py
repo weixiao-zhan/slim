@@ -182,9 +182,7 @@ def create_training_models(args, pgs, rollout_manager):
         critic_start_rollout_ids = ray.get(critic_init_handle)
 
     if args.use_critic:
-        if not args.critic_train_only:
-            actor_model.connect(critic_model)
-        else:
+        if args.critic_train_only:
             start_rollout_ids = critic_start_rollout_ids
 
     assert len(set(start_rollout_ids)) == 1
