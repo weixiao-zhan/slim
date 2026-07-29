@@ -159,7 +159,7 @@ class CriticNeMoTrainer(NeMoTrainer):
                 self.args.value_clip,
             )
             document_ids = prepared.fields["document_ids"]
-            num_documents = len(pack["edge_lengths"])
+            num_documents = pack["cu_seqlens"].numel() - 1
             value_loss = normalize_sequence_values(
                 value_values,
                 mask,

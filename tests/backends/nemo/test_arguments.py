@@ -55,14 +55,6 @@ def test_optional_cli_types_resolve_from_postponed_annotations():
             ],
             (True, True, True),
         ),
-        (
-            [
-                "--no-freeze-vision-tower",
-                "--no-freeze-audio-tower",
-                "--no-freeze-language-model",
-            ],
-            (False, False, False),
-        ),
     ],
 )
 def test_freeze_tower_cli_flags(monkeypatch, flags, expected):
@@ -75,6 +67,14 @@ def test_freeze_tower_cli_flags(monkeypatch, flags, expected):
         args.freeze_audio_tower,
         args.freeze_language_model,
     ) == expected
+
+
+@pytest.mark.unit
+def test_boolean_cli_does_not_accept_generated_negative_alias(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["nemo", "--no-freeze-vision-tower"])
+
+    with pytest.raises(SystemExit):
+        _parse_nemo_cli()
 
 
 @pytest.mark.unit
@@ -119,6 +119,9 @@ def test_validate_args_accepts_cp_ep_topology():
     ("overrides", "message"),
     [
         ({"context_parallel_size": 3}, "must be divisible"),
+        ({"expert_model_parallel_size": 3}, "must be divisible"),
+        ({"context_parallel_size": 0}, "must be at least 1"),
+        ({"expert_model_parallel_size": 0}, "must be at least 1"),
         ({"nemo_linear_backend": "invalid"}, "nemo_linear_backend"),
         ({"nemo_rms_norm_backend": "invalid"}, "nemo_rms_norm_backend"),
         ({"nemo_experts_backend": "invalid"}, "nemo_experts_backend"),

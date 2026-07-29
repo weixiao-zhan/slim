@@ -94,7 +94,7 @@ Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 (policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
 `unpacked_batches` is the per-sample list from `unpack_sequences`; each dict
 carries the normalized `reward`, `cur_log_probs`, `advantages`, `loss_masks`,
-`edge_lengths`, and the old/ref log-probs when available.
+and the old/ref log-probs when available.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
 a dict of scalar tensors logged under `train/`.

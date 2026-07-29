@@ -18,25 +18,6 @@ class NeMoTopology:
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
 
-    def __post_init__(self) -> None:
-        for name, size in (
-            ("world_size", self.world_size),
-            ("context_parallel_size", self.context_parallel_size),
-            ("expert_model_parallel_size", self.expert_model_parallel_size),
-        ):
-            if size < 1:
-                raise ValueError(f"{name} must be at least 1")
-
-        if self.world_size % self.context_parallel_size:
-            raise ValueError(
-                f"world size {self.world_size} is not divisible by CP {self.context_parallel_size}"
-            )
-        if self.world_size % self.expert_model_parallel_size:
-            raise ValueError(
-                f"expert parallel size {self.expert_model_parallel_size} must divide "
-                f"world size {self.world_size}"
-            )
-
     @classmethod
     def from_args(cls, args, world_size: int) -> NeMoTopology:
         return cls(

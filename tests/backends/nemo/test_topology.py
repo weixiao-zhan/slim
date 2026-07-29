@@ -24,27 +24,6 @@ def test_topology_derives_logical_data_parallel_size():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("kwargs", "message"),
-    [
-        ({"world_size": 8, "context_parallel_size": 3}, "not divisible"),
-        (
-            {
-                "world_size": 8,
-                "context_parallel_size": 1,
-                "expert_model_parallel_size": 3,
-            },
-            "expert parallel size",
-        ),
-        ({"world_size": 0}, "world_size"),
-    ],
-)
-def test_topology_rejects_invalid_meshes(kwargs, message):
-    with pytest.raises(ValueError, match=message):
-        NeMoTopology(**kwargs)
-
-
-@pytest.mark.unit
 def test_topology_uses_automodel_default_mixed_precision(monkeypatch):
     from nemo_automodel.components.distributed.config import DistributedSetup
 

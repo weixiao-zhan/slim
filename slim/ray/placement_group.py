@@ -149,33 +149,33 @@ def allocate_train_group(args, num_gpus, pg, role):
     )
 
 
-def create_training_models(args, pgs, rollout_manager):
-    actor_model = allocate_train_group(
+def create_training_groups(args, pgs, rollout_manager):
+    actor_train_group = allocate_train_group(
         args=args,
         num_gpus=args.actor_num_gpus,
         pg=pgs["actor"],
         role="actor",
     )
     if args.use_critic:
-        critic_model = allocate_train_group(
+        critic_train_group = allocate_train_group(
             args=args,
             num_gpus=args.critic_num_gpus,
             pg=pgs["critic"],
             role="critic",
         )
     else:
-        critic_model = None
+        critic_train_group = None
 
     if not args.use_critic:
-        start_rollout_ids = ray.get(actor_model.async_init())
+        start_rollout_ids = ray.get(actor_train_group.async_init())
     elif args.critic_colocate:
         # critic shares actor GPUs, init sequentially to avoid contention
-        start_rollout_ids = ray.get(actor_model.async_init())
-        critic_start_rollout_ids = ray.get(critic_model.async_init())
+        start_rollout_ids = ray.get(actor_train_group.async_init())
+        critic_start_rollout_ids = ray.get(critic_train_group.async_init())
     else:
         # critic on separate GPUs, init both in parallel
-        actor_init_handle = actor_model.async_init()
-        critic_init_handle = critic_model.async_init()
+        actor_init_handle = actor_train_group.async_init()
+        critic_init_handle = critic_train_group.async_init()
         start_rollout_ids = ray.get(actor_init_handle)
         critic_start_rollout_ids = ray.get(critic_init_handle)
 
@@ -188,14 +188,14 @@ def create_training_models(args, pgs, rollout_manager):
     if args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 
-    actor_model.set_rollout_manager(rollout_manager)
+    actor_train_group.set_rollout_manager(rollout_manager)
     if args.use_critic:
-        critic_model.set_rollout_manager(rollout_manager)
+        critic_train_group.set_rollout_manager(rollout_manager)
 
     if args.rollout_global_dataset:
         ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
 
-    return actor_model, critic_model
+    return actor_train_group, critic_train_group
 
 
 def create_rollout_manager(args, pg):

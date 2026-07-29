@@ -208,7 +208,6 @@ def _pack(processor=None) -> dict:
         "returns": torch.linspace(0.25, 1.25, edge_count),
         "old_values": torch.zeros(edge_count),
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
-        "edge_lengths": [first_end - 1, len(second_document) - 1],
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
         "_episode_indices": [0, 1],
@@ -319,11 +318,11 @@ def _validate_modality_layout(
     uses_vision: bool,
     packs: list[dict],
 ) -> list[dict[str, object]]:
-    episode_count = sum(len(pack["edge_lengths"]) for pack in packs)
+    episode_count = sum(pack["cu_seqlens"].numel() - 1 for pack in packs)
     vision_episode_count = 0
     for pack in packs:
         media_counts = pack.get("multimodal_num_items", {})
-        for episode_offset in range(len(pack["edge_lengths"])):
+        for episode_offset in range(pack["cu_seqlens"].numel() - 1):
             if any(counts[episode_offset] > 0 for counts in media_counts.values()):
                 vision_episode_count += 1
     if uses_vision != (vision_episode_count > 0):

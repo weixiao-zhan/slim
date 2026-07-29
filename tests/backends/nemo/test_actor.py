@@ -22,7 +22,6 @@ def test_custom_mismatch_metrics_are_preserved(monkeypatch):
     )
     pack = {
         "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
-        "edge_lengths": [2, 2],
         "actor_old_log_probs": torch.tensor([0.1, 0.2, 0.3, 0.4]),
         "rollout_log_probs": torch.tensor([0.0, 0.1, 0.2, 0.3]),
         "loss_masks": torch.ones(4),

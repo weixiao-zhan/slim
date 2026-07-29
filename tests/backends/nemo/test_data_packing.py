@@ -84,7 +84,6 @@ def test_pack_sequences_stays_on_cpu_and_emits_indexed_mask_for_multiple_documen
     batch = build_model_batch(pack)
 
     assert all(not value.is_cuda for value in pack.values() if isinstance(value, torch.Tensor))
-    assert pack["edge_lengths"] == [2, 1]
     assert [episode["reward"] for episode in unpack_sequences(pack)] == [1.0, 2.0]
     assert batch["input_ids"].shape == (1, 5)
     assert batch["_packed_seq_ids"].tolist() == [[1, 1, 1, 2, 2]]
