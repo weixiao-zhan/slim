@@ -9,7 +9,6 @@ import torch
 from slim.backends.nemo.model import final_hidden_state
 from slim.backends.nemo.models import build_model
 from slim.backends.nemo.models.qwen3_5 import (
-    _disable_fsdp_backward_prefetch,
     register_qwen3_5_moe_parallel_strategy,
     validate_config,
 )
@@ -34,25 +33,6 @@ def test_final_hidden_state_accepts_dense_and_moe_outputs(container):
     output = SimpleNamespace(hidden_states=container(hidden))
 
     assert final_hidden_state(output) is hidden
-
-
-@pytest.mark.unit
-def test_policy_model_disables_fsdp_backward_prefetch(monkeypatch):
-    import torch.nn as nn
-
-    calls = []
-
-    class FakeFSDPModule(nn.Module):
-        def set_modules_to_backward_prefetch(self, modules):
-            calls.append(modules)
-
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.FSDPModule", FakeFSDPModule)
-    first = FakeFSDPModule()
-    second = FakeFSDPModule()
-    model = nn.Sequential(first, second)
-
-    _disable_fsdp_backward_prefetch(model)
-    assert calls == [[first], [second]]
 
 
 @pytest.mark.unit
@@ -95,10 +75,6 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_5_moe"),
     )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.build_backend_config", fake_backend_config)
-    monkeypatch.setattr(
-        "slim.backends.nemo.models.qwen3_5._disable_fsdp_backward_prefetch",
-        lambda model: 0,
-    )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.install_packed_cp", lambda *args: None)
 
     args = SimpleNamespace(
