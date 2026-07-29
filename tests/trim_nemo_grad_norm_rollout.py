@@ -21,35 +21,43 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _slice_edges(value, edge_count: int):
+def _slice_predictions(value, prediction_count: int):
     if value is None:
         return None
-    return value[:edge_count]
+    return value[:prediction_count]
 
 
 def trim_record(record: dict, max_response_tokens: int) -> tuple[dict, int]:
     episode = Episode(**record)
-    episode.ensure_edge_alignment()
     mask = torch.as_tensor(episode.loss_mask)
-    generated_edges = torch.nonzero(mask, as_tuple=False).flatten()
-    if generated_edges.numel() == 0:
+    generated_positions = torch.nonzero(mask, as_tuple=False).flatten()
+    if generated_positions.numel() == 0:
         return record, len(episode.tokens)
 
-    first_generated_edge = int(generated_edges[0].item())
-    edge_count = min(episode.num_edges, first_generated_edge + max_response_tokens)
-    token_count = edge_count + 1
+    first_generated_position = int(generated_positions[0].item())
+    prediction_count = min(
+        len(episode.tokens) - 1,
+        first_generated_position + max_response_tokens,
+    )
+    token_count = prediction_count + 1
     trimmed = dict(record)
     trimmed["tokens"] = episode.tokens[:token_count]
-    trimmed["loss_mask"] = _slice_edges(episode.loss_mask, edge_count)
-    trimmed["rollout_log_probs"] = _slice_edges(episode.rollout_log_probs, edge_count)
-    trimmed["rollout_routed_experts"] = _slice_edges(episode.rollout_routed_experts, edge_count)
+    trimmed["loss_mask"] = _slice_predictions(episode.loss_mask, prediction_count)
+    trimmed["rollout_log_probs"] = _slice_predictions(
+        episode.rollout_log_probs,
+        prediction_count,
+    )
+    trimmed["rollout_routed_experts"] = _slice_predictions(
+        episode.rollout_routed_experts,
+        prediction_count,
+    )
     trimmed["max_tokens"] = token_count
     if token_count < len(episode.tokens):
         trimmed["text"] = None
         trimmed["generated_text"] = None
         trimmed["status"] = Episode.Status.TRUNCATED
 
-    Episode(**trimmed).ensure_edge_alignment()
+    Episode(**trimmed).finalize_source_token_alignment()
     return trimmed, token_count
 
 

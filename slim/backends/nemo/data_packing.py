@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Episode packing and source-token-aligned NeMo batches."""
+"""Episode packing for source-token-aligned NeMo batches."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import torch
 
 from slim.utils.types import Episode
 
-EDGE_FIELDS = frozenset(
+SEQUENCE_FIELDS = frozenset(
     {
+        "tokens",
+        "position_ids",
         "loss_masks",
         "advantages",
         "value_targets",
@@ -26,35 +28,25 @@ EDGE_FIELDS = frozenset(
         "mismatch_masks",
     }
 )
-TOKEN_FIELDS = frozenset({"tokens", "position_ids"})
-TOKEN_SLOT_FILLS = {
-    "loss_masks": 0,
-    "advantages": 0.0,
-    "value_targets": 0.0,
-    "rollout_log_probs": 0.0,
-    "rollout_routed_experts": 0,
-    "actor_old_log_probs": 0.0,
-    "ref_log_probs": 0.0,
-    "old_values": 0.0,
-    "mismatch_weights": 1.0,
-    "mismatch_masks": 0,
-}
+TRAINING_FIELDS = SEQUENCE_FIELDS - {"tokens", "position_ids", "cur_log_probs", "cur_values", "entropy"}
 
 
 def _as_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
-    if isinstance(value, torch.Tensor):
-        return value.detach().to(device="cpu", dtype=dtype)
-    return torch.as_tensor(value, dtype=dtype)
+    if not isinstance(value, torch.Tensor):
+        raise TypeError("packed Episode sequence fields must be finalized tensors")
+    return value.detach().to(device="cpu", dtype=dtype)
 
 
-def _validate_edge_field(episode: Episode, name: str, value) -> None:
+def _validate_source_field(episode: Episode, name: str, value) -> None:
     if value is None:
         raise ValueError(f"{name} must be present for every training episode")
-    if len(value) != episode.num_edges:
-        raise ValueError(f"{name} length {len(value)} does not match num_edges {episode.num_edges}")
+    if len(value) != len(episode.tokens):
+        raise ValueError(
+            f"{name} length {len(value)} does not match token count {len(episode.tokens)}"
+        )
 
 
-def _optional_edge_field(episodes: list[Episode], indices: list[int], name: str, dtype: torch.dtype):
+def _optional_source_field(episodes: list[Episode], indices: list[int], name: str, dtype: torch.dtype):
     values = [getattr(episodes[index], name, None) for index in indices]
     present = [value is not None and len(value) > 0 for value in values]
     if any(present) and not all(present):
@@ -62,7 +54,7 @@ def _optional_edge_field(episodes: list[Episode], indices: list[int], name: str,
     if not all(present):
         return None
     for index, value in zip(indices, values, strict=True):
-        _validate_edge_field(episodes[index], name, value)
+        _validate_source_field(episodes[index], name, value)
     return torch.cat([_as_tensor(value, dtype=dtype) for value in values])
 
 
@@ -160,7 +152,7 @@ def pack_sequences(
         for index in indices:
             episode = episodes[index]
             tokens = _as_tensor(episode.tokens, dtype=torch.long)
-            _validate_edge_field(episode, "loss_mask", episode.loss_mask)
+            _validate_source_field(episode, "loss_mask", episode.loss_mask)
             token_parts.append(tokens)
             position_parts.append(torch.arange(tokens.numel(), dtype=torch.long))
             loss_mask_parts.append(_as_tensor(episode.loss_mask, dtype=torch.int32))
@@ -182,7 +174,7 @@ def pack_sequences(
             ("rollout_log_probs", torch.float32),
             ("rollout_routed_experts", torch.int32),
         ):
-            value = _optional_edge_field(episodes, indices, name, dtype)
+            value = _optional_source_field(episodes, indices, name, dtype)
             if value is not None:
                 pack[name] = value
 
@@ -191,7 +183,7 @@ def pack_sequences(
             if not all(value is not None for value in values):
                 raise ValueError("values must be present for every episode in a pack or for none")
             for index, value in zip(indices, values, strict=True):
-                _validate_edge_field(episodes[index], "values", value)
+                _validate_source_field(episodes[index], "values", value)
             pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
 
         multimodal_inputs: dict[str, torch.Tensor] = {}
@@ -218,11 +210,8 @@ def pack_sequences(
 
 
 def unpack_sequences(pack: dict) -> list[dict]:
-    """Return per-episode views from an edge-packed batch."""
+    """Return per-episode views from a source-token-aligned batch."""
     cu_seqlens = pack["cu_seqlens"].tolist()
-    edge_offsets = [0]
-    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True):
-        edge_offsets.append(edge_offsets[-1] + end - start - 1)
 
     multimodal_offsets = {}
     for name, counts in pack.get("multimodal_num_items", {}).items():
@@ -233,7 +222,6 @@ def unpack_sequences(pack: dict) -> list[dict]:
 
     episodes = []
     for index, (token_start, token_end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)):
-        edge_start, edge_end = edge_offsets[index : index + 2]
         episode = {}
         for name, value in pack.items():
             if name == "multimodal_num_items":
@@ -244,9 +232,12 @@ def unpack_sequences(pack: dict) -> list[dict]:
                     start, end = multimodal_offsets[media_name][index : index + 2]
                     if end > start:
                         episode[name][media_name] = media_tensor[start:end]
-            elif name in EDGE_FIELDS:
-                episode[name] = value[edge_start:edge_end]
-            elif name in TOKEN_FIELDS:
+            elif name == "_mismatch_metrics":
+                episode[name] = {
+                    metric_name: metric[token_start:token_end]
+                    for metric_name, metric in value.items()
+                }
+            elif name in SEQUENCE_FIELDS:
                 episode[name] = value[token_start:token_end]
             elif not isinstance(value, torch.Tensor):
                 episode[name] = value[index]
@@ -267,45 +258,23 @@ def update_packed_targets(packs: list[dict], episodes: list[Episode]) -> None:
                 raise ValueError(f"{episode_field} must be present for every episode in a pack or for none")
             if all(value is not None for value in values):
                 for index, value in zip(indices, values, strict=True):
-                    _validate_edge_field(episodes[index], episode_field, value)
+                    _validate_source_field(episodes[index], episode_field, value)
                 pack[pack_field] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
             else:
                 pack.pop(pack_field, None)
 
 
-def edge_to_token_slots(
-    edge_values: torch.Tensor,
+def fill_document_terminal_slots(
+    values: torch.Tensor,
     cu_seqlens: torch.Tensor,
     *,
-    fill: float | int,
-    total_length: int | None = None,
+    fill: float | int = 0,
 ) -> torch.Tensor:
-    """Place each edge value at its source-token position."""
-    boundaries = cu_seqlens.tolist()
-    packed_length = boundaries[-1]
-    total_length = packed_length if total_length is None else total_length
-    if total_length < packed_length:
-        raise ValueError("total_length cannot be shorter than the packed token stream")
-    output = torch.full(
-        (total_length, *edge_values.shape[1:]),
-        fill,
-        dtype=edge_values.dtype,
-        device=edge_values.device,
-    )
-    cursor = 0
-    for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
-        edge_count = end - start - 1
-        output[start : end - 1] = edge_values[cursor : cursor + edge_count]
-        cursor += edge_count
-    if cursor != edge_values.shape[0]:
-        raise ValueError(f"consumed {cursor} edge values but received {edge_values.shape[0]}")
+    """Fill the source-token slot without a prediction target in each document."""
+    output = values.clone()
+    terminal_indices = cu_seqlens[1:].to(device=values.device, dtype=torch.long) - 1
+    output[terminal_indices] = fill
     return output
-
-
-def token_slots_to_edges(token_values: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
-    boundaries = cu_seqlens.tolist()
-    pieces = [token_values[start : end - 1] for start, end in zip(boundaries[:-1], boundaries[1:], strict=True)]
-    return torch.cat(pieces) if pieces else token_values.new_empty((0, *token_values.shape[1:]))
 
 
 def build_document_ids(cu_seqlens: torch.Tensor, total_length: int | None = None) -> torch.Tensor:
@@ -337,19 +306,15 @@ def build_model_batch(pack: dict) -> dict:
     return batch
 
 
-def build_token_slot_fields(pack: dict) -> dict[str, torch.Tensor]:
+def build_training_fields(pack: dict) -> dict[str, torch.Tensor]:
     fields = {
         "document_ids": build_document_ids(pack["cu_seqlens"]).unsqueeze(0),
     }
-    for name, fill in TOKEN_SLOT_FILLS.items():
+    for name in TRAINING_FIELDS:
         value = pack.get(name)
         if isinstance(value, torch.Tensor) and value.numel() > 0:
-            fields[name] = edge_to_token_slots(value, pack["cu_seqlens"], fill=fill).unsqueeze(0)
+            fields[name] = value.unsqueeze(0)
     for name, value in pack.get("_mismatch_metrics", {}).items():
         if isinstance(value, torch.Tensor) and value.numel() > 0:
-            fields[f"mismatch/{name}"] = edge_to_token_slots(
-                value,
-                pack["cu_seqlens"],
-                fill=0,
-            ).unsqueeze(0)
+            fields[f"mismatch/{name}"] = value.unsqueeze(0)
     return fields

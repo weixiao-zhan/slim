@@ -77,7 +77,9 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
 
 
 def records_to_episodes(d, limit=None):
-    """Rebuild frozen slim Episodes from stage-1 records (edge-aligned tensors + experts)."""
+    """Rebuild finalized Slim Episodes from source-token-aligned stage-1 records."""
+    import torch
+
     from slim.utils.types import Episode
 
     episodes = []
@@ -86,21 +88,19 @@ def records_to_episodes(d, limit=None):
             break
         ep = Episode(example={"label": rec.get("label")})
         ep.reward = float(rec.get("reward", 0.0))  # pack_sequences needs a real number
-        ep.tokens = list(rec["tokens"])
-        ep.loss_mask = list(rec["loss_mask"])
-        ep.rollout_log_probs = list(rec["rollout_log_probs"])
+        ep.tokens = torch.as_tensor(rec["tokens"], dtype=torch.long)
+        ep.loss_mask = torch.as_tensor(rec["loss_mask"], dtype=torch.int)
+        ep.rollout_log_probs = torch.as_tensor(rec["rollout_log_probs"], dtype=torch.float32)
         if rec.get("has_experts"):
             arr = C.load_experts(d, rec["sample_idx"])
             if arr is not None:
-                ep.rollout_routed_experts = arr  # [num_gen_edges, L, K]; freeze() -> int32 tensor
+                ep.rollout_routed_experts = torch.from_numpy(arr).to(torch.int32)
         if rec.get("has_mm"):
             # Restore the processor-output tensors (pixel_values, image_grid_thw, ...) onto the
             # episode so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
             mm = C.load_mm_inputs(d, rec["sample_idx"])
             if mm is not None:
-                ep.multimodal_inputs = mm  # dict of tensors; freeze() leaves it untouched
-        ep.ensure_edge_alignment()
-        ep.freeze()
+                ep.multimodal_inputs = mm
         episodes.append((rec["sample_idx"], rec["num_prompt_tokens"], ep))
     return episodes
 
@@ -170,23 +170,19 @@ def main():
     episodes_meta = records_to_episodes(src_dir, limit=args_cli.limit)
     episodes = [ep for (_, _, ep) in episodes_meta]
 
-    # pack_sequences needs _advantages/_returns; set dummies exactly as the real compute_log_probs does.
-    from slim.backends.nemo.data_packing import init_dummy_advantages
-
-    init_dummy_advantages(episodes)
     # global_batch_size must cover all episodes in one "rollout" so _packed_data packs them together.
     actor.args.global_batch_size = len(episodes)
 
     packed_batches, _ = actor._packed_data(episodes)
     actor._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
 
-    # --- per-token AND sequence-level K3 KL over generated edges ---
-    # Unpack each packed batch into per-episode edge-aligned tensors (exactly as the actor's
-    # _train_core does). With Δ_i = train_logprob_i - rollout_logprob_i on each generated edge i:
-    #   per-token K3  : kl_k3_i = exp(Δ_i) - Δ_i - 1           (compute_mismatch_metrics, per edge)
+    # --- per-token AND sequence-level K3 KL over generated predictions ---
+    # Unpack each packed batch into per-episode source-token-aligned tensors. With
+    # Δ_i = train_logprob_i - rollout_logprob_i on each generated prediction slot i:
+    #   per-token K3  : kl_k3_i = exp(Δ_i) - Δ_i - 1
     #   sequence K3   : length-NORMALIZED, GSPO-style (slim's compute_gspo_kl averages the
     #                   log-ratio over the sequence). Let Δ_seq = Σ_i Δ_i over the L generated
-    #                   edges (= log P_train(seq) - log P_rollout(seq)); the mean log-ratio is
+    #                   predictions (= log P_train(seq) - log P_rollout(seq)); the mean log-ratio is
     #                   s_bar = Δ_seq / L, then kl_k3_seq = exp(s_bar) - s_bar - 1 (one per seq).
     # Both are the K3 estimator (exp(x)-x-1). Normalizing by L keeps the sequence ratio O(1)
     # regardless of length (the raw Σ_i Δ_i exponentiates an unbounded sum and is tail-explosive).
@@ -216,10 +212,10 @@ def main():
             # per-token
             all_kl.append(kl)
             # sequence-level (length-normalized, GSPO-style): mean log-ratio over this
-            # sequence's generated edges, then K3. Normalizing by L keeps it O(1) and
+            # sequence's generated predictions, then K3. Normalizing by L keeps it O(1) and
             # comparable across lengths (raw Σ Δ exponentiates an unbounded sum -> tail explosion).
             delta_seq = float((train_t.float().cpu()[sel] - roll_t.float().cpu()[sel]).sum().item())
-            s_bar = delta_seq / kl.size  # mean log-ratio; kl.size == # generated edges (L)
+            s_bar = delta_seq / kl.size  # mean log-ratio; kl.size == # generated predictions (L)
             kl_seq = float(np.exp(s_bar) - s_bar - 1.0)
             seq_delta.append(delta_seq)
             seq_kl.append(kl_seq)

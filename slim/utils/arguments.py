@@ -130,7 +130,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "and then set this to the path of your custom rollout function. "
                     "The signature of the function should be "
                     "`def generate_rollout(args, rollout_id, data_source, evaluation=False) -> RolloutFnTrainOutput | RolloutFnEvalOutput`"
-                    "and within the output sample, you should at least set `tokens`, `response_length`, `reward` "
+                    "and within the output sample, you should at least set `tokens`, `loss_mask`, `reward` "
                     "and `status`."
                 ),
             )

@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoConfig
 
+from slim.backends.nemo.data_packing import fill_document_terminal_slots
 from slim.backends.nemo.forward import model_forward, prepare_forward
 from slim.backends.nemo.loss import selective_log_probs
 from slim.backends.nemo.models import build_model, validate_config
@@ -63,6 +64,7 @@ def _pack(first_document: list[int]) -> dict:
     second_document = [101, 102, 103, 104, 105, 106]
     tokens = torch.tensor(first_document + second_document, dtype=torch.long)
     first_end = len(first_document)
+    cu_seqlens = torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32)
     return {
         "tokens": tokens,
         "position_ids": torch.cat(
@@ -71,10 +73,19 @@ def _pack(first_document: list[int]) -> dict:
                 torch.arange(len(second_document), dtype=torch.long),
             )
         ),
-        "loss_masks": torch.ones(tokens.numel() - 2, dtype=torch.int32),
-        "advantages": torch.ones(tokens.numel() - 2, dtype=torch.float32),
-        "value_targets": torch.ones(tokens.numel() - 2, dtype=torch.float32),
-        "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
+        "loss_masks": fill_document_terminal_slots(
+            torch.ones(tokens.numel(), dtype=torch.int32),
+            cu_seqlens,
+        ),
+        "advantages": fill_document_terminal_slots(
+            torch.ones(tokens.numel(), dtype=torch.float32),
+            cu_seqlens,
+        ),
+        "value_targets": fill_document_terminal_slots(
+            torch.ones(tokens.numel(), dtype=torch.float32),
+            cu_seqlens,
+        ),
+        "cu_seqlens": cu_seqlens,
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
         "_episode_dp_indices": [0, 1],

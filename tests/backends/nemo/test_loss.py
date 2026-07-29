@@ -77,11 +77,11 @@ def test_global_denominators_count_samples_and_masked_tokens():
     packs = [
         {
             "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
-            "loss_masks": torch.tensor([0, 1, 0, 0]),
+            "loss_masks": torch.tensor([0, 1, 0, 0, 1, 0]),
         },
         {
             "cu_seqlens": torch.tensor([0, 2], dtype=torch.int32),
-            "loss_masks": torch.tensor([1]),
+            "loss_masks": torch.tensor([0, 0]),
         },
     ]
 
@@ -89,6 +89,19 @@ def test_global_denominators_count_samples_and_masked_tokens():
 
     assert sequences.item() == 3
     assert tokens.item() == 2
+
+
+@pytest.mark.unit
+def test_global_denominators_reject_non_source_aligned_masks():
+    packs = [
+        {
+            "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
+            "loss_masks": torch.tensor([0, 1, 0, 1]),
+        },
+    ]
+
+    with pytest.raises(ValueError, match="packed token count 6"):
+        count_global_denominators(packs, dp_group=None, device="cpu")
 
 
 @pytest.mark.unit

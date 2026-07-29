@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Algorithm-independent construction of edge-aligned training targets."""
+"""Algorithm-independent construction of source-token-aligned training targets."""
 
 from __future__ import annotations
 
@@ -51,7 +51,9 @@ class AdvantageEstimator:
                 raise ValueError(f"{self.args.advantage_estimator} does not accept critic values")
             advantages = self._compute_group_advantages(episodes)
             for episode, advantage in zip(episodes, advantages, strict=True):
-                episode.set_train_targets([advantage] * episode.num_edges)
+                targets = torch.full((len(episode.tokens),), advantage, dtype=torch.float32)
+                targets[-1] = 0
+                episode.set_train_targets(targets)
             return
 
         if self.args.advantage_estimator != "ppo_gae":
@@ -106,9 +108,9 @@ class AdvantageEstimator:
                     f"DP rank {dp_rank} has {len(episodes)} episodes but {len(values)} critic values"
                 )
             for episode, value in zip(episodes, values, strict=True):
-                if len(value) != episode.num_edges:
+                if len(value) != len(episode.tokens):
                     raise ValueError(
-                        f"episode {episode.episode_index} has {episode.num_edges} edges but {len(value)} values"
+                        f"episode {episode.episode_index} has {len(episode.tokens)} tokens but {len(value)} values"
                     )
                 values_by_episode_index[episode.episode_index] = value
         return values_by_episode_index
@@ -118,19 +120,25 @@ class AdvantageEstimator:
         episodes: list[Episode],
         values_by_episode_index: dict[int, object],
     ) -> None:
-        max_edges = max(episode.num_edges for episode in episodes)
-        rewards = torch.zeros(len(episodes), max_edges)
+        max_tokens = max(len(episode.tokens) for episode in episodes)
+        rewards = torch.zeros(len(episodes), max_tokens)
         values = torch.zeros_like(rewards)
         masks = torch.zeros_like(rewards, dtype=torch.bool)
         for index, episode in enumerate(episodes):
             mask = torch.as_tensor(episode.loss_mask, dtype=torch.bool)
+            token_count = len(episode.tokens)
+            if mask.shape != (token_count,):
+                raise ValueError(
+                    f"episode {episode.episode_index} loss_mask shape {tuple(mask.shape)} "
+                    f"does not match token count {token_count}"
+                )
             active = mask.nonzero().flatten()
             if active.numel() == 0:
-                raise ValueError(f"episode {episode.episode_index} has no policy-controlled edges")
+                raise ValueError(f"episode {episode.episode_index} has no policy-controlled predictions")
             rewards[index, active[-1]] = episode.reward
             episode_values = values_by_episode_index[episode.episode_index]
-            values[index, : episode.num_edges] = torch.as_tensor(episode_values, dtype=torch.float32)
-            masks[index, : episode.num_edges] = mask
+            values[index, :token_count] = torch.as_tensor(episode_values, dtype=torch.float32)
+            masks[index, :token_count] = mask
 
         advantages, value_targets = vanilla_gae(
             rewards,
@@ -146,11 +154,11 @@ class AdvantageEstimator:
             advantages = torch.where(masks, (advantages - mean) / std, 0)
 
         for index, episode in enumerate(episodes):
-            edge_count = episode.num_edges
+            token_count = len(episode.tokens)
             episode.set_train_targets(
-                advantages[index, :edge_count].tolist(),
-                values=values[index, :edge_count].tolist(),
-                value_targets=value_targets[index, :edge_count].tolist(),
+                advantages[index, :token_count],
+                values=values[index, :token_count],
+                value_targets=value_targets[index, :token_count],
             )
 
 

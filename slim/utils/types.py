@@ -22,16 +22,15 @@ class Episode:
     """A single rollout/training record.
 
     Lifecycle:
-      1. Created from dataset example — fields are Python lists.
+      1. Created from dataset example; fields are Python lists.
       2. Mutated in-place during async generation + reward.
-      3. ``freeze()`` converts tokens/loss_mask/rollout_log_probs to tensors.
-      4. Consumed by normalization, packing, and training — all tensor ops.
+      3. ``finalize_source_token_alignment()`` converts sequence fields to tensors
+         and appends their terminal source-token slot.
+      4. Consumed by normalization, packing, and training using tensor operations.
 
-    Edge-aligned invariants (len == len(tokens) - 1):
-    - ``loss_mask[i]``: whether predicting ``tokens[i+1]`` contributes to loss.
-      Prompt edges are 0, generated edges are 1.
-    - ``rollout_log_probs[i]``: log-prob of ``tokens[i+1]`` under the rollout policy.
-    - ``rollout_routed_experts[i]``: top-k MoE expert ids selected at the router
+    Source-token-aligned fields have ``len == len(tokens)`` after finalization.
+    Position ``i`` describes the prediction of ``tokens[i+1]``. The final
+    position has no prediction target and contains the field's neutral fill.
     """
 
     # Raw dataset row — rollout/RM functions read whatever columns they need
@@ -39,12 +38,12 @@ class Episode:
     generate_function_path: str | None = None
     session_id: str | None = None
 
-    # Sequence state — lists pre-freeze, tensors post-freeze
+    # Sequence state: prediction lists during generation, source-aligned tensors after finalization.
     tokens: Any = field(default_factory=list)          # [int] → LongTensor
     loss_mask: Any | None = None                       # [int] → IntTensor
     reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
-    rollout_routed_experts: Any | None = None          # np.ndarray [num_edges, num_layers, top_k] → IntTensor
+    rollout_routed_experts: Any | None = None          # np.ndarray [prediction, layer, top_k] → IntTensor
     multimodal_inputs: dict[str, Any] | None = None
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
@@ -52,10 +51,10 @@ class Episode:
     #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
     #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
     text: str | None = None                            # decode of all tokens
-    generated_text: str | None = None                  # decode of loss_mask==1 tokens
+    generated_text: str | None = None                  # decode of targets selected by active prediction slots
     non_generation_time: float = 0.0
     max_tokens: int = 0
-    _sampling_params: dict[str, Any] | None = None     # transient rollout request params; cleared by freeze()
+    _sampling_params: dict[str, Any] | None = None     # transient rollout params; cleared during finalization
 
     # Training targets, populated after rollout.
     episode_index: int | None = None
@@ -81,72 +80,121 @@ class Episode:
     def has_multimodal(self) -> bool:
         return any(self.example.get(k) for k in ("images", "videos", "audios"))
 
-    # --- Pre-freeze helpers (list phase) ---
+    # --- Rollout finalization ---
 
-    @property
-    def num_edges(self) -> int:
-        return max(len(self.tokens) - 1, 0)
+    @staticmethod
+    def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
+        if isinstance(value, torch.Tensor):
+            return value.detach().to(device="cpu", dtype=dtype)
+        return torch.as_tensor(value, dtype=dtype)
 
-    def ensure_edge_alignment(self) -> None:
-        """Validate edge-aligned rollout fields. Call before freeze()."""
-        edge_len = self.num_edges
+    def _finalize_prediction_field(
+        self,
+        name: str,
+        value,
+        *,
+        dtype: torch.dtype,
+        fill: float | int,
+    ):
+        if value is None:
+            return None
+        tensor = self._as_cpu_tensor(value, dtype=dtype)
+        if tensor.ndim == 0:
+            raise ValueError(f"{name} must have a sequence dimension")
+
+        token_count = len(self.tokens)
+        prediction_count = max(token_count - 1, 0)
+        if tensor.shape[0] != prediction_count:
+            raise ValueError(
+                f"{name} length {tensor.shape[0]} must match prediction count {prediction_count}"
+            )
+        if token_count == 0:
+            return tensor
+        padding = torch.full((1, *tensor.shape[1:]), fill, dtype=dtype)
+        return torch.cat((tensor, padding), dim=0)
+
+    def _source_token_tensor(
+        self,
+        name: str,
+        value,
+        *,
+        dtype: torch.dtype,
+        fill: float | int,
+    ):
+        if value is None:
+            return None
+        tensor = self._as_cpu_tensor(value, dtype=dtype)
+        if tensor.ndim == 0 or tensor.shape[0] != len(self.tokens):
+            raise ValueError(
+                f"{name} length {tensor.shape[0] if tensor.ndim else 0} "
+                f"must match token count {len(self.tokens)}"
+            )
+        if len(self.tokens) and not torch.all(tensor[-1] == fill):
+            raise ValueError(f"{name} terminal source-token slot must equal {fill}")
+        return tensor
+
+    def finalize_source_token_alignment(self) -> None:
+        """Finalize rollout fields as CPU tensors aligned with source tokens."""
         if self.loss_mask is None:
             raise ValueError("loss_mask must be present")
-        if len(self.loss_mask) != edge_len:
-            raise ValueError(f"loss_mask length {len(self.loss_mask)} != num_edges {edge_len}")
-        if self.rollout_log_probs is not None and len(self.rollout_log_probs) != edge_len:
-            raise ValueError(f"rollout_log_probs length {len(self.rollout_log_probs)} != num_edges {edge_len}")
-        if self.rollout_routed_experts is not None and len(self.rollout_routed_experts) != edge_len:
-            raise ValueError(f"rollout_routed_experts length {len(self.rollout_routed_experts)} != num_edges {edge_len}")
+        if any(target is not None for target in (self.advantages, self.values, self.value_targets)):
+            raise ValueError("training targets must not be present before source-token finalization")
 
-    def freeze(self) -> None:
-        """Convert sequence fields to tensors. Call once after generation + RM."""
-        self.tokens = torch.tensor(self.tokens, dtype=torch.long)
-        if self.loss_mask is not None:
-            self.loss_mask = torch.tensor(self.loss_mask, dtype=torch.int)
-        if self.rollout_log_probs is not None:
-            self.rollout_log_probs = torch.tensor(self.rollout_log_probs, dtype=torch.float32)
-        if self.rollout_routed_experts is not None and not isinstance(self.rollout_routed_experts, torch.Tensor):
-            self.rollout_routed_experts = torch.from_numpy(self.rollout_routed_experts).to(torch.int32)
+        self.tokens = self._as_cpu_tensor(self.tokens, dtype=torch.long)
+        self.loss_mask = self._finalize_prediction_field(
+            "loss_mask",
+            self.loss_mask,
+            dtype=torch.int,
+            fill=0,
+        )
+        self.rollout_log_probs = self._finalize_prediction_field(
+            "rollout_log_probs",
+            self.rollout_log_probs,
+            dtype=torch.float32,
+            fill=0.0,
+        )
+        self.rollout_routed_experts = self._finalize_prediction_field(
+            "rollout_routed_experts",
+            self.rollout_routed_experts,
+            dtype=torch.int32,
+            fill=0,
+        )
         self._sampling_params = None
 
-    # --- Properties (work on both lists and tensors) ---
+    # --- Derived values ---
 
     @property
     def response_length(self) -> int:
-        """Count of generated edges (loss_mask == 1)."""
+        """Count source positions whose predictions contribute to training."""
         if self.loss_mask is None:
-            return self.num_edges
+            return max(len(self.tokens) - 1, 0)
         return int(sum(self.loss_mask))
 
-    def get_generated_token_ids(self) -> list[int]:
-        """Extract token ids where loss_mask == 1.
-
-        Returns a plain list regardless of pre/post-freeze state.
-        """
-        if self.loss_mask is None or not len(self.tokens):
-            return []
-        tokens, mask = self.tokens, self.loss_mask
-        if hasattr(mask, "bool"):  # tensor path
-            return tokens[1:][mask.bool()].tolist()
-        return [tokens[i + 1] for i, m in enumerate(mask) if m]
-
     def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
-        """Set edge-aligned training targets after rollout processing."""
-        targets = {
-            "advantages": advantages,
-            "values": values,
-            "value_targets": value_targets,
-        }
-        for name, target in targets.items():
-            if target is not None and len(target) != self.num_edges:
-                raise ValueError(f"{name} length {len(target)} != num_edges {self.num_edges}")
+        """Set source-token-aligned training targets after rollout processing."""
         if advantages is None:
             raise ValueError("advantages must be present")
+        if not isinstance(self.tokens, torch.Tensor) or not isinstance(self.loss_mask, torch.Tensor):
+            raise RuntimeError("episode must be source-token finalized before setting training targets")
 
-        self.advantages = advantages
-        self.values = values
-        self.value_targets = value_targets
+        self.advantages = self._source_token_tensor(
+            "advantages",
+            advantages,
+            dtype=torch.float32,
+            fill=0.0,
+        )
+        self.values = self._source_token_tensor(
+            "values",
+            values,
+            dtype=torch.float32,
+            fill=0.0,
+        )
+        self.value_targets = self._source_token_tensor(
+            "value_targets",
+            value_targets,
+            dtype=torch.float32,
+            fill=0.0,
+        )
 
     # --- Shared helpers ---
 

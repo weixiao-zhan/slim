@@ -22,13 +22,14 @@ def test_custom_mismatch_metrics_are_preserved(monkeypatch):
     )
     pack = {
         "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
-        "actor_old_log_probs": torch.tensor([0.1, 0.2, 0.3, 0.4]),
-        "rollout_log_probs": torch.tensor([0.0, 0.1, 0.2, 0.3]),
-        "loss_masks": torch.ones(4),
+        "actor_old_log_probs": torch.tensor([0.1, 0.2, 0.0, 0.3, 0.4, 0.0]),
+        "rollout_log_probs": torch.tensor([0.0, 0.1, 0.0, 0.2, 0.3, 0.0]),
+        "loss_masks": torch.tensor([1, 1, 0, 1, 1, 0]),
     }
 
-    def correction(**_kwargs):
-        return None, None, {"rs_keep": [torch.ones(2), torch.zeros(2)]}
+    def correction(**kwargs):
+        assert [value.shape for value in kwargs["loss_masks"]] == [(3,), (3,)]
+        return None, None, {"rs_keep": [torch.tensor([1.0, 1.0, 0.0]), torch.zeros(3)]}
 
     monkeypatch.setattr("slim.backends.nemo.actor.load_function", lambda _path: correction)
 
@@ -36,5 +37,5 @@ def test_custom_mismatch_metrics_are_preserved(monkeypatch):
 
     torch.testing.assert_close(
         pack["_mismatch_metrics"]["rs_keep"],
-        torch.tensor([1.0, 1.0, 0.0, 0.0]),
+        torch.tensor([1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
     )

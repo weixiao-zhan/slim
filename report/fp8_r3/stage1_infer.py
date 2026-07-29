@@ -1,4 +1,4 @@
-"""Stage 1 — generate rollouts for one config with the offline sglang Engine and write edge-aligned
+"""Stage 1 — generate rollouts for one config with the offline sglang Engine and write source-aligned
 records + reward + accuracy to <out-dir> (record schema in common.py).
 
 Args:
@@ -215,7 +215,7 @@ def main():
     truncs = []  # per-record truncated flags, parallel to rewards
     n_records = 0
     with open(out_dir / "records.jsonl", "w") as fh:
-        for j, ((ei, ex, pids, mm), gen) in enumerate(zip(jobs, outputs)):
+        for j, ((ei, ex, pids, mm), gen) in enumerate(zip(jobs, outputs, strict=True)):
             meta = gen["meta_info"]
             otl = meta["output_token_logprobs"]  # list of [logprob, token_id, ...]
             new_tokens = [it[1] for it in otl]
@@ -226,7 +226,7 @@ def main():
             finish_type = fr.get("type") if isinstance(fr, dict) else fr
             truncated = finish_type == "length"
 
-            # Edge-aligned reconstruction (exactly slim's convention).
+            # Build prediction fields, then finalize them to Slim's source-token layout.
             ep = Episode.from_example(ex)
             ep.tokens = list(pids)
             P = len(pids)
@@ -244,12 +244,12 @@ def main():
 
                     L, K = routing_shape
                     arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
-                    routed = arr.reshape(-1, L, K)  # [num_generated_edges, L, K]
+                    routed = arr.reshape(-1, L, K)  # [num_predictions, L, K]
                     ep.rollout_routed_experts = routed
 
             ep.generated_text = state.tokenizer.decode(new_tokens)
-            ep.ensure_edge_alignment()
             r = asyncio.run(score(args, ep))
+            ep.finalize_source_token_alignment()
             rewards.append(r)
             truncs.append(bool(truncated))
 
@@ -261,9 +261,9 @@ def main():
             rec = {
                 "sample_idx": j,
                 "example_idx": ei,
-                "tokens": ep.tokens,
-                "loss_mask": ep.loss_mask,
-                "rollout_log_probs": ep.rollout_log_probs,
+                "tokens": ep.tokens.tolist(),
+                "loss_mask": ep.loss_mask.tolist(),
+                "rollout_log_probs": ep.rollout_log_probs.tolist(),
                 "num_prompt_tokens": P,
                 "reward": float(r),
                 "label": ex.get("label"),
@@ -273,8 +273,8 @@ def main():
                 "truncated": bool(truncated),  # True == hit length budget (no natural EOS)
             }
             C.append_record(fh, rec)
-            if routed is not None:
-                C.save_experts(out_dir, j, routed)
+            if ep.rollout_routed_experts is not None:
+                C.save_experts(out_dir, j, ep.rollout_routed_experts.numpy())
             n_records += 1
             if j % 100 == 0:
                 print(f"[score {j}/{len(jobs)}] acc={np.mean(rewards):.3f} elapsed={time.time()-t0:.0f}s", flush=True)
@@ -299,7 +299,7 @@ def main():
         # that ended naturally (finish_type != "length"); truncation_rate is the fraction cut off.
         "truncation_rate": (float(np.mean(truncs)) if truncs else None),
         "accuracy_untruncated": (
-            float(np.mean([rw for rw, tr in zip(rewards, truncs) if not tr]))
+            float(np.mean([rw for rw, tr in zip(rewards, truncs, strict=True) if not tr]))
             if any(not tr for tr in truncs) else None
         ),
         "n_untruncated": int(sum(1 for tr in truncs if not tr)),

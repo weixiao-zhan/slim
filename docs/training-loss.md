@@ -36,7 +36,7 @@ $$\delta_{i,t} = R_{i,t} + \gamma V_{i,t+1} - V_{i,t}$$
 $$A_{i,t} = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{i,t+l}$$
 
 The reward is placed at the last response token; all others have $R_{i,t} = 0$.
-Masked prompt and observation edges do not advance the GAE recurrence and receive zero advantage.
+Masked prompt, observation, and terminal source positions do not advance the GAE recurrence and receive zero advantage.
 
 ### `grpo` (default)
 
