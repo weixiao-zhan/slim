@@ -505,8 +505,8 @@ class RolloutManager:
         if self.args.debug_rollout_only:
             return
         for index, episode in enumerate(episodes):
-            episode.rollout_index = index
-        self._apply_loss_masks(episodes)
+            episode.episode_index = index
+            episode.ensure_edge_alignment()
         return self._split_episodes_by_dp(episodes, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):
@@ -639,11 +639,6 @@ class RolloutManager:
                 dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in data])
 
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
-
-    def _apply_loss_masks(self, episodes: list[Episode]):
-        """Materialize loss_mask: None → all-ones."""
-        for ep in episodes:
-            ep.ensure_edge_alignment()
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config

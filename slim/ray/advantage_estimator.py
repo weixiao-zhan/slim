@@ -24,23 +24,27 @@ class AdvantageEstimator:
         if args.custom_reward_post_process_path is not None:
             self.custom_reward_post_process = load_function(args.custom_reward_post_process_path)
 
-    def prepare(self, rollout_data_refs: list, value_payloads: list[dict] | None = None) -> list:
+    def compute_training_targets(
+        self,
+        rollout_data_refs: list,
+        value_payloads: list[dict] | None = None,
+    ) -> list:
         partitions = ray.get(rollout_data_refs)
-        self.prepare_partitions(partitions, value_payloads)
+        self.compute_partition_training_targets(partitions, value_payloads)
         return [ray.put(episodes) for episodes in partitions]
 
-    def prepare_partitions(
+    def compute_partition_training_targets(
         self,
         partitions: list[list[Episode]],
         value_payloads: list[dict] | None = None,
     ) -> None:
         episodes = list(chain.from_iterable(partitions))
-        if any(episode.rollout_index is None for episode in episodes):
-            raise ValueError("every training episode must have a rollout_index")
-        episodes.sort(key=lambda episode: episode.rollout_index)
-        rollout_indices = [episode.rollout_index for episode in episodes]
-        if rollout_indices != list(range(len(episodes))):
-            raise ValueError(f"rollout_index values must be contiguous and unique, got {rollout_indices}")
+        if any(episode.episode_index is None for episode in episodes):
+            raise ValueError("every training episode must have an episode_index")
+        episodes.sort(key=lambda episode: episode.episode_index)
+        episode_indices = [episode.episode_index for episode in episodes]
+        if episode_indices != list(range(len(episodes))):
+            raise ValueError(f"episode_index values must be contiguous and unique, got {episode_indices}")
 
         if self.args.advantage_estimator in ("grpo", "gspo"):
             if value_payloads is not None:
@@ -55,8 +59,8 @@ class AdvantageEstimator:
         if value_payloads is None:
             raise ValueError("PPO GAE requires critic values")
 
-        values_by_rollout_index = self._index_values(partitions, value_payloads)
-        self._compute_ppo_targets(episodes, values_by_rollout_index)
+        values_by_episode_index = self._index_values(partitions, value_payloads)
+        self._compute_ppo_targets(episodes, values_by_episode_index)
 
     def _compute_group_advantages(self, episodes: list[Episode]) -> list[float]:
         if self.custom_reward_post_process is not None:
@@ -94,7 +98,7 @@ class AdvantageEstimator:
                 f"{list(range(len(partitions)))}"
             )
 
-        values_by_rollout_index = {}
+        values_by_episode_index = {}
         for dp_rank, episodes in enumerate(partitions):
             values = values_by_dp[dp_rank]
             if len(values) != len(episodes):
@@ -104,15 +108,15 @@ class AdvantageEstimator:
             for episode, value in zip(episodes, values, strict=True):
                 if len(value) != episode.num_edges:
                     raise ValueError(
-                        f"episode {episode.rollout_index} has {episode.num_edges} edges but {len(value)} values"
+                        f"episode {episode.episode_index} has {episode.num_edges} edges but {len(value)} values"
                     )
-                values_by_rollout_index[episode.rollout_index] = value
-        return values_by_rollout_index
+                values_by_episode_index[episode.episode_index] = value
+        return values_by_episode_index
 
     def _compute_ppo_targets(
         self,
         episodes: list[Episode],
-        values_by_rollout_index: dict[int, object],
+        values_by_episode_index: dict[int, object],
     ) -> None:
         max_edges = max(episode.num_edges for episode in episodes)
         rewards = torch.zeros(len(episodes), max_edges)
@@ -122,9 +126,9 @@ class AdvantageEstimator:
             mask = torch.as_tensor(episode.loss_mask, dtype=torch.bool)
             active = mask.nonzero().flatten()
             if active.numel() == 0:
-                raise ValueError(f"episode {episode.rollout_index} has no policy-controlled edges")
+                raise ValueError(f"episode {episode.episode_index} has no policy-controlled edges")
             rewards[index, active[-1]] = episode.reward
-            episode_values = values_by_rollout_index[episode.rollout_index]
+            episode_values = values_by_episode_index[episode.episode_index]
             values[index, : episode.num_edges] = torch.as_tensor(episode_values, dtype=torch.float32)
             masks[index, : episode.num_edges] = mask
 

@@ -527,16 +527,34 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Max LR for the actor (RL policy). Defaults to --lr.",
             )
             parser.add_argument(
+                "--lr-actor-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the actor (RL policy) starts training.",
+            )
+            parser.add_argument(
                 "--lr-critic",
                 type=float,
                 default=None,
                 help="Max LR for the critic backbone. Defaults to --lr.",
             )
             parser.add_argument(
+                "--lr-critic-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic backbone learning rate leaves 0.",
+            )
+            parser.add_argument(
                 "--lr-critic-value-head",
                 type=float,
                 default=None,
                 help="Max LR for the critic value head. Defaults to --lr-critic.",
+            )
+            parser.add_argument(
+                "--lr-critic-value-head-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic value head learning rate leaves 0.",
             )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")

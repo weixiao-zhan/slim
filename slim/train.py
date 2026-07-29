@@ -42,7 +42,9 @@ def train(args):
         ray.get(rollout_manager.eval.remote(rollout_id=0))
 
     def save(rollout_id):
-        if not args.critic_train_only:
+        if (not args.use_critic) or (
+            rollout_id >= args.lr_actor_start_step and not args.critic_train_only
+        ):
             actor_train_group.save_model(
                 rollout_id,
                 force_sync=rollout_id == args.num_rollout - 1,
@@ -67,11 +69,11 @@ def train(args):
             ray.get(rollout_manager.offload.remote())
 
         if args.use_critic:
-            train_actor = not args.critic_train_only
+            train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
             if args.critic_colocate:
                 value_payloads = ray.get(critic_train_group.compute_values(rollout_data_ref))
                 train_episode_refs = ray.get(
-                    advantage_estimator.prepare.remote(rollout_data_ref, value_payloads)
+                    advantage_estimator.compute_training_targets.remote(rollout_data_ref, value_payloads)
                 )
                 ray.get(critic_train_group.async_train(rollout_id, train_episode_refs))
                 if train_actor:
@@ -85,7 +87,7 @@ def train(args):
                 )
                 value_payloads = ray.get(value_refs)
                 train_episode_refs = ray.get(
-                    advantage_estimator.prepare.remote(rollout_data_ref, value_payloads)
+                    advantage_estimator.compute_training_targets.remote(rollout_data_ref, value_payloads)
                 )
                 ray.get(logprobs_refs)
                 critic_train_handle = critic_train_group.async_train(rollout_id, train_episode_refs)
@@ -94,7 +96,7 @@ def train(args):
                 )
                 ray.get(critic_train_handle + actor_train_handle)  # train both in parallel
         else:
-            train_episode_refs = ray.get(advantage_estimator.prepare.remote(rollout_data_ref))
+            train_episode_refs = ray.get(advantage_estimator.compute_training_targets.remote(rollout_data_ref))
             ray.get(actor_train_group.async_train(rollout_id, train_episode_refs))
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):

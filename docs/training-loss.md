@@ -24,7 +24,7 @@ The two design axes are:
 ## Advantage Estimators
 
 `--advantage-estimator` controls how per-token advantages $A_{i,t}$ are derived from rewards.
-The driver invokes one Ray `AdvantageEstimator` after rollout. It processes the complete batch in `rollout_index` order and writes targets through `Episode.set_train_targets()`.
+The driver invokes `AdvantageEstimator.compute_training_targets()` after rollout. It processes the complete batch in `episode_index` order and writes targets through `Episode.set_train_targets()`.
 
 ### `ppo_gae`
 
@@ -131,9 +131,9 @@ The critic updates its weights to minimize:
 $$L_\text{value} = \frac{1}{2}\max\left((V_\theta - G)^2,\ \left(\text{clip}(V_\theta, V_\text{old} \pm \varepsilon_v) - G\right)^2\right)$$
 where $G_{i,t} = A_{i,t} + V_\text{old}(x_{i,\le t})$ is stored as `value_targets`, and $\varepsilon_v$ = `--value-clip` (default 0.2).
 
-The critic has its own optimizer and learning rate (`--critic-lr`).
-`--num-critic-only-steps` (default 0) runs N critic-only training steps at the start before the actor begins updating.
-This warms up the value baseline so early advantage estimates are more stable.
+The actor, critic backbone, and critic value head use `--lr-actor`, `--lr-critic`, and `--lr-critic-value-head`.
+Their optimizer updates begin at `--lr-actor-start-step`, `--lr-critic-start-step`, and `--lr-critic-value-head-start-step`.
+Before its start step, a component has zero learning rate and does not accumulate optimizer state.
 
 
 ## Loss Reduction

@@ -173,7 +173,7 @@ def pack_sequences(
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
             "response_lengths": [episodes[index].response_length for index in indices],
             "reward": [episodes[index].reward for index in indices],
-            "_episode_indices": list(indices),
+            "_episode_dp_indices": list(indices),
         }
 
         for name, dtype in (
@@ -256,7 +256,7 @@ def unpack_sequences(pack: dict) -> list[dict]:
 
 def update_packed_targets(packs: list[dict], episodes: list[Episode]) -> None:
     for pack in packs:
-        indices = pack["_episode_indices"]
+        indices = pack["_episode_dp_indices"]
         for episode_field, pack_field in (
             ("advantages", "advantages"),
             ("value_targets", "value_targets"),

@@ -35,8 +35,16 @@ def _episode(index: int, reward: float, *, loss_mask=None):
         tokens=list(range(len(loss_mask) + 1)),
         loss_mask=loss_mask,
         reward=reward,
-        rollout_index=index,
+        episode_index=index,
     )
+
+
+@pytest.mark.unit
+def test_episode_requires_loss_mask_before_training():
+    episode = Episode(tokens=[1, 2])
+
+    with pytest.raises(ValueError, match="loss_mask must be present"):
+        episode.ensure_edge_alignment()
 
 
 @pytest.mark.unit
@@ -63,7 +71,7 @@ def test_grpo_normalizes_rewards_in_rollout_order_across_partitions():
     ]
     partitions = [[episodes[2], episodes[0]], [episodes[3], episodes[1]]]
 
-    AdvantageEstimator(_args("grpo")).prepare_partitions(partitions)
+    AdvantageEstimator(_args("grpo")).compute_partition_training_targets(partitions)
 
     assert [episode.reward for episode in episodes] == [1.0, 3.0, 10.0, 14.0]
     assert [episode.advantages for episode in episodes] == [
@@ -81,7 +89,7 @@ def test_grpo_can_use_raw_rewards_as_reinforce_advantages():
 
     AdvantageEstimator(
         _args("grpo", group_advantage_normalization=False, rollout_batch_size=1)
-    ).prepare_partitions([episodes])
+    ).compute_partition_training_targets([episodes])
 
     assert [episode.reward for episode in episodes] == [-1.0, 2.0]
     assert [episode.advantages for episode in episodes] == [
@@ -95,7 +103,7 @@ def test_estimator_requires_canonical_rollout_indices():
     episodes = [_episode(0, 1.0), _episode(2, 2.0)]
 
     with pytest.raises(ValueError, match="contiguous and unique"):
-        AdvantageEstimator(_args("grpo")).prepare_partitions([episodes])
+        AdvantageEstimator(_args("grpo")).compute_partition_training_targets([episodes])
 
 
 @pytest.mark.unit
@@ -110,7 +118,7 @@ def test_ppo_gae_selects_cp_zero_values_by_dp_rank():
         {"dp_rank": 0, "cp_rank": 1, "values": [torch.full((3,), 99.0)]},
     ]
 
-    AdvantageEstimator(_args("ppo_gae")).prepare_partitions(
+    AdvantageEstimator(_args("ppo_gae")).compute_partition_training_targets(
         partitions,
         payloads,
     )

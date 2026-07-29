@@ -464,7 +464,7 @@ def test_physical_pack_count_is_model_independent(monkeypatch):
 
     assert len(packs) == 2
     assert boundaries == [2]
-    assert [len(pack["_episode_indices"]) for pack in packs] == [2, 2]
+    assert [len(pack["_episode_dp_indices"]) for pack in packs] == [2, 2]
 
 
 @pytest.mark.unit

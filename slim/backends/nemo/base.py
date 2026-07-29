@@ -54,6 +54,38 @@ from .topology import NeMoTopology, mesh_rank
 logger = logging.getLogger(__name__)
 
 
+def _assigned_cuda_device(rank: int) -> int:
+    device_count = torch.cuda.device_count()
+    assigned_gpu_ids = ray.get_gpu_ids()
+    if not assigned_gpu_ids:
+        return rank % max(device_count, 1)
+    if device_count == 1:
+        return 0
+
+    device = int(assigned_gpu_ids[0])
+    if not 0 <= device < device_count:
+        raise RuntimeError(
+            f"Ray assigned GPU {device}, but this worker sees {device_count} CUDA devices."
+        )
+    return device
+
+
+def _bind_default_process_group_device(device: torch.device) -> None:
+    binding = torch.zeros(1, device=device)
+    dist.all_reduce(binding)
+
+
+def _clear_inactive_optimizer_grads(
+    optimizer: torch.optim.Optimizer,
+    lr_step: int,
+) -> None:
+    for group in optimizer.param_groups:
+        if lr_step >= group.get("start_step", 0):
+            continue
+        for parameter in group["params"]:
+            parameter.grad = None
+
+
 def _move_optimizer(optimizer: torch.optim.Optimizer, device: str | torch.device) -> None:
     for state in optimizer.state.values():
         for key, value in state.items():
@@ -84,11 +116,14 @@ class NeMoTrainer(RayWorker):
         os.environ["MASTER_PORT"] = str(self.master_port)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["RANK"] = str(rank)
-        os.environ["LOCAL_RANK"] = str(rank % max(torch.cuda.device_count(), 1))
+        os.environ["LOCAL_RANK"] = str(_assigned_cuda_device(rank))
 
     @property
     def model_parts(self) -> list[torch.nn.Module]:
         return [self.model]
+
+    def _steps_per_rollout(self) -> int:
+        return self.args.rollout_batch_size * self.args.n_samples_per_prompt // self.args.global_batch_size
 
     def _init_distributed(self, args: Namespace) -> None:
         self.args = args
@@ -99,6 +134,7 @@ class NeMoTrainer(RayWorker):
             backend=args.distributed_backend,
             timeout=timedelta(minutes=args.distributed_timeout_minutes),
         )
+        _bind_default_process_group_device(torch.device("cuda", local_rank))
         init_gloo_group()
         args.rank = dist.get_rank()
         args.world_size = dist.get_world_size()
@@ -262,7 +298,9 @@ class NeMoTrainer(RayWorker):
             if len(chunk_batches) != pack_count:
                 raise RuntimeError(f"requested {pack_count} synchronized packs but built {len(chunk_batches)}")
             for batch in chunk_batches:
-                batch["_episode_indices"] = [index + start for index in batch["_episode_indices"]]
+                batch["_episode_dp_indices"] = [
+                    index + start for index in batch["_episode_dp_indices"]
+                ]
             packed_batches.extend(chunk_batches)
             step_microbatch_counts.append(pack_count)
         return packed_batches, list(accumulate(step_microbatch_counts))
@@ -343,6 +381,8 @@ class NeMoTrainer(RayWorker):
 
     def _optimizer_step(self) -> float:
         self.checkpointer.maybe_wait_for_staging()
+        self._last_step_lrs = [float(group["lr"]) for group in self.optimizer.param_groups]
+        _clear_inactive_optimizer_grads(self.optimizer, self.lr_scheduler.last_epoch)
         ep_axis_name = None
         if self.moe_mesh is not None and "ep" in self.moe_mesh.mesh_dim_names:
             ep_axis_name = "ep"
@@ -381,7 +421,7 @@ class NeMoTrainer(RayWorker):
             return
         log_dict = {f"{self._train_log_prefix}/{key}": value for key, value in metrics.items()}
         log_dict[f"{self._train_log_prefix}/grad_norm"] = grad_norm
-        for index, lr in enumerate(self.lr_scheduler.get_last_lr()):
+        for index, lr in enumerate(self._last_step_lrs):
             log_dict[f"{self._train_log_prefix}/lr-pg_{index}"] = lr
         log_dict["train/step"] = self.global_step
         logger.info("%s step %d: %s", self._train_log_prefix, self.global_step, log_dict)

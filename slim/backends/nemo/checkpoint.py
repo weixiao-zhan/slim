@@ -141,6 +141,9 @@ def load(trainer: Any) -> dict[str, Any] | None:
         )
     elif not trainer.args.no_load_optim:
         logger.warning("Optimizer checkpoint not found at %s; optimizer state is fresh", optim_dir)
+    if trainer.args.no_load_lr_scheduler:
+        trainer.lr_scheduler.reset()
+        logger.info("LR scheduler reset to step 0")
 
     match = _ITERATION_DIR_PATTERN.fullmatch(checkpoint_dir.name)
     if match is None:
@@ -182,13 +185,6 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
             trainer.args.start_rollout_id = int(next_rollout)
     elif trainer.args.start_rollout_id is None:
         trainer.args.start_rollout_id = iteration
-
-    start_step = trainer.args.lr_scheduler_start_step
-    if start_step is None and trainer.args.no_load_lr_scheduler:
-        start_step = trainer.global_step
-    if start_step is not None:
-        trainer.lr_scheduler.last_epoch = int(start_step)
-        logger.info("LR scheduler last_epoch set to %d", start_step)
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()

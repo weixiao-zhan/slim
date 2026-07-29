@@ -36,8 +36,8 @@ def test_optional_cli_types_resolve_from_postponed_annotations():
 
     assert _field_type(by_name["lr_decay_iters"], type_hints) is int
     assert _field_type(by_name["nemo_linear_backend"], type_hints) is str
-    assert by_name["freeze_vision_tower"].default is True
-    assert by_name["freeze_audio_tower"].default is True
+    assert by_name["freeze_vision_tower"].default is False
+    assert by_name["freeze_audio_tower"].default is False
     assert by_name["freeze_language_model"].default is False
     assert by_name["defer_fsdp_grad_sync"].default is False
 
@@ -46,7 +46,7 @@ def test_optional_cli_types_resolve_from_postponed_annotations():
 @pytest.mark.parametrize(
     ("flags", "expected"),
     [
-        ([], (True, True, False)),
+        ([], (False, False, False)),
         (
             [
                 "--freeze-vision-tower",
@@ -126,6 +126,9 @@ def test_validate_args_accepts_cp_ep_topology():
         ({"nemo_rms_norm_backend": "invalid"}, "nemo_rms_norm_backend"),
         ({"nemo_experts_backend": "invalid"}, "nemo_experts_backend"),
         ({"nemo_dispatcher": "invalid"}, "nemo_dispatcher"),
+        ({"lr_actor_start_step": -1}, "lr_actor_start_step"),
+        ({"lr_critic_start_step": -1}, "lr_critic_start_step"),
+        ({"lr_critic_value_head_start_step": -1}, "lr_critic_value_head_start_step"),
     ],
 )
 def test_validate_args_rejects_unsupported_settings(overrides, message):

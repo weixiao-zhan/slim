@@ -26,7 +26,6 @@ class NeMoArgs:
     lr_wsd_decay_iters: int | None = None
     lr_wsd_decay_style: str | None = None
     no_load_lr_scheduler: bool = False
-    lr_scheduler_start_step: int | None = None
     weight_decay: float = 0.0
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
@@ -39,8 +38,8 @@ class NeMoArgs:
     nemo_rms_norm_backend: Literal["torch", "torch_fp32", "te"] = "torch_fp32"
     nemo_experts_backend: Literal["torch", "te", "gmm", "torch_mm"] = "torch_mm"
     nemo_dispatcher: Literal["torch", "deepep", "hybridep", "uccl_ep"] = "torch"
-    freeze_vision_tower: bool = True
-    freeze_audio_tower: bool = True
+    freeze_vision_tower: bool = False
+    freeze_audio_tower: bool = False
     freeze_language_model: bool = False
     activation_checkpointing: bool = False
     defer_fsdp_grad_sync: bool = False
@@ -130,6 +129,14 @@ def validate_args(args) -> None:
     ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1")
+    for name in (
+        "lr_actor_start_step",
+        "lr_critic_start_step",
+        "lr_critic_value_head_start_step",
+    ):
+        value = getattr(args, name, 0)
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value}")
     if world_size and world_size % cp:
         raise ValueError(
             f"world size {world_size} must be divisible by context_parallel_size ({cp})"

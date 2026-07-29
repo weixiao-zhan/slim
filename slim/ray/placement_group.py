@@ -189,8 +189,6 @@ def create_training_groups(args, pgs, rollout_manager):
         args.start_rollout_id = start_rollout_ids[0]
 
     actor_train_group.set_rollout_manager(rollout_manager)
-    if args.use_critic:
-        critic_train_group.set_rollout_manager(rollout_manager)
 
     if args.rollout_global_dataset:
         ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
