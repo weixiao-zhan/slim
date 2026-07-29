@@ -76,7 +76,7 @@ def _parse_nemo_cli(extra_args_provider=None, ignore_unknown_args=False):
         flag = f"--{field.name.replace('_', '-')}"
         field_type = _field_type(field, type_hints)
         if field_type is bool:
-            parser.add_argument(flag, action=argparse.BooleanOptionalAction, default=field.default)
+            parser.add_argument(flag, action="store_true", default=field.default)
         else:
             annotation = type_hints[field.name]
             choices = get_args(annotation) if get_origin(annotation) is Literal else None

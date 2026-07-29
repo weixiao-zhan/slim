@@ -11,17 +11,17 @@ from slim.utils.types import Episode
 
 EDGE_FIELDS = frozenset(
     {
+        "loss_masks",
+        "advantages",
+        "returns",
+        "rollout_log_probs",
+        "rollout_routed_experts",
         "actor_old_log_probs",
         "ref_log_probs",
         "cur_log_probs",
         "entropy",
-        "cur_values",
-        "rollout_log_probs",
-        "loss_masks",
-        "advantages",
-        "returns",
         "old_values",
-        "rollout_routed_experts",
+        "cur_values",
         "mismatch_weights",
         "mismatch_masks",
     }
@@ -32,10 +32,10 @@ TOKEN_SLOT_FILLS = {
     "advantages": 0.0,
     "returns": 0.0,
     "rollout_log_probs": 0.0,
+    "rollout_routed_experts": 0,
     "actor_old_log_probs": 0.0,
     "ref_log_probs": 0.0,
     "old_values": 0.0,
-    "rollout_routed_experts": 0,
     "mismatch_weights": 1.0,
     "mismatch_masks": 0,
 }
@@ -154,7 +154,6 @@ def pack_sequences(
     packs: list[dict] = []
     for indices in partitions:
         cu_seqlens = [0]
-        edge_lengths = []
         token_parts = []
         position_parts = []
         loss_mask_parts = []
@@ -163,7 +162,6 @@ def pack_sequences(
         for index in indices:
             episode = episodes[index]
             tokens = _as_tensor(episode.tokens, dtype=torch.long)
-            edge_count = episode.num_edges
             advantages = getattr(episode, "_advantages", None)
             returns = getattr(episode, "_returns", None)
             _validate_edge_field(episode, "loss_mask", episode.loss_mask)
@@ -174,7 +172,6 @@ def pack_sequences(
             loss_mask_parts.append(_as_tensor(episode.loss_mask, dtype=torch.int32))
             advantage_parts.append(_as_tensor(advantages, dtype=torch.float32))
             return_parts.append(_as_tensor(returns, dtype=torch.float32))
-            edge_lengths.append(edge_count)
             cu_seqlens.append(cu_seqlens[-1] + tokens.numel())
 
         pack = {
@@ -184,7 +181,6 @@ def pack_sequences(
             "advantages": torch.cat(advantage_parts),
             "returns": torch.cat(return_parts),
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
-            "edge_lengths": edge_lengths,
             "response_lengths": [episodes[index].response_length for index in indices],
             "reward": [episodes[index].reward for index in indices],
             "_episode_indices": list(indices),
@@ -233,8 +229,8 @@ def unpack_sequences(pack: dict) -> list[dict]:
     """Return per-episode views from an edge-packed batch."""
     cu_seqlens = pack["cu_seqlens"].tolist()
     edge_offsets = [0]
-    for edge_length in pack["edge_lengths"]:
-        edge_offsets.append(edge_offsets[-1] + edge_length)
+    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True):
+        edge_offsets.append(edge_offsets[-1] + end - start - 1)
 
     multimodal_offsets = {}
     for name, counts in pack.get("multimodal_num_items", {}).items():

@@ -75,7 +75,6 @@ def _pack(first_document: list[int]) -> dict:
         "advantages": torch.ones(tokens.numel() - 2, dtype=torch.float32),
         "returns": torch.ones(tokens.numel() - 2, dtype=torch.float32),
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
-        "edge_lengths": [first_end - 1, len(second_document) - 1],
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
         "_episode_indices": [0, 1],
@@ -255,7 +254,7 @@ def main() -> None:
         output = model_forward(model, prepared.model_batch)
         local = selective_log_probs(output.logits, prepared.fields["labels"])
         valid = prepared.fields["labels"] != -100
-        valid_targets = sum(baseline_pack["edge_lengths"])
+        valid_targets = baseline_pack["tokens"].numel() - baseline_pack["cu_seqlens"].numel() + 1
         local_loss = -(local * valid).sum() / (valid_targets * topology.logical_dp_size)
         (local_loss * world_size).backward()
     full_log_probs = prepared.gather(local.detach(), fill=0).cpu()

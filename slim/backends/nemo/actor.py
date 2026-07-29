@@ -456,7 +456,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 loss, metrics = self._policy_loss(
                     output.logits,
                     prepared.fields,
-                    num_documents=len(pack["edge_lengths"]),
+                    num_documents=pack["cu_seqlens"].numel() - 1,
                     global_sequences=global_sequences,
                     global_tokens=global_tokens,
                 )
