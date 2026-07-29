@@ -10,7 +10,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 from nemo_automodel import NeMoAutoModelForImageTextToText
 from nemo_automodel.components.distributed.activation_checkpointing import unwrap_checkpoint_wrapper
 from nemo_automodel.components.distributed.blockdiag_cp import (
@@ -33,7 +32,6 @@ from nemo_automodel.components.models.common import BackendConfig
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
 from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
 from nemo_automodel.components.moe.layers import MoE
-from torch.distributed.fsdp import FSDPModule
 
 from ..topology import flat_mesh
 
@@ -89,12 +87,6 @@ def register_qwen3_5_moe_parallel_strategy() -> None:
         register_parallel_strategy(name=model_name)(Qwen3_5ParallelizationStrategy)
 
 
-def _disable_fsdp_backward_prefetch(model: nn.Module) -> None:
-    for module in model.modules():
-        if isinstance(module, FSDPModule):
-            module.set_modules_to_backward_prefetch([module])
-
-
 def build_model(
     config,
     args,
@@ -126,7 +118,6 @@ def build_model(
     if routing_replay:
         kwargs["moe_overrides"] = {"enable_routing_replay": True}
     model = NeMoAutoModelForImageTextToText.from_pretrained(checkpoint, **kwargs)
-    _disable_fsdp_backward_prefetch(model)
     install_packed_cp(model, distributed_setup.mesh_context.device_mesh)
     return model
 

@@ -390,10 +390,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--micro-batch-size", type=int, default=1)
             parser.add_argument(
                 "--balance-data",
-                action="store_true",
-                default=False,
+                action=argparse.BooleanOptionalAction,
+                default=True,
                 help=(
-                    "Balance the number of tokens between data parallel ranks with `karmarkar_karp` for verl. "
+                    "Balance token counts across data-parallel ranks with Karmarkar-Karp partitioning. "
                     "Note that this may allocate the different response of the same prompt into different training steps."
                 ),
             )
