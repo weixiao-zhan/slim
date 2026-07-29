@@ -37,7 +37,7 @@ COMMON_ARGS="
     --max-tokens-per-gpu 8192
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --old-logprob-source rollout
     --lr 1e-6
     --hf-checkpoint $MODEL_DIR

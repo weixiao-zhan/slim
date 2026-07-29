@@ -35,7 +35,6 @@ from slim.utils.data import process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.logging_utils import configure_logger, init_tracking
 from slim.utils.memory_utils import clear_memory
-from slim.utils.ppo_utils import vanilla_gae
 from slim.utils.processing_utils import load_processor, load_tokenizer
 from slim.utils.profile_utils import TrainProfiler
 from slim.utils.timer import Timer, inverse_timer, timer, with_defer
@@ -46,7 +45,7 @@ from .data_packing import (
     build_token_budget_partitions,
     pack_sequences,
     unpack_sequences,
-    update_packed_advantages,
+    update_packed_targets,
 )
 from .lr_scheduler import get_lr_scheduler
 from .models import validate_config
@@ -169,9 +168,7 @@ class NeMoTrainer(RayWorker):
         checkpoint_payload = checkpoint.load(self)
         self._post_model_setup()
 
-        self._pending_episodes = None
-        self._pending_packed_batches = None
-        self._pending_grad_accum = None
+        self._precomputed_packed_data: tuple[list[dict], list[int]] | None = None
         checkpoint.finalize_load(self, checkpoint_payload)
         self.sleep()
         self.prof.on_init_end()
@@ -270,6 +267,19 @@ class NeMoTrainer(RayWorker):
             step_microbatch_counts.append(pack_count)
         return packed_batches, list(accumulate(step_microbatch_counts))
 
+    def _cache_packed_data(self, packed_batches: list[dict], grad_accum: list[int]) -> None:
+        if self._precomputed_packed_data is not None:
+            raise RuntimeError("precomputed packed data is already cached")
+        self._precomputed_packed_data = (packed_batches, grad_accum)
+
+    def _take_packed_data(self, episodes: list[Episode]) -> tuple[list[dict], list[int]]:
+        if self._precomputed_packed_data is None:
+            return self._packed_data(episodes)
+        packed_batches, grad_accum = self._precomputed_packed_data
+        self._precomputed_packed_data = None
+        update_packed_targets(packed_batches, episodes)
+        return packed_batches, grad_accum
+
     @staticmethod
     def _optimizer_step_batches(packed_batches: list[dict], boundaries: list[int]):
         start = 0
@@ -279,24 +289,14 @@ class NeMoTrainer(RayWorker):
         if start != len(packed_batches):
             raise ValueError("gradient accumulation boundaries do not cover all packed batches")
 
-    def train(self, rollout_id: int, rollout_data_ref: list, values_refs: list | None = None) -> None:
+    def train(self, rollout_id: int, rollout_data_ref: list) -> None:
         if self.args.debug_rollout_only:
             return
         self.wake_up()
         with inverse_timer("train_wait"), timer("train"):
-            if self._pending_episodes is not None:
-                episodes = self._pending_episodes
-                packed_batches = self._pending_packed_batches
-                grad_accum = self._pending_grad_accum
-                self._pending_episodes = None
-                self._pending_packed_batches = None
-                self._pending_grad_accum = None
-            else:
-                episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-                packed_batches = None
-                grad_accum = None
-            values = ray.get(values_refs[dist.get_rank()]) if values_refs is not None else None
-            self._train_core(rollout_id, episodes, values, packed_batches, grad_accum)
+            episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+            packed_batches, grad_accum = self._take_packed_data(episodes)
+            self._train_core(rollout_id, packed_batches, grad_accum)
 
         train_metric_utils.log_perf_data_raw(
             rollout_id=rollout_id,
@@ -307,71 +307,13 @@ class NeMoTrainer(RayWorker):
         self.sleep()
         clear_memory()
 
-    def _train_core(self, rollout_id, episodes, values=None, packed_batches=None, grad_accum=None) -> None:
-        if self.args.advantage_estimator in ("grpo", "gspo"):
-            for episode in episodes:
-                episode._advantages = [episode.reward] * episode.num_edges
-                episode._returns = episode._advantages
-        elif self.args.advantage_estimator == "ppo_gae":
-            if values is None:
-                raise ValueError("PPO requires critic values")
-            self._compute_ppo_advantages(episodes, values)
-        else:
-            raise NotImplementedError(self.args.advantage_estimator)
-
-        if packed_batches is None:
-            packed_batches, grad_accum = self._packed_data(episodes)
-        else:
-            update_packed_advantages(packed_batches, episodes)
+    def _train_core(self, rollout_id, packed_batches: list[dict], grad_accum: list[int]) -> None:
         if not grad_accum:
             raise ValueError("training produced no microbatches")
         self._run_train_loop(packed_batches, grad_accum)
         self.prof.step(rollout_id=rollout_id)
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=None)
         self._maybe_update_ref_model(rollout_id)
-
-    def _compute_ppo_advantages(self, episodes: list[Episode], values: list[torch.Tensor]) -> None:
-        if len(episodes) != len(values):
-            raise ValueError("episode and value counts differ")
-        max_edges = max(episode.num_edges for episode in episodes)
-        rewards = torch.zeros(len(episodes), max_edges)
-        value_tensor = torch.zeros_like(rewards)
-        masks = torch.zeros_like(rewards, dtype=torch.bool)
-        for index, (episode, value) in enumerate(zip(episodes, values, strict=True)):
-            edge_count = episode.num_edges
-            if len(value) != edge_count:
-                raise ValueError(f"episode {index} has {edge_count} edges but {len(value)} values")
-            mask = torch.as_tensor(episode.loss_mask, dtype=torch.bool)
-            active = mask.nonzero().flatten()
-            if active.numel() == 0:
-                raise ValueError(f"episode {index} has no policy-controlled edges")
-            rewards[index, active[-1]] = episode.reward
-            value_tensor[index, :edge_count] = value.float()
-            masks[index, :edge_count] = mask
-        advantages, returns = vanilla_gae(
-            rewards,
-            value_tensor,
-            masks,
-            self.args.gamma,
-            self.args.lambd,
-        )
-        if self.args.normalize_advantages:
-            selected = torch.cat(
-                [advantages[i, : episode.num_edges][masks[i, : episode.num_edges]] for i, episode in enumerate(episodes)]
-            )
-            stats = torch.tensor(
-                [selected.sum(), (selected**2).sum(), selected.numel()],
-                device=torch.cuda.current_device(),
-            )
-            dist.all_reduce(stats, group=self.dp_group)
-            mean = stats[0] / stats[2]
-            std = (stats[1] / stats[2] - mean**2).clamp_min(0).sqrt().clamp_min(1e-8)
-            advantages = torch.where(masks, (advantages - mean.cpu()) / std.cpu(), 0)
-        for index, episode in enumerate(episodes):
-            edge_count = episode.num_edges
-            episode._advantages = advantages[index, :edge_count].tolist()
-            episode._returns = returns[index, :edge_count].tolist()
-            episode._values = values[index].tolist()
 
     def _begin_gradient_accumulation(self) -> None:
         prepare_for_grad_accumulation(self.model_parts, pp_enabled=False)

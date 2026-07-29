@@ -205,7 +205,7 @@ def _pack(processor=None) -> dict:
         ),
         "loss_masks": torch.ones(edge_count, dtype=torch.int32),
         "advantages": torch.linspace(0.5, 1.5, edge_count),
-        "returns": torch.linspace(0.25, 1.25, edge_count),
+        "value_targets": torch.linspace(0.25, 1.25, edge_count),
         "old_values": torch.zeros(edge_count),
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "response_lengths": [first_end - 1, len(second_document) - 1],
@@ -246,11 +246,9 @@ def _load_rollout_episodes(path: Path, samples_per_prompt: int = 8) -> list[Epis
         mean_reward = sum(float(episode.reward) for episode in group) / samples_per_prompt
         for episode in group:
             episode.ensure_edge_alignment()
-            episode.raw_reward = episode.reward
             advantage = float(episode.reward) - mean_reward
             episode.reward = advantage
-            episode._advantages = [advantage] * episode.num_edges
-            episode._returns = list(episode._advantages)
+            episode.set_train_targets([advantage] * episode.num_edges)
     return episodes
 
 
@@ -269,10 +267,10 @@ def _heterogeneous_rollout_partition(
     vision = [episode for episode in episodes if episode.multimodal_inputs]
     if not text_count or not vision:
         raise ValueError("heterogeneous rollout qualification requires both text and vision episodes")
-    inactive_count = sum(not any(float(advantage) != 0 for advantage in getattr(episode, "_advantages", ())) for episode in episodes)
+    inactive_count = sum(not any(float(advantage) != 0 for advantage in episode.advantages) for episode in episodes)
     if inactive_count:
         raise ValueError(f"heterogeneous rollout qualification has {inactive_count} episodes with zero advantage")
-    active_vision = [episode for episode in vision if any(float(advantage) != 0 for advantage in getattr(episode, "_advantages", ()))]
+    active_vision = [episode for episode in vision if any(float(advantage) != 0 for advantage in episode.advantages)]
     if len(vision) != 4 or len(active_vision) != len(vision):
         raise ValueError("heterogeneous rollout qualification requires four vision episodes with nonzero advantages")
 

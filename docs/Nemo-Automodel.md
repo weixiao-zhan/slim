@@ -106,6 +106,10 @@ No label or RL edge crosses a document boundary.
 
 `prepare_forward` constructs one contiguous block-diagonal `ContextParallelSharder`. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
 
+Before role-local packing, the Ray `AdvantageEstimator` writes edge-aligned training targets to each `Episode`. GRPO and GSPO produce `advantages`. PPO GAE consumes the critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
+
+Actor log-probability precompute and critic value precompute may cache packs before target construction. `update_packed_targets` attaches the completed targets to each role's cached packs immediately before training. Actor and critic do not share physical pack objects.
+
 `--max-tokens-per-gpu` is the target post-CP token budget for one rank. Dynamic packing therefore targets a physical pack length of:
 
 $$
@@ -247,7 +251,7 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --use-dynamic-batch-size \
   --max-tokens-per-gpu 8192 \
   --advantage-estimator grpo \
-  --disable-rewards-std-normalization \
+  --disable-group-advantage-std-normalization \
   --old-logprob-source rollout \
   --use-rollout-routing-replay \
   --eps-clip 0.2 \

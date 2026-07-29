@@ -57,6 +57,12 @@ class Episode:
     max_tokens: int = 0
     _sampling_params: dict[str, Any] | None = None     # transient rollout request params; cleared by freeze()
 
+    # Training targets, populated after rollout.
+    rollout_index: int | None = None
+    advantages: Any | None = None
+    values: Any | None = None
+    value_targets: Any | None = None
+
     # Status tracking
     class Status:
         PENDING = "pending"
@@ -124,6 +130,23 @@ class Episode:
         if hasattr(mask, "bool"):  # tensor path
             return tokens[1:][mask.bool()].tolist()
         return [tokens[i + 1] for i, m in enumerate(mask) if m]
+
+    def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
+        """Set edge-aligned training targets after rollout processing."""
+        targets = {
+            "advantages": advantages,
+            "values": values,
+            "value_targets": value_targets,
+        }
+        for name, target in targets.items():
+            if target is not None and len(target) != self.num_edges:
+                raise ValueError(f"{name} length {len(target)} != num_edges {self.num_edges}")
+        if advantages is None:
+            raise ValueError("advantages must be present")
+
+        self.advantages = advantages
+        self.values = values
+        self.value_targets = value_targets
 
     # --- Shared helpers ---
 

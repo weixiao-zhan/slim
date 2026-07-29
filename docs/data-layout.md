@@ -18,7 +18,11 @@ An episode is created from a dataset row via `Episode.from_example(example)`, wh
 | `rollout_log_probs` | `list[float] \| None` | Edge-aligned log-probabilities under the rollout policy |
 | `rollout_routed_experts` | `np.ndarray [num_edges, num_layers, top_k] \| None` | MoE expert indices recorded during rollout for replay in training |
 | `multimodal_inputs` | `dict[str, Tensor] \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
-| `reward` | `float \| None` | Scalar reward assigned by the reward model |
+| `reward` | `float \| None` | Raw scalar reward assigned by the reward model |
+| `rollout_index` | `int \| None` | Stable position in the complete rollout batch |
+| `advantages` | edge-aligned values or `None` | Policy training targets |
+| `values` | edge-aligned values or `None` | Critic predictions used to construct PPO targets |
+| `value_targets` | edge-aligned values or `None` | Critic regression targets |
 | `text` | `str \| None` | Decoded full sequence (prompt + response) |
 | `generated_text` | `str \| None` | Decoded response region only (loss_mask==1 tokens) |
 | `non_generation_time` | `float` | Wall-clock time spent outside token generation |
@@ -49,11 +53,12 @@ This design keeps the episode as a single growing sequence — no separate promp
 
 ### Edge Alignment
 
-`loss_mask`, `rollout_log_probs`, and `rollout_routed_experts` are **edge-aligned**: length is `len(tokens) - 1`.
+`loss_mask`, `rollout_log_probs`, `rollout_routed_experts`, `advantages`, `values`, and `value_targets` are **edge-aligned**: length is `len(tokens) - 1`.
 Entry `i` describes the prediction of `tokens[i+1]` given `tokens[:i+1]`.
 Prompt edges are 0 in `loss_mask`; generated edges are 1.
 
-`episode.ensure_edge_alignment()` validates that all edge-aligned fields share the required length.
+`episode.ensure_edge_alignment()` materializes and validates rollout-produced edge fields before freeze.
+`episode.set_train_targets()` validates and assigns the training targets after reward and value processing.
 
 ### Processor Output Format (VLM)
 
@@ -85,9 +90,11 @@ After generation and reward assignment, `episode.ensure_edge_alignment()` valida
 
 After freeze, episodes are consumed by:
 
-1. **Normalization** — advantage and return computation over the batch.
-2. **Packing** — `pack_sequences` (`slim/backends/nemo/data_packing.py`) concatenates multiple episodes into dense batches with `cu_seqlens` for flash-attention, per-sequence `position_ids`, and cumulative edge-offset bookkeeping for slicing edge-aligned fields (`loss_masks`, `rollout_log_probs`, `advantages`, `returns`, `rollout_routed_experts`).
-3. **Training loop** — packed batches are unpacked per micro-batch via `unpack_sequences`, which slices token-aligned fields by `cu_seqlens` and edge-aligned fields by cumulative edge offsets.
+1. **Target preparation**: `AdvantageEstimator` restores global rollout order, computes group-relative GRPO or GSPO advantages without changing rewards, or combines PPO critic values with rewards to produce training targets.
+2. **Role-local packing**: actor and critic independently call `pack_sequences` (`slim/backends/nemo/data_packing.py`). Packs contain `cu_seqlens`, per-sequence `position_ids`, and cumulative edge offsets for `loss_masks`, `rollout_log_probs`, `advantages`, `values`, `value_targets`, and routing fields.
+3. **Training loop**: `unpack_sequences` slices token fields by `cu_seqlens` and edge fields by cumulative edge offsets.
+
+Actor or critic precompute may create packs before targets are available. `update_packed_targets()` attaches `advantages`, `old_values`, and `value_targets` to those cached role-local packs before training.
 
 ---
 
