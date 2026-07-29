@@ -72,8 +72,8 @@ def main() -> int:
             problems.append("critic-loss-nonfinite")
 
     # Rollout reward proves the generate -> reward -> train pipeline ran.
-    reward = re.search(r"rollout/raw_reward['\"]?:?\s*([-\d.eE]+)", text)
-    if reward is None and "raw_reward" not in text:
+    reward = re.search(r"rollout/reward['\"]?:?\s*([-\d.eE]+)", text)
+    if reward is None and "rollout/reward" not in text:
         problems.append("no-rollout-reward")
 
     verdict = "PASS" if not problems else "FAIL"

@@ -14,6 +14,7 @@ from slim.backends.nemo.data_packing import (
     pack_sequences,
     token_slots_to_edges,
     unpack_sequences,
+    update_packed_targets,
 )
 from slim.utils.types import Episode
 
@@ -23,8 +24,11 @@ NUM_GPUS = 0
 
 def _episode(tokens, loss_mask, reward=1.0):
     episode = Episode(tokens=tokens, loss_mask=loss_mask, reward=reward)
-    episode._advantages = [0.5] * episode.num_edges
-    episode._returns = [1.5] * episode.num_edges
+    episode.set_train_targets(
+        [0.5] * episode.num_edges,
+        values=[0.25] * episode.num_edges,
+        value_targets=[1.5] * episode.num_edges,
+    )
     return episode
 
 
@@ -106,6 +110,40 @@ def test_pack_sequences_validates_every_edge_field():
 
     with pytest.raises(ValueError, match="loss_mask length"):
         pack_sequences([episode])
+
+
+@pytest.mark.unit
+def test_pack_sequences_allows_targets_to_be_attached_after_precompute():
+    episodes = [
+        Episode(tokens=[1, 2, 3], loss_mask=[0, 1], reward=1.0),
+        Episode(tokens=[4, 5], loss_mask=[1], reward=2.0),
+    ]
+    packs = pack_sequences(episodes, partitions=[[1, 0]])
+
+    assert "advantages" not in packs[0]
+    assert "old_values" not in packs[0]
+    assert "value_targets" not in packs[0]
+
+    episodes[0].set_train_targets([0.0, 0.5], values=[0.1, 0.2], value_targets=[0.3, 0.4])
+    episodes[1].set_train_targets([1.0], values=[0.6], value_targets=[0.7])
+    update_packed_targets(packs, episodes)
+
+    assert packs[0]["advantages"].tolist() == [1.0, 0.0, 0.5]
+    assert packs[0]["old_values"].tolist() == pytest.approx([0.6, 0.1, 0.2])
+    assert packs[0]["value_targets"].tolist() == pytest.approx([0.7, 0.3, 0.4])
+
+
+@pytest.mark.unit
+def test_update_packed_targets_rejects_partial_targets():
+    episodes = [
+        Episode(tokens=[1, 2], loss_mask=[1], reward=1.0),
+        Episode(tokens=[3, 4], loss_mask=[1], reward=2.0),
+    ]
+    packs = pack_sequences(episodes)
+    episodes[0].set_train_targets([1.0])
+
+    with pytest.raises(ValueError, match="advantages must be present for every episode"):
+        update_packed_targets(packs, episodes)
 
 
 @pytest.mark.unit

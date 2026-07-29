@@ -88,13 +88,21 @@ class RayTrainGroup:
         """
         return [actor.init.remote(self.args) for actor in self._actor_handlers]
 
-    def async_train(self, rollout_id, rollout_data_ref, values_refs=None):
+    def async_train(self, rollout_id, rollout_data_ref):
         """Do one rollout training"""
-        return [actor.train.remote(rollout_id, rollout_data_ref, values_refs) for actor in self._actor_handlers]
+        return [actor.train.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
 
     def compute_values(self, rollout_data_ref):
-        """Compute per-token value predictions (critic only). Returns list of ObjectRefs."""
+        """Compute per-token value payloads (critic only). Returns list of ObjectRefs."""
         return [actor.compute_values.remote(rollout_data_ref) for actor in self._actor_handlers]
+
+    def needs_log_prob_precompute(self) -> bool:
+        return self.role == "actor" and (
+            self.args.kl_loss_coef != 0
+            or self.args.old_logprob_source == "actor"
+            or self.args.mismatch_correction != "none"
+            or self.args.get_mismatch_metrics
+        )
 
     def compute_log_probs(self, rollout_data_ref):
         """Pre-compute log-probs and cache packed batches (actor only). Returns list of ObjectRefs."""

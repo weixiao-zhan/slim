@@ -13,7 +13,7 @@ EDGE_FIELDS = frozenset(
     {
         "loss_masks",
         "advantages",
-        "returns",
+        "value_targets",
         "rollout_log_probs",
         "rollout_routed_experts",
         "actor_old_log_probs",
@@ -30,7 +30,7 @@ TOKEN_FIELDS = frozenset({"tokens", "position_ids"})
 TOKEN_SLOT_FILLS = {
     "loss_masks": 0,
     "advantages": 0.0,
-    "returns": 0.0,
+    "value_targets": 0.0,
     "rollout_log_probs": 0.0,
     "rollout_routed_experts": 0,
     "actor_old_log_probs": 0.0,
@@ -157,29 +157,19 @@ def pack_sequences(
         token_parts = []
         position_parts = []
         loss_mask_parts = []
-        advantage_parts = []
-        return_parts = []
         for index in indices:
             episode = episodes[index]
             tokens = _as_tensor(episode.tokens, dtype=torch.long)
-            advantages = getattr(episode, "_advantages", None)
-            returns = getattr(episode, "_returns", None)
             _validate_edge_field(episode, "loss_mask", episode.loss_mask)
-            _validate_edge_field(episode, "advantages", advantages)
-            _validate_edge_field(episode, "returns", returns)
             token_parts.append(tokens)
             position_parts.append(torch.arange(tokens.numel(), dtype=torch.long))
             loss_mask_parts.append(_as_tensor(episode.loss_mask, dtype=torch.int32))
-            advantage_parts.append(_as_tensor(advantages, dtype=torch.float32))
-            return_parts.append(_as_tensor(returns, dtype=torch.float32))
             cu_seqlens.append(cu_seqlens[-1] + tokens.numel())
 
         pack = {
             "tokens": torch.cat(token_parts),
             "position_ids": torch.cat(position_parts),
             "loss_masks": torch.cat(loss_mask_parts),
-            "advantages": torch.cat(advantage_parts),
-            "returns": torch.cat(return_parts),
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
             "response_lengths": [episodes[index].response_length for index in indices],
             "reward": [episodes[index].reward for index in indices],
@@ -187,6 +177,8 @@ def pack_sequences(
         }
 
         for name, dtype in (
+            ("advantages", torch.float32),
+            ("value_targets", torch.float32),
             ("rollout_log_probs", torch.float32),
             ("rollout_routed_experts", torch.int32),
         ):
@@ -194,12 +186,12 @@ def pack_sequences(
             if value is not None:
                 pack[name] = value
 
-        values = [getattr(episodes[index], "_values", None) for index in indices]
+        values = [episodes[index].values for index in indices]
         if any(value is not None for value in values):
             if not all(value is not None for value in values):
-                raise ValueError("_values must be present for every episode in a pack or for none")
+                raise ValueError("values must be present for every episode in a pack or for none")
             for index, value in zip(indices, values, strict=True):
-                _validate_edge_field(episodes[index], "_values", value)
+                _validate_edge_field(episodes[index], "values", value)
             pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
 
         multimodal_inputs: dict[str, torch.Tensor] = {}
@@ -262,22 +254,23 @@ def unpack_sequences(pack: dict) -> list[dict]:
     return episodes
 
 
-def init_dummy_advantages(episodes: list[Episode]) -> None:
-    for episode in episodes:
-        episode._advantages = [0.0] * episode.num_edges
-        episode._returns = [0.0] * episode.num_edges
-
-
-def update_packed_advantages(packs: list[dict], episodes: list[Episode]) -> None:
+def update_packed_targets(packs: list[dict], episodes: list[Episode]) -> None:
     for pack in packs:
         indices = pack["_episode_indices"]
-        pack["advantages"] = torch.cat(
-            [_as_tensor(episodes[index]._advantages, dtype=torch.float32) for index in indices]
-        )
-        pack["returns"] = torch.cat([_as_tensor(episodes[index]._returns, dtype=torch.float32) for index in indices])
-        values = [getattr(episodes[index], "_values", None) for index in indices]
-        if all(value is not None for value in values):
-            pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
+        for episode_field, pack_field in (
+            ("advantages", "advantages"),
+            ("value_targets", "value_targets"),
+            ("values", "old_values"),
+        ):
+            values = [getattr(episodes[index], episode_field) for index in indices]
+            if any(value is not None for value in values) and not all(value is not None for value in values):
+                raise ValueError(f"{episode_field} must be present for every episode in a pack or for none")
+            if all(value is not None for value in values):
+                for index, value in zip(indices, values, strict=True):
+                    _validate_edge_field(episodes[index], episode_field, value)
+                pack[pack_field] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
+            else:
+                pack.pop(pack_field, None)
 
 
 def edge_to_token_slots(

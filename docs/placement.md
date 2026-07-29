@@ -59,10 +59,11 @@ When actor and critic are on **disjoint** GPUs they run **concurrently**. Each h
 phase               A      C      
 ─────────────────────────────────
 1. compute          ■      ■      ref/actor-old log-probs (A) ∥ compute_values (C)
-────────────────────┼──────┼──── ◀ barrier: ray.get(values_refs + logprobs_refs)
-2. train            ■      ■      actor.train (actor reads values via Ray ref) ∥ critic.train
+────────────────────┼──────┼──── ◀ critic values ready
+2. targets          ░      ░      AdvantageEstimator publishes Episode shards with training targets
+3. train            ■      ■      actor.train ∥ critic.train
 ────────────────────┼──────┼──── ◀ barrier: ray.get(actor.train); ray.get(critic_train_handle)
-3. actor.update_wts ■      ░      actor pushes weights → rollout engines
+4. actor.update_wts ■      ░      actor pushes weights → rollout engines
 
 legend:
 ■ active resident ░ idle resident · offloaded (CPU)
@@ -79,18 +80,21 @@ OOM.
 phase                A      C 
 ─────────────────────────────────
 1. critic.wake_up()  ·      ■
-2. compute_values    ·      ■        critic forward → per-token values
-3. critic.train      ·      ■        critic fwd/bwd/optim
-4. critic.sleep() ───┼──────┼──── ◀ HANDOFF: must offload C before waking A
-5. actor.wake_up()   ■      ·
-6. compute_log_probs ■      ·        ref/actor-old log-probs (ref swaps in-proc)
-7. actor.train       ■      ·        actor fwd/bwd/optim (reads values via Ray ref)
-8. actor.update_wts  ■      ·        push weights → rollout engines
-9. actor.sleep()     ·      ·
+2. compute_values    ·      ■        critic forward produces value payloads
+3. targets           ·      ░        AdvantageEstimator publishes Episode shards with training targets
+4. critic.train      ·      ■        critic consumes old values and value targets
+5. critic.sleep() ───┼──────┼──── ◀ HANDOFF: critic is offloaded before actor wakeup
+6. actor.wake_up()   ■      ·
+7. compute_log_probs ■      ·        optional ref and actor-old log probabilities
+8. actor.train       ■      ·        actor consumes advantages
+9. actor.update_wts  ■      ·        push weights → rollout engines
+10. actor.sleep()    ·      ·
 
 legend:
 ■ active resident ░ idle resident · offloaded (CPU)
 ```
+
+Actor and critic construct separate physical packs from the Episode shards containing training targets. This keeps packing and placement role-local. Mismatch correction is also actor-local and runs after actor-old and rollout log probabilities are available.
 
 ---
 

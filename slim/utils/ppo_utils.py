@@ -170,7 +170,7 @@ def compute_policy_loss(
 def compute_value_loss(
     cur_values: torch.Tensor,
     old_values: torch.Tensor,
-    returns: torch.Tensor,
+    value_targets: torch.Tensor,
     value_clip: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute clipped value loss for PPO critic training.
@@ -182,7 +182,7 @@ def compute_value_loss(
     Args:
         cur_values: Current value predictions from the critic.
         old_values: Value predictions from the previous iteration.
-        returns: Target returns computed via GAE (advantages + old_values).
+        value_targets: Regression targets computed from GAE.
         value_clip: Clipping range for value predictions.
 
     Returns:
@@ -190,20 +190,10 @@ def compute_value_loss(
         squared error wins the max), neither yet reduced.
     """
     values_clipped = old_values + (cur_values - old_values).clamp(-value_clip, value_clip)
-    vf_loss1 = (cur_values - returns) ** 2
-    vf_loss2 = (values_clipped - returns) ** 2
+    vf_loss1 = (cur_values - value_targets) ** 2
+    vf_loss2 = (values_clipped - value_targets) ** 2
     clipfrac = torch.gt(vf_loss2, vf_loss1).float()
     return 0.5 * torch.max(vf_loss1, vf_loss2), clipfrac
-
-
-def get_grpo_returns(
-    rewards: torch.Tensor,
-    kl: list[torch.Tensor],
-):
-    returns = []
-    for i in range(len(rewards)):
-        returns.append(torch.ones_like(kl[i]) * rewards[i])
-    return returns
 
 
 def vanilla_gae(
@@ -242,8 +232,8 @@ def vanilla_gae(
         adv_rev.append(torch.where(active, lastgaelam, torch.zeros_like(lastgaelam)))
 
     full_advantages = torch.stack(adv_rev[::-1], dim=1)  # [B, max_len]
-    full_returns = full_advantages + values  # [B, max_len]
-    return full_advantages, full_returns
+    value_targets = full_advantages + values  # [B, max_len]
+    return full_advantages, value_targets
 
 
 def chunked_gae(
@@ -271,7 +261,7 @@ def chunked_gae(
 
     Returns:
         advantages (Tensor): [B, T] computed advantages.
-        returns (Tensor):    [B, T] advantages + values.
+        value_targets (Tensor): [B, T] advantages + values.
     """
 
     # -------------------------------------------------------------------------
@@ -384,9 +374,9 @@ def chunked_gae(
         S_rev = S_rev[:, :T]
 
     advantages = torch.flip(S_rev, dims=[1])
-    returns = advantages + values
+    value_targets = advantages + values
 
-    return advantages, returns
+    return advantages, value_targets
 
 
 def sum_of_sample_mean(x: torch.Tensor, response_lengths: list[int], loss_masks: list[torch.Tensor]) -> torch.Tensor:

@@ -90,7 +90,7 @@ do
         --max-tokens-per-gpu $MAX_TOKENS_PER_GPU
         --advantage-estimator grpo
         --policy-surrogate ppo_clip
-        --disable-rewards-std-normalization
+        --disable-group-advantage-std-normalization
         --old-logprob-source actor
         --eps-clip 0.2
         --eps-clip-high 0.28

@@ -77,7 +77,7 @@ def test_heterogeneous_rollout_partition_assigns_vision_only_to_dp1(dp_size):
         for index in range(256)
     ]
     for episode in episodes:
-        episode._advantages = [1.0]
+        episode.set_train_targets([1.0])
 
     partitions = [_heterogeneous_rollout_partition(episodes, dp_rank=dp_rank, dp_size=dp_size) for dp_rank in range(dp_size)]
 
@@ -214,8 +214,7 @@ class _FakeDeviceMesh:
 
 def _episode(start):
     episode = Episode(tokens=[start, start + 1, start + 2], loss_mask=[1, 1], reward=1.0)
-    episode._advantages = [0.5, 0.5]
-    episode._returns = [1.0, 1.0]
+    episode.set_train_targets([0.5, 0.5], value_targets=[1.0, 1.0])
     return episode
 
 
@@ -225,8 +224,10 @@ def _episode_with_length(start, length):
         loss_mask=[1] * (length - 1),
         reward=1.0,
     )
-    episode._advantages = [0.5] * episode.num_edges
-    episode._returns = [1.0] * episode.num_edges
+    episode.set_train_targets(
+        [0.5] * episode.num_edges,
+        value_targets=[1.0] * episode.num_edges,
+    )
     return episode
 
 

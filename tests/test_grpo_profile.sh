@@ -40,7 +40,7 @@ run_train "
     --profile-dir $PROFILE_DIR
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --policy-surrogate cis
     --old-logprob-source rollout
     --eps-clip 1

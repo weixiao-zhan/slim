@@ -615,16 +615,16 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
-                "--disable-rewards-std-normalization",
+                "--disable-group-advantage-normalization",
                 action="store_false",
-                dest="rewards_std_normalization",
-                help="Disable reward standard-deviation normalization after group mean centering.",
+                dest="group_advantage_normalization",
+                help="Use raw rewards directly as GRPO or GSPO advantages.",
             )
             parser.add_argument(
-                "--disable-rewards-normalization",
+                "--disable-group-advantage-std-normalization",
                 action="store_false",
-                dest="rewards_normalization",
-                help="Disable rewards normalization",
+                dest="group_advantage_std_normalization",
+                help="Disable standard-deviation scaling after GRPO or GSPO group mean centering.",
             )
             parser.add_argument(
                 "--get-mismatch-metrics",
@@ -861,9 +861,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 "--custom-reward-post-process-path",
                 type=str,
                 default=None,
-                help=(
-                    "Path to the custom function that will post process reward, by default it will be the normalization for grpo. "
-                ),
+                help="Path to a custom function that shapes episode rewards before advantage estimation.",
             )
             return parser
 
@@ -1166,8 +1164,8 @@ def slim_validate_args(args):
         args.global_batch_size = global_batch_size
 
     if args.n_samples_per_prompt == 1:
-        args.rewards_std_normalization = False
-        logger.info("n_samples_per_prompt is set to 1, rewards_std_normalization will be set to False.")
+        args.group_advantage_std_normalization = False
+        logger.info("n_samples_per_prompt is set to 1, group advantage std normalization will be disabled.")
 
     if args.rollout_group_filter_path and not args.over_sampling_batch_size:
         args.over_sampling_batch_size = args.rollout_batch_size

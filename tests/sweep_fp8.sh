@@ -44,7 +44,7 @@ COMMON_ARGS="
     --max-tokens-per-gpu 8192
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --policy-surrogate cis
     --old-logprob-source rollout
     --eps-clip 1

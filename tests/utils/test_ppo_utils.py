@@ -3,14 +3,10 @@
 
 """Unit tests for PPO advantage utilities."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-from slim.backends.nemo.base import NeMoTrainer
 from slim.utils.ppo_utils import vanilla_gae
-from slim.utils.types import Episode
 
 
 NUM_GPUS = 0
@@ -26,10 +22,10 @@ def test_vanilla_gae_skips_observation_edges():
     values = torch.tensor([[1.0, 100.0, -100.0, 2.0, 4.0]])
     loss_mask = torch.tensor([[1, 0, 0, 1, 1]])
 
-    advantages, returns = vanilla_gae(rewards, values, loss_mask, gamma=0.9, lambd=0.8)
+    advantages, value_targets = vanilla_gae(rewards, values, loss_mask, gamma=0.9, lambd=0.8)
 
     compact_mask = torch.ones(1, 3, dtype=torch.bool)
-    compact_advantages, compact_returns = vanilla_gae(
+    compact_advantages, compact_value_targets = vanilla_gae(
         torch.tensor([[0.0, 0.0, 3.0]]),
         torch.tensor([[1.0, 2.0, 4.0]]),
         compact_mask,
@@ -42,8 +38,8 @@ def test_vanilla_gae_skips_observation_edges():
         compact_advantages.flatten(),
     )
     torch.testing.assert_close(
-        _active_values(returns, loss_mask),
-        compact_returns.flatten(),
+        _active_values(value_targets, loss_mask),
+        compact_value_targets.flatten(),
     )
     assert torch.equal(advantages[~loss_mask.bool()], torch.zeros(2))
 
@@ -84,19 +80,3 @@ def test_vanilla_gae_validates_shapes():
             gamma=1.0,
             lambd=1.0,
         )
-
-
-@pytest.mark.unit
-def test_ppo_reward_is_assigned_to_last_policy_edge():
-    trainer = object.__new__(NeMoTrainer)
-    trainer.args = SimpleNamespace(gamma=1.0, lambd=1.0, normalize_advantages=False)
-    episode = Episode(
-        tokens=[10, 11, 12, 13],
-        loss_mask=[0, 1, 0],
-        reward=2.0,
-    )
-
-    trainer._compute_ppo_advantages([episode], [torch.zeros(3)])
-
-    assert episode._advantages == [0.0, 2.0, 0.0]
-    assert episode._returns == [0.0, 2.0, 0.0]

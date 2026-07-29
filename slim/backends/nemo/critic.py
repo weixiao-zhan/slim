@@ -17,7 +17,7 @@ from slim.utils.timer import timer
 
 from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
-from .data_packing import init_dummy_advantages, token_slots_to_edges, unpack_sequences
+from .data_packing import token_slots_to_edges, unpack_sequences
 from .forward import model_forward, prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
 from .model import CriticModel, build_optimizer, build_value_head, final_hidden_state
@@ -90,9 +90,8 @@ class CriticNeMoTrainer(NeMoTrainer):
         output = model_forward(self.model, model_batch)
         return self.value_head(final_hidden_state(output))
 
-    def compute_values(self, rollout_data_ref: list) -> list[torch.Tensor]:
+    def compute_values(self, rollout_data_ref: list) -> dict:
         episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-        init_dummy_advantages(episodes)
         packed_batches, grad_accum = self._packed_data(episodes)
 
         self.wake_up()
@@ -127,10 +126,12 @@ class CriticNeMoTrainer(NeMoTrainer):
         if any(value is None for value in all_values):
             raise RuntimeError("critic value reconstruction omitted an episode")
 
-        self._pending_episodes = episodes
-        self._pending_packed_batches = packed_batches
-        self._pending_grad_accum = grad_accum
-        return [value for value in all_values if value is not None]
+        self._cache_packed_data(packed_batches, grad_accum)
+        return {
+            "dp_rank": self.dp_rank,
+            "cp_rank": self.cp_rank,
+            "values": [value for value in all_values if value is not None],
+        }
 
     def _train_microbatch(
         self,
@@ -151,11 +152,11 @@ class CriticNeMoTrainer(NeMoTrainer):
             values = self._forward_values(prepared)
             mask = prepared.fields["loss_masks"].to(values.dtype)
             old_values = prepared.fields["old_values"].to(values.dtype)
-            returns = prepared.fields["returns"].to(values.dtype)
+            value_targets = prepared.fields["value_targets"].to(values.dtype)
             value_values, clip_values = compute_value_loss(
                 values,
                 old_values,
-                returns,
+                value_targets,
                 self.args.value_clip,
             )
             document_ids = prepared.fields["document_ids"]
@@ -183,7 +184,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         }
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
-        self._log_packed_metrics(packed_batches, ["old_values", "returns"])
+        self._log_packed_metrics(packed_batches, ["old_values", "value_targets"])
         progress = tqdm(packed_batches, desc="critic_train", disable=dist.get_rank() != 0)
         profiled = iter(self.prof.iterate_train_pg(enumerate(progress)))
         self.optimizer.zero_grad(set_to_none=True)

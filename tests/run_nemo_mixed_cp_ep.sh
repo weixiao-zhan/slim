@@ -54,7 +54,7 @@ run_train_wait "
 
     --advantage-estimator grpo
     --policy-surrogate ppo_clip
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --old-logprob-source rollout
     --use-rollout-routing-replay
     --eps-clip 0.2

@@ -27,7 +27,6 @@ from .base import NeMoTrainer, _move_module
 from .checkpoint import is_hf_checkpoint
 from .data_packing import (
     EDGE_FIELDS,
-    init_dummy_advantages,
     token_slots_to_edges,
     unpack_sequences,
 )
@@ -174,7 +173,6 @@ class ActorNeMoTrainer(NeMoTrainer):
 
     def compute_log_probs(self, rollout_data_ref: list) -> None:
         episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-        init_dummy_advantages(episodes)
         packed_batches, grad_accum = self._packed_data(episodes)
         if self.ref_model is not None or self._needs_actor_old_log_probs():
             self.wake_up()
@@ -183,9 +181,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             if self._needs_actor_old_log_probs():
                 self._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
 
-        self._pending_episodes = episodes
-        self._pending_packed_batches = packed_batches
-        self._pending_grad_accum = grad_accum
+        self._cache_packed_data(packed_batches, grad_accum)
 
     def _prepare_mismatch(self, pack: dict) -> None:
         if not (self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics):

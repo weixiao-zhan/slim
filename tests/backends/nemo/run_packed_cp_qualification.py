@@ -73,7 +73,7 @@ def _pack(first_document: list[int]) -> dict:
         ),
         "loss_masks": torch.ones(tokens.numel() - 2, dtype=torch.int32),
         "advantages": torch.ones(tokens.numel() - 2, dtype=torch.float32),
-        "returns": torch.ones(tokens.numel() - 2, dtype=torch.float32),
+        "value_targets": torch.ones(tokens.numel() - 2, dtype=torch.float32),
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
