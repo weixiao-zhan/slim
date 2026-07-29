@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from slim.backends.nemo.model import final_hidden_state
+from slim.backends.nemo.models import build_model
 from slim.backends.nemo.models.qwen3_5 import (
     _disable_fsdp_backward_prefetch,
-    build_model,
     register_qwen3_5_moe_parallel_strategy,
     validate_config,
 )
@@ -90,6 +90,10 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
     from nemo_automodel import NeMoAutoModelForImageTextToText
 
     monkeypatch.setattr(NeMoAutoModelForImageTextToText, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        "slim.backends.nemo.models.AutoConfig.from_pretrained",
+        lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_5_moe"),
+    )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.build_backend_config", fake_backend_config)
     monkeypatch.setattr(
         "slim.backends.nemo.models.qwen3_5._disable_fsdp_backward_prefetch",
@@ -112,7 +116,6 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
         ),
     )
     result = build_model(
-        SimpleNamespace(model_type="qwen3_5_moe"),
         args,
         "/models/qwen3.5",
         distributed_setup=distributed_setup,

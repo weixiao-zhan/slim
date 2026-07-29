@@ -2,11 +2,11 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qwen3.5 MoE GRPO on mixed DAPO math and Geometry3K data.
+# Qwen3.6 MoE GRPO on mixed DAPO math and Geometry3K data.
 # SGLang uses four TP2 replicas. NeMo uses CP2 and EP8 on eight GPUs.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$REPO_DIR/models/Qwen3.5-35B-A3B"
+MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 RESULT_DIR="${NEMO_MIXED_CP_EP_RESULT_DIR:-/tmp/slim-nemo-mixed-cp2-ep8-five-step}"
 

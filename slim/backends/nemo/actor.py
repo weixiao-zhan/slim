@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 class ActorNeMoTrainer(NeMoTrainer):
     """Train the policy and own its optional frozen reference model."""
 
+    role = "actor"
     _train_log_prefix = "train/actor"
 
     def _resolve_checkpoint_paths(self) -> str:
@@ -63,7 +64,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
         RouterReplay.clear_registry()
         self.model = build_model(
-            self.hf_config,
             self.args,
             checkpoint_path,
             self.distributed_setup,
@@ -72,7 +72,6 @@ class ActorNeMoTrainer(NeMoTrainer):
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         self.optimizer = build_optimizer(
             self.args,
-            self.model,
             self.device_mesh,
             param_groups=[{"params": parameters, "max_lr": self.args.lr_actor}],
         )
@@ -87,7 +86,6 @@ class ActorNeMoTrainer(NeMoTrainer):
         dist.barrier(group=get_gloo_group())
 
         ref_model = build_model(
-            self.hf_config,
             self.args,
             checkpoint_path,
             self.distributed_setup,
@@ -101,7 +99,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         return ref_model
 
     def _post_model_setup(self) -> None:
-        self.ref_model = self._create_ref_model(self.args.ref_load) if self.with_ref else None
+        self.ref_model = self._create_ref_model(self.args.ref_load) if self.args.kl_loss_coef != 0 else None
         quantizer = Quantizer.maybe_from_checkpoint(self.args.hf_checkpoint)
         if quantizer is not None:
             logger.info(
@@ -133,8 +131,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         if active_model is None:
             raise RuntimeError("reference log probabilities requested without a reference model")
 
-        swapped = is_reference
-        if swapped:
+        if is_reference:
             _move_module(self.model, "cpu")
             clear_memory()
             dist.barrier(group=get_gloo_group())
@@ -169,16 +166,14 @@ class ActorNeMoTrainer(NeMoTrainer):
         finally:
             if is_reference:
                 active_model.eval()
-            else:
-                active_model.train()
-            if swapped:
                 _move_module(active_model, "cpu")
                 _move_module(self.model, torch.device("cuda", torch.cuda.current_device()))
                 dist.barrier(group=get_gloo_group())
+            else:
+                active_model.train()
 
-    def compute_log_probs(self, rollout_id: int, rollout_data_ref: list) -> None:
-        del rollout_id
-        episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
+    def compute_log_probs(self, rollout_data_ref: list) -> None:
+        episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
         init_dummy_advantages(episodes)
         packed_batches, grad_accum = self._packed_data(episodes)
         if self.ref_model is not None or self._needs_actor_old_log_probs():
@@ -468,8 +463,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             (loss * self.backward_group_size).backward()
         return metrics
 
-    def _run_train_loop(self, rollout_id: int, packed_batches: list, grad_accum: list[int]) -> None:
-        del rollout_id
+    def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         if self.ref_model is not None and "ref_log_probs" not in packed_batches[0]:
             self._compute_log_prob("ref", packed_batches, store_key="ref_log_probs")
         if self._needs_actor_old_log_probs() and "actor_old_log_probs" not in packed_batches[0]:

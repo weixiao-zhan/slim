@@ -75,8 +75,6 @@ class NeMoTrainer(RayWorker):
 
     def __init__(self, world_size, rank, master_addr, master_port):
         configure_logger()
-        self._world_size = world_size
-        self._rank = rank
         if master_addr:
             self.master_addr, self.master_port = master_addr, master_port
         else:
@@ -93,10 +91,8 @@ class NeMoTrainer(RayWorker):
     def model_parts(self) -> list[torch.nn.Module]:
         return [self.model]
 
-    def _init_distributed(self, args: Namespace, role: str, with_ref: bool) -> None:
+    def _init_distributed(self, args: Namespace) -> None:
         self.args = args
-        self.role = role
-        self.with_ref = with_ref
         torch.serialization.add_safe_globals([slim.utils.eval_config.EvalDatasetConfig])
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
@@ -136,8 +132,8 @@ class NeMoTrainer(RayWorker):
         )
 
     @with_defer(lambda: Timer().start("train_wait"))
-    def init(self, args: Namespace, role: str, with_ref: bool = False) -> int:  # type: ignore[override]
-        self._init_distributed(args, role, with_ref)
+    def init(self, args: Namespace) -> int:  # type: ignore[override]
+        self._init_distributed(args)
         self._setup_topology()
         torch.manual_seed(args.seed)
         self.train_parallel_config = {
@@ -194,7 +190,7 @@ class NeMoTrainer(RayWorker):
     def checkpoint_model(self) -> torch.nn.Module:
         return getattr(self, "_checkpoint_model", self.model)
 
-    def _run_train_loop(self, rollout_id: int, packed_batches: list, grad_accum: list[int]) -> None:
+    def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         raise NotImplementedError
 
     def _maybe_update_ref_model(self, rollout_id: int) -> None:
@@ -296,7 +292,7 @@ class NeMoTrainer(RayWorker):
                 self._pending_packed_batches = None
                 self._pending_grad_accum = None
             else:
-                episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
+                episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
                 packed_batches = None
                 grad_accum = None
             values = ray.get(values_refs[dist.get_rank()]) if values_refs is not None else None
@@ -329,7 +325,7 @@ class NeMoTrainer(RayWorker):
             update_packed_advantages(packed_batches, episodes)
         if not grad_accum:
             raise ValueError("training produced no microbatches")
-        self._run_train_loop(rollout_id, packed_batches, grad_accum)
+        self._run_train_loop(packed_batches, grad_accum)
         self.prof.step(rollout_id=rollout_id)
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=None)
         self._maybe_update_ref_model(rollout_id)

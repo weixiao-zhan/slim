@@ -1088,7 +1088,7 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
     if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
         log_dict["rollout/rollout_log_probs"] = rollout_log_probs
     log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), "rollout/")
-    log_dict |= dict_add_prefix(_compute_perf_metrics(args, episodes, rollout_time), "perf/")
+    log_dict |= dict_add_prefix(_compute_perf_metrics(episodes, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
@@ -1132,7 +1132,7 @@ def _compute_episode_metrics(args, episodes: list[Episode]):
     return log_dict
 
 
-def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
+def _compute_perf_metrics(episodes: list[Episode], rollout_time):
     non_generation_time = [ep.non_generation_time for ep in episodes]
 
     log_dict = {}

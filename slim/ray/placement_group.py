@@ -166,18 +166,16 @@ def create_training_models(args, pgs, rollout_manager):
     else:
         critic_model = None
 
-    actor_with_ref = args.kl_loss_coef != 0
-
     if not args.use_critic:
-        start_rollout_ids = ray.get(actor_model.async_init(args, role="actor", with_ref=actor_with_ref))
+        start_rollout_ids = ray.get(actor_model.async_init())
     elif args.critic_colocate:
         # critic shares actor GPUs, init sequentially to avoid contention
-        start_rollout_ids = ray.get(actor_model.async_init(args, role="actor", with_ref=actor_with_ref))
-        critic_start_rollout_ids = ray.get(critic_model.async_init(args, role="critic", with_ref=False))
+        start_rollout_ids = ray.get(actor_model.async_init())
+        critic_start_rollout_ids = ray.get(critic_model.async_init())
     else:
         # critic on separate GPUs, init both in parallel
-        actor_init_handle = actor_model.async_init(args, role="actor", with_ref=actor_with_ref)
-        critic_init_handle = critic_model.async_init(args, role="critic", with_ref=False)
+        actor_init_handle = actor_model.async_init()
+        critic_init_handle = critic_model.async_init()
         start_rollout_ids = ray.get(actor_init_handle)
         critic_start_rollout_ids = ray.get(critic_init_handle)
 

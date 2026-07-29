@@ -20,7 +20,7 @@ from .checkpoint import is_hf_checkpoint
 from .data_packing import init_dummy_advantages, token_slots_to_edges, unpack_sequences
 from .forward import model_forward, prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
-from .model import CriticModel, build_critic_model, build_optimizer, final_hidden_state
+from .model import CriticModel, build_optimizer, build_value_head, final_hidden_state
 from .models import build_model
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 class CriticNeMoTrainer(NeMoTrainer):
     """Train a scalar value head over a NeMo AutoModel backbone."""
 
+    role = "critic"
     _train_log_prefix = "train/critic"
 
     @property
@@ -43,19 +44,16 @@ class CriticNeMoTrainer(NeMoTrainer):
         return self.args.hf_checkpoint
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
-        backbone = build_model(
-            self.hf_config,
+        self.model = build_model(
             self.args,
             checkpoint_path,
             self.distributed_setup,
             routing_replay=False,
         )
-        modules = build_critic_model(
-            backbone,
+        self.value_head = build_value_head(
+            self.model,
             self.distributed_setup,
         )
-        self.model = modules.backbone
-        self.value_head = modules.value_head
         self._checkpoint_model = CriticModel(self.model, self.value_head)
 
         backbone_parameters = [
@@ -76,7 +74,6 @@ class CriticNeMoTrainer(NeMoTrainer):
         ]
         self.optimizer = build_optimizer(
             self.args,
-            self.model,
             self.device_mesh,
             param_groups=groups,
         )
@@ -93,9 +90,8 @@ class CriticNeMoTrainer(NeMoTrainer):
         output = model_forward(self.model, model_batch)
         return self.value_head(final_hidden_state(output))
 
-    def compute_values(self, rollout_id: int, rollout_data_ref: list) -> list[torch.Tensor]:
-        del rollout_id
-        episodes = process_rollout_data(self.args, rollout_data_ref, self.dp_rank, self.dp_size)
+    def compute_values(self, rollout_data_ref: list) -> list[torch.Tensor]:
+        episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
         init_dummy_advantages(episodes)
         packed_batches, grad_accum = self._packed_data(episodes)
 
@@ -186,8 +182,7 @@ class CriticNeMoTrainer(NeMoTrainer):
             "value_clipfrac": value_clipfrac.detach(),
         }
 
-    def _run_train_loop(self, rollout_id: int, packed_batches: list, grad_accum: list[int]) -> None:
-        del rollout_id
+    def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         self._log_packed_metrics(packed_batches, ["old_values", "returns"])
         progress = tqdm(packed_batches, desc="critic_train", disable=dist.get_rank() != 0)
         profiled = iter(self.prof.iterate_train_pg(enumerate(progress)))

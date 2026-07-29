@@ -110,7 +110,7 @@ def build_checkpointer(trainer: Any):
     )
 
 
-def _has_rank_state(trainer: Any, checkpoint_dir: Path, state_name: str) -> bool:
+def _has_rank_state(checkpoint_dir: Path, state_name: str) -> bool:
     path = checkpoint_dir / state_name / f"{state_name}_dp_rank_{dist.get_rank()}.pt"
     return path.exists()
 
@@ -170,7 +170,7 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
             str(checkpoint_dir),
         )
 
-    if not trainer.args.no_load_rng and _has_rank_state(trainer, checkpoint_dir, "rng"):
+    if not trainer.args.no_load_rng and _has_rank_state(checkpoint_dir, "rng"):
         trainer.checkpointer.load_on_dp_ranks(RNGState(), "rng", str(checkpoint_dir))
 
     metadata = payload["metadata"]

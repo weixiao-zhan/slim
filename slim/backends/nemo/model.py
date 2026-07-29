@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 from nemo_automodel.components.distributed.mesh_utils import get_fsdp_dp_mesh
@@ -19,19 +17,14 @@ def text_config(config):
     return getattr(config, "text_config", config)
 
 
-def build_optimizer(args, model, device_mesh, *, param_groups: list[dict] | None = None):
+def build_optimizer(args, device_mesh, *, param_groups: list[dict]):
     config = AdamWConfig(
         lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(args.adam_beta1, args.adam_beta2),
         eps=args.adam_eps,
     )
-    if param_groups is not None:
-        return config.build_from_param_groups(param_groups, device_mesh=device_mesh)
-    optimizers = config.build(model, device_mesh=device_mesh)
-    if len(optimizers) != 1:
-        raise RuntimeError(f"expected one optimizer without pipeline parallelism, got {len(optimizers)}")
-    return optimizers[0]
+    return config.build_from_param_groups(param_groups, device_mesh=device_mesh)
 
 
 class ScalarValueHead(nn.Module):
@@ -56,12 +49,6 @@ def final_hidden_state(output) -> torch.Tensor:
     return final_state
 
 
-@dataclass
-class CriticModules:
-    backbone: nn.Module
-    value_head: nn.Module
-
-
 class CriticModel(nn.Module):
     """Checkpointable AutoModel backbone and scalar value head."""
 
@@ -75,7 +62,7 @@ class CriticModel(nn.Module):
         return self.value_head(final_hidden_state(output))
 
 
-def build_critic_model(backbone: nn.Module, distributed_setup) -> CriticModules:
+def build_value_head(backbone: nn.Module, distributed_setup) -> nn.Module:
     output_embeddings = backbone.get_output_embeddings()
     if output_embeddings is not None:
         output_embeddings.requires_grad_(False)
@@ -97,7 +84,7 @@ def build_critic_model(backbone: nn.Module, distributed_setup) -> CriticModules:
         strategy.offload_policy,
         reshard_after_forward=False,
     )
-    return CriticModules(backbone=backbone, value_head=head)
+    return head
 
 
 def resolve_state_dict_adapter(model):

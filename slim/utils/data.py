@@ -62,7 +62,7 @@ def load_hf_dataset(path: str):
     return dataset
 
 
-def process_rollout_data(args, rollout_data_refs, dp_rank, dp_size):
+def process_rollout_data(rollout_data_refs, dp_rank, dp_size):
     assert len(rollout_data_refs) == dp_size
     if ray is None:
         raise ModuleNotFoundError("ray is required to process rollout data")

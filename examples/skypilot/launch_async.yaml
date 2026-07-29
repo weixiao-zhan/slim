@@ -25,12 +25,12 @@ envs:
 setup: | # shell
   set -ex
   uv sync
-  uv run python patch_sglang.py
+  uv run python patch_dependencies.py
 
 run: | # shell
   set -ex
   uv sync
-  uv run python patch_sglang.py
+  uv run python patch_dependencies.py
   # Download model and prepare dataset
   mkdir -p ${HOME}/models
   if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
