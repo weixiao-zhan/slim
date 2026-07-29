@@ -19,6 +19,11 @@ from nemo_automodel.components.distributed.blockdiag_cp import (
     current_blockdiag_cp_state,
 )
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
+from nemo_automodel.components.distributed.cp_vision_shard import (
+    CpVisionShardingConfig,
+    reset_cp_vision_group,
+    set_cp_vision_group,
+)
 from nemo_automodel.components.distributed.parallelizer import (
     PARALLELIZATION_STRATEGIES,
     Qwen3_5ParallelizationStrategy,
@@ -33,6 +38,7 @@ from torch.distributed.fsdp import FSDPModule
 from ..topology import flat_mesh
 
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
+CP_VISION_SHARDING = CpVisionShardingConfig(enabled=True)
 
 
 def _text_config(config):
@@ -246,7 +252,7 @@ def _dummy_visual_inputs(model: torch.nn.Module, device: torch.device) -> tuple[
     return pixel_values, grid_thw
 
 
-def _install_synchronized_vision(model: torch.nn.Module, group) -> None:
+def _install_synchronized_vision(model: torch.nn.Module, sync_group, cp_group) -> None:
     if getattr(model, "_slim_synchronized_vision", False):
         return
 
@@ -264,7 +270,7 @@ def _install_synchronized_vision(model: torch.nn.Module, group) -> None:
             pixel_values=pixel_values,
             pixel_values_videos=pixel_values_videos,
             device=input_ids.device,
-            group=group,
+            group=sync_group,
         )
         if not has_images and not has_videos:
             return inputs_embeds
@@ -279,44 +285,48 @@ def _install_synchronized_vision(model: torch.nn.Module, group) -> None:
                 dummy_pixels, dummy_grid = _dummy_visual_inputs(module, input_ids.device)
             return dummy_pixels, dummy_grid, False
 
-        with cp_dispatcher_suspended(module.cp_mesh):
-            if has_images:
-                image_pixels, image_grid, is_local = visual_inputs(pixel_values, image_grid_thw)
-                if hasattr(module.model.visual, "rotary_pos_emb"):
-                    module.model.visual.rotary_pos_emb.to(image_pixels.device)
-                image_embeds = module._encode_vision_for_cp(
-                    image_pixels,
-                    image_grid,
-                    is_video=False,
-                ).to(inputs_embeds.device, inputs_embeds.dtype)
-                if is_local:
-                    image_mask, _ = module.model.get_placeholder_mask(
-                        input_ids,
-                        inputs_embeds=inputs_embeds,
-                        image_features=image_embeds,
-                    )
-                    inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-                elif image_embeds.requires_grad:
-                    inputs_embeds = inputs_embeds + image_embeds.sum() * 0.0
+        token = set_cp_vision_group(cp_group, config=CP_VISION_SHARDING)
+        try:
+            with cp_dispatcher_suspended(module.cp_mesh):
+                if has_images:
+                    image_pixels, image_grid, is_local = visual_inputs(pixel_values, image_grid_thw)
+                    if hasattr(module.model.visual, "rotary_pos_emb"):
+                        module.model.visual.rotary_pos_emb.to(image_pixels.device)
+                    image_embeds = module._encode_vision_for_cp(
+                        image_pixels,
+                        image_grid,
+                        is_video=False,
+                    ).to(inputs_embeds.device, inputs_embeds.dtype)
+                    if is_local:
+                        image_mask, _ = module.model.get_placeholder_mask(
+                            input_ids,
+                            inputs_embeds=inputs_embeds,
+                            image_features=image_embeds,
+                        )
+                        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+                    elif image_embeds.requires_grad:
+                        inputs_embeds = inputs_embeds + image_embeds.sum() * 0.0
 
-            if has_videos:
-                video_pixels, video_grid, is_local = visual_inputs(pixel_values_videos, video_grid_thw)
-                if hasattr(module.model.visual, "rotary_pos_emb"):
-                    module.model.visual.rotary_pos_emb.to(video_pixels.device)
-                video_embeds = module._encode_vision_for_cp(
-                    video_pixels,
-                    video_grid,
-                    is_video=True,
-                ).to(inputs_embeds.device, inputs_embeds.dtype)
-                if is_local:
-                    _, video_mask = module.model.get_placeholder_mask(
-                        input_ids,
-                        inputs_embeds=inputs_embeds,
-                        video_features=video_embeds,
-                    )
-                    inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-                elif video_embeds.requires_grad:
-                    inputs_embeds = inputs_embeds + video_embeds.sum() * 0.0
+                if has_videos:
+                    video_pixels, video_grid, is_local = visual_inputs(pixel_values_videos, video_grid_thw)
+                    if hasattr(module.model.visual, "rotary_pos_emb"):
+                        module.model.visual.rotary_pos_emb.to(video_pixels.device)
+                    video_embeds = module._encode_vision_for_cp(
+                        video_pixels,
+                        video_grid,
+                        is_video=True,
+                    ).to(inputs_embeds.device, inputs_embeds.dtype)
+                    if is_local:
+                        _, video_mask = module.model.get_placeholder_mask(
+                            input_ids,
+                            inputs_embeds=inputs_embeds,
+                            video_features=video_embeds,
+                        )
+                        inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+                    elif video_embeds.requires_grad:
+                        inputs_embeds = inputs_embeds + video_embeds.sum() * 0.0
+        finally:
+            reset_cp_vision_group(token)
 
         return inputs_embeds
 
@@ -402,7 +412,7 @@ def install_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     if cp_mesh.size() == 1:
         _install_gdn_dispatch(model, cp_mesh)
     _install_moe_cp(model, cp_mesh)
-    _install_synchronized_vision(model, vision_sync_group)
+    _install_synchronized_vision(model, vision_sync_group, cp_mesh.get_group())
     _install_primary_shard(model, cp_mesh)
 
 
