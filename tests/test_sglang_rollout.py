@@ -4,9 +4,11 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from slim.rollout.sglang_rollout import _prepare_episode_tokens
+import slim.rollout.sglang_rollout as sglang_rollout
+from slim.rollout.sglang_rollout import _prepare_episode_tokens, decode_generated_text
 from slim.utils.types import Episode
 
 
@@ -19,6 +21,10 @@ class Tokenizer:
         if not kwargs["tokenize"]:
             return "rendered prompt"
         return {"input_ids": [11, 12, 13]} if kwargs.get("return_dict", True) else [11, 12, 13]
+
+    def decode(self, token_ids):
+        self.calls.append(("decode", token_ids))
+        return ",".join(str(token_id) for token_id in token_ids)
 
 
 class Processor:
@@ -72,3 +78,15 @@ def test_multimodal_chat_renders_with_tokenizer_before_processing():
     assert rollout_state.processor.calls[0]["text"] == "rendered prompt"
     assert episode.tokens == [21, 22, 23]
     assert set(episode.multimodal_inputs) == {"pixel_values"}
+
+
+def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch):
+    rollout_state = state()
+    monkeypatch.setattr(sglang_rollout, "GenerateState", lambda args: rollout_state)
+    episode = Episode(tokens=[10, 11, 12, 13], loss_mask=[0, 1, 1])
+
+    assert decode_generated_text(SimpleNamespace(), episode) == "12,13"
+
+    episode.loss_mask.append(0)
+    with pytest.raises(ValueError, match="zip\\(\\) argument 2 is longer"):
+        decode_generated_text(SimpleNamespace(), episode)

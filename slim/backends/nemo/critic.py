@@ -17,7 +17,7 @@ from slim.utils.timer import timer
 
 from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
-from .data_packing import token_slots_to_edges, unpack_sequences
+from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .forward import model_forward, prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
 from .model import CriticModel, build_optimizer, build_value_head, final_hidden_state
@@ -113,7 +113,7 @@ class CriticNeMoTrainer(NeMoTrainer):
                 with prepared.context_factory():
                     local_values = self._forward_values(prepared)
                 full_values = prepared.gather(local_values, fill=0)
-                pack["cur_values"] = token_slots_to_edges(
+                pack["cur_values"] = fill_document_terminal_slots(
                     full_values.squeeze(0),
                     pack["cu_seqlens"],
                 ).detach().cpu()

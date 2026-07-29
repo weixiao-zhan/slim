@@ -51,8 +51,6 @@ def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Ep
     if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
         raise ValueError(f"debug rollout data at {path} must contain an episodes list")
     episodes = [Episode(**record) for record in records]
-    for episode in episodes:
-        episode.ensure_edge_alignment()
     logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
     return episodes
 
@@ -506,7 +504,7 @@ class RolloutManager:
             return
         for index, episode in enumerate(episodes):
             episode.episode_index = index
-            episode.ensure_edge_alignment()
+            episode.finalize_source_token_alignment()
         return self._split_episodes_by_dp(episodes, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):

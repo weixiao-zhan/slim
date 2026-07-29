@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
 
-from .data_packing import build_model_batch, build_token_slot_fields
+from .data_packing import build_model_batch, build_training_fields
 from .models import build_packed_position_ids
 from .packed_cp import build_packed_cp_sharder
 
@@ -45,7 +45,7 @@ def prepare_forward(
     device = torch.device("cuda", torch.cuda.current_device())
     model_batch = move_to_device(build_model_batch(pack), device)
     model_batch["position_ids"] = build_packed_position_ids(model, pack, model_batch)
-    full_fields = move_to_device(build_token_slot_fields(pack), device)
+    full_fields = move_to_device(build_training_fields(pack), device)
     sharder = build_packed_cp_sharder(device_mesh, padding_token_id=padding_token_id)
     context_factory, model_batch = sharder.shard(model_batch)
     labels = model_batch.pop("labels")

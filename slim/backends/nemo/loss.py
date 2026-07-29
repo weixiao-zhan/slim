@@ -153,12 +153,13 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
         boundaries = pack["cu_seqlens"].tolist()
         masks = pack["loss_masks"]
         sequence_count += len(boundaries) - 1
-        cursor = 0
-        for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
-            edge_count = end - start - 1
-            mask = masks[cursor : cursor + edge_count]
-            token_count += int(mask.sum())
-            cursor += edge_count
+        expected_length = boundaries[-1]
+        if masks.ndim != 1 or masks.shape[0] != expected_length:
+            raise ValueError(
+                f"source-aligned loss_masks shape {tuple(masks.shape)} does not match "
+                f"packed token count {expected_length}"
+            )
+        token_count += int(masks.sum())
 
     counts = torch.tensor([sequence_count, token_count], dtype=torch.float64, device=device)
     if torch.distributed.is_initialized() and torch.distributed.get_world_size(group=dp_group) > 1:

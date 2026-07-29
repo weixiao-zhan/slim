@@ -12,7 +12,7 @@ The basic training loop follows:
 
 | Document | Scope |
 |----------|-------|
-| [Data Layout](data-layout.md) | Episode lifecycle, dataset columns, edge alignment, VLM processor output, routing replay |
+| [Data Layout](data-layout.md) | Episode lifecycle, dataset columns, source-token alignment, VLM processor output, routing replay |
 | [SGLang Config](sglang-config.md) | Engine deployment, parameter pass-through, PD disaggregation, speculative decoding, FP8 inference, fault tolerance |
 | [Training Loss](training-loss.md) | Advantage estimators (PPO-GAE, GRPO, GSPO), policy surrogates, KL penalty, mismatch correction |
 | [Placement](placement.md) | GPU allocation, colocate modes, step timeline, weight update paths |

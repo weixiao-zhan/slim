@@ -28,8 +28,8 @@ from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.critic import CriticNeMoTrainer
 from slim.backends.nemo.data_packing import (
     build_token_budget_partitions,
+    fill_document_terminal_slots,
     pack_sequences,
-    token_slots_to_edges,
 )
 from slim.backends.nemo.forward import model_forward, prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
@@ -196,7 +196,7 @@ def _pack(processor=None) -> dict:
     second_document = [101, 102, 103, 104, 105, 106]
     tokens = torch.tensor(first_document + second_document, dtype=torch.long)
     first_end = len(first_document)
-    edge_count = tokens.numel() - 2
+    cu_seqlens = torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32)
     pack = {
         "tokens": tokens,
         "position_ids": torch.cat(
@@ -205,11 +205,20 @@ def _pack(processor=None) -> dict:
                 torch.arange(len(second_document), dtype=torch.long),
             )
         ),
-        "loss_masks": torch.ones(edge_count, dtype=torch.int32),
-        "advantages": torch.linspace(0.5, 1.5, edge_count),
-        "value_targets": torch.linspace(0.25, 1.25, edge_count),
-        "old_values": torch.zeros(edge_count),
-        "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
+        "loss_masks": fill_document_terminal_slots(
+            torch.ones(tokens.numel(), dtype=torch.int32),
+            cu_seqlens,
+        ),
+        "advantages": fill_document_terminal_slots(
+            torch.linspace(0.5, 1.5, tokens.numel()),
+            cu_seqlens,
+        ),
+        "value_targets": fill_document_terminal_slots(
+            torch.linspace(0.25, 1.25, tokens.numel()),
+            cu_seqlens,
+        ),
+        "old_values": torch.zeros(tokens.numel()),
+        "cu_seqlens": cu_seqlens,
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
         "_episode_dp_indices": [0, 1],
@@ -247,10 +256,12 @@ def _load_rollout_episodes(path: Path, samples_per_prompt: int = 8) -> list[Epis
         group = episodes[start : start + samples_per_prompt]
         mean_reward = sum(float(episode.reward) for episode in group) / samples_per_prompt
         for episode in group:
-            episode.ensure_edge_alignment()
+            episode.finalize_source_token_alignment()
             advantage = float(episode.reward) - mean_reward
             episode.reward = advantage
-            episode.set_train_targets([advantage] * episode.num_edges)
+            targets = torch.full((len(episode.tokens),), advantage)
+            targets[-1] = 0
+            episode.set_train_targets(targets)
     return episodes
 
 
@@ -529,7 +540,7 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
         recorded = RouterReplay.collect()
         local_routes = torch.stack(recorded, dim=1).unsqueeze(0)
         full_routes = prepared.gather(local_routes, fill=0)
-        pack["rollout_routed_experts"] = token_slots_to_edges(
+        pack["rollout_routed_experts"] = fill_document_terminal_slots(
             full_routes.squeeze(0),
             pack["cu_seqlens"],
         ).to(device="cpu", dtype=torch.int32)
@@ -539,7 +550,7 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
             local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
     full_log_probs = prepared.gather(local_log_probs, fill=0)
     pack["rollout_log_probs"] = (
-        token_slots_to_edges(
+        fill_document_terminal_slots(
             full_log_probs.squeeze(0),
             pack["cu_seqlens"],
         )
@@ -760,7 +771,10 @@ def _write_actor_score_artifact(cli: argparse.Namespace, trainer: ActorNeMoTrain
                         strict=True,
                     )
                 ],
-                "log_probs": token_slots_to_edges(log_probs.squeeze(0), pack["cu_seqlens"]),
+                "log_probs": fill_document_terminal_slots(
+                    log_probs.squeeze(0),
+                    pack["cu_seqlens"],
+                ),
                 "consolidated_checkpoint": str(cli.checkpoint_dir / "iter_0000004/model/consolidated"),
             },
             output.with_suffix(".score.pt"),

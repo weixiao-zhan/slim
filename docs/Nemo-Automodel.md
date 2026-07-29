@@ -89,7 +89,7 @@ Dense and MoE training use the same Slim batch, forward, token-sharding, gather,
 | `input_ids` | `[1, S]` | Concatenated document tokens |
 | `labels` | `[1, S]` | Next-token labels with `-100` at document ends |
 | `_packed_seq_ids` | `[1, S]` | One-based document IDs |
-| RL token fields | `[1, S, ...]` | Edge values placed at source-token positions |
+| RL token fields | `[1, S, ...]` | Source-token-aligned training values |
 | `cu_seqlens` | `[N + 1]` | Document boundaries before CP |
 
 For document tokens \(x_0, x_1, \ldots, x_{n-1}\):
@@ -102,11 +102,11 @@ x_{t+1}, & t < n - 1 \\
 \end{cases}
 $$
 
-No label or RL edge crosses a document boundary.
+No label or prediction crosses a document boundary.
 
 `prepare_forward` constructs one contiguous block-diagonal `ContextParallelSharder`. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
 
-Before role-local packing, the Ray `AdvantageEstimator` writes edge-aligned training targets to each `Episode`. GRPO and GSPO produce `advantages`. PPO GAE consumes the critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
+Before role-local packing, the Ray `AdvantageEstimator` writes source-token-aligned training targets to each `Episode`. GRPO and GSPO produce `advantages`. PPO GAE consumes source-token-aligned critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
 
 Actor log-probability precompute and critic value precompute may cache packs before target construction. `update_packed_targets` attaches the completed targets to each role's cached packs immediately before training. Actor and critic do not share physical pack objects.
 
@@ -168,13 +168,13 @@ GSPO computes differentiable per-document CP reductions before expanding each se
 
 ## Routing Replay
 
-Rollout routing choices are edge aligned with shape:
+Rollout routing choices are source-token aligned with shape:
 
 ```text
-[num_edges, num_moe_layers, top_k]
+[num_tokens, num_moe_layers, top_k]
 ```
 
-Packing places each routing row at its source-token slot. The selected CP sharder maps those rows to model-local token order. Router replay remains active through backward so activation-checkpoint recomputation sees the same expert indices. The registry is process owned and clears replay state on context exit.
+The final token row is zero because it has no prediction target. Packing concatenates routing rows with the same token boundaries as the model input, and the selected CP sharder maps them to model-local token order. Router replay remains active through backward so activation-checkpoint recomputation sees the same expert indices. The registry is process owned and clears replay state on context exit.
 
 Routing replay is valid only for Qwen3.5 MoE.
 

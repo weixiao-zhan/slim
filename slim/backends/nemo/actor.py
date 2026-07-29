@@ -26,8 +26,8 @@ from slim.utils.timer import Timer, timer
 from .base import NeMoTrainer, _move_module
 from .checkpoint import is_hf_checkpoint
 from .data_packing import (
-    EDGE_FIELDS,
-    token_slots_to_edges,
+    SEQUENCE_FIELDS,
+    fill_document_terminal_slots,
     unpack_sequences,
 )
 from .forward import model_forward, prepare_forward
@@ -158,7 +158,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                             temperature=self.args.rollout_temperature,
                         )
                     full_log_probs = prepared.gather(local_log_probs, fill=0)
-                    pack[store_key] = token_slots_to_edges(
+                    pack[store_key] = fill_document_terminal_slots(
                         full_log_probs.squeeze(0),
                         pack["cu_seqlens"],
                     ).detach().cpu()
@@ -392,12 +392,12 @@ class ActorNeMoTrainer(NeMoTrainer):
         local_entropy: torch.Tensor | None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         full_pack = dict(pack)
-        full_pack["cur_log_probs"] = token_slots_to_edges(
+        full_pack["cur_log_probs"] = fill_document_terminal_slots(
             prepared.gather(local_log_probs, fill=0).squeeze(0),
             pack["cu_seqlens"],
         )
         if local_entropy is not None:
-            full_pack["entropy"] = token_slots_to_edges(
+            full_pack["entropy"] = fill_document_terminal_slots(
                 prepared.gather(local_entropy, fill=0).squeeze(0),
                 pack["cu_seqlens"],
             )
@@ -405,7 +405,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         device = local_log_probs.device
         for batch in batches:
             for name, value in list(batch.items()):
-                if name in EDGE_FIELDS and isinstance(value, torch.Tensor):
+                if name in SEQUENCE_FIELDS and isinstance(value, torch.Tensor):
                     batch[name] = value.to(device)
         custom_loss = load_function(self.args.custom_loss_function_path)
         raw_loss, raw_metrics = custom_loss(self.args, batches)

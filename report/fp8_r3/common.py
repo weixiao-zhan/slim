@@ -3,15 +3,15 @@
 Defines only the conventions INSIDE a run dir (the record schema below); the run-dir layout itself
 is owned by run_matrix.sh, which hands each script an explicit dir to read/write.
 
-Record schema (one JSON line per sample in records.jsonl), mirroring slim's edge-aligned Episode
-(slim/utils/types.py) so stage-2 can rebuild an Episode directly; edge i predicts tokens[i+1]:
+Record schema (one JSON line per sample in records.jsonl), mirroring slim's finalized source-token-aligned
+Episode (slim/utils/types.py) so stage-2 can rebuild an Episode directly; slot i predicts tokens[i+1]:
   tokens                : list[int]          full [prompt..., generated...], length N
-  loss_mask             : list[int]          length N-1; 0 on prompt edges, 1 on generated edges
-  rollout_log_probs     : list[float]        length N-1; logprob of tokens[i+1] under rollout policy
-  rollout_routed_experts: int32 [N-1, L, K]  per-edge top-k expert ids (R3 only, in experts/<i>.npy)
+  loss_mask             : list[int]          length N; 0 on prompt/terminal slots, 1 on generated predictions
+  rollout_log_probs     : list[float]        length N; logprob of tokens[i+1], with a zero terminal slot
+  rollout_routed_experts: int32 [N, L, K]    source-slot top-k expert ids (R3 only, in experts/<i>.npy)
   reward                : float              rule-based reward (accuracy) for this sample
   label                 : str                ground-truth answer
-  num_prompt_tokens     : int                len(prompt_ids); edges < this-1 are prompt (mask 0)
+  num_prompt_tokens     : int                len(prompt_ids); slots < this-1 are prompt predictions
   has_mm                : bool               True if multimodal tensors saved in mm/<i>.npz
 
 Multimodal inputs (VLM only): the processor-output tensors (pixel_values, image_grid_thw, ...) are
