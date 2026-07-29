@@ -67,15 +67,15 @@ def train(args):
         if args.use_critic:
             train_actor = not args.critic_train_only
             if args.critic_colocate:
-                values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
+                values_refs = critic_model.compute_values(rollout_data_ref)
                 ray.get(values_refs)
                 ray.get(critic_model.async_train(rollout_id, rollout_data_ref, values_refs))
                 if train_actor:
-                    ray.get(actor_model.compute_log_probs(rollout_id, rollout_data_ref))
+                    ray.get(actor_model.compute_log_probs(rollout_data_ref))
                     ray.get(actor_model.async_train(rollout_id, rollout_data_ref, values_refs))
             else:
-                values_refs = critic_model.compute_values(rollout_id, rollout_data_ref)
-                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_ref) if train_actor else []
+                values_refs = critic_model.compute_values(rollout_data_ref)
+                logprobs_refs = actor_model.compute_log_probs(rollout_data_ref) if train_actor else []
                 ray.get(values_refs + logprobs_refs)  # wait for both to finish
                 critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref, values_refs)
                 actor_train_handle = actor_model.async_train(rollout_id, rollout_data_ref, values_refs) if train_actor else []

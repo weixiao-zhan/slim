@@ -136,7 +136,7 @@ class Episode:
             case "stop":
                 self.status = Episode.Status.COMPLETED
 
-    def get_reward_value(self, args) -> float:
+    def get_reward_value(self) -> float:
         return self.reward
 
 
@@ -168,4 +168,3 @@ class MultimodalTypes:
     @classmethod
     def get(cls, name: str) -> MultimodalType | None:
         return next((m for m in cls.all() if m.name == name), None)
-

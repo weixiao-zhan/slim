@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from transformers import AutoConfig
+
 from . import qwen3_5
 
 
@@ -23,13 +25,13 @@ def validate_config(config, topology) -> None:
 
 
 def build_model(
-    config,
     args,
     checkpoint: str,
     distributed_setup,
     *,
     routing_replay: bool,
 ):
+    config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
     return _model_module(config).build_model(
         config,
         args,

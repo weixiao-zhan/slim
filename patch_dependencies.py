@@ -2,9 +2,9 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Patch installed SGLang for slim rollout and training.
+"""Patch installed runtime dependencies for slim rollout and training.
 
-Run via: `uv run python patch_sglang.py` (uses the active venv's interpreter).
+Run via: `uv run python patch_dependencies.py` (uses the active venv's interpreter).
 
 Idempotent: each replacement is skipped if its new text is already present.
 """
@@ -148,6 +148,23 @@ def _decode_slim_tensor_transport(value):
     )
 
 
+def patch_automodel_optional_transformer_engine(parallelizer: Path) -> bool:
+    """Keep AutoModel's native CP path usable without TE attention."""
+    import_anchor = "    from transformer_engine.pytorch.attention import DotProductAttention\n"
+    optional_import = """    try:
+        from transformer_engine.pytorch.attention import DotProductAttention
+    except ModuleNotFoundError as error:
+        if not error.name or not error.name.startswith("transformer_engine"):
+            raise
+        DotProductAttention = ()
+"""
+    return patch_file(
+        parallelizer,
+        [(import_anchor, optional_import)],
+        log_reason="AutoModel optional Transformer Engine attention",
+    )
+
+
 def relax_ptrace_scope() -> None:
     """Set kernel.yama.ptrace_scope=0 (needed for Torch CUDA IPC weight sync).
 
@@ -172,13 +189,18 @@ def relax_ptrace_scope() -> None:
 
 
 def main() -> int:
+    import nemo_automodel
     import sglang
 
+    automodel_dir = Path(nemo_automodel.__file__).resolve().parent
+    parallelizer = automodel_dir / "components" / "moe" / "parallelizer.py"
     sglang_dir = Path(sglang.__file__).resolve().parent
     base_processor = sglang_dir / "srt" / "multimodal" / "processors" / "base_processor.py"
 
+    patch_automodel_optional_transformer_engine(parallelizer)
     patch_sglang_base_processor(base_processor)
     install_triton_configs(sglang_dir)
+    py_compile.compile(str(parallelizer), doraise=True)
     py_compile.compile(str(base_processor), doraise=True)
 
     relax_ptrace_scope()

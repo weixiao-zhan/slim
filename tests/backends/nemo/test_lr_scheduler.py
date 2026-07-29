@@ -8,7 +8,6 @@ import torch
 
 from slim.backends.nemo.critic import CriticNeMoTrainer
 from slim.backends.nemo.lr_scheduler import NeMoLRScheduler
-from slim.backends.nemo.model import CriticModules
 
 
 NUM_GPUS = 0
@@ -57,11 +56,11 @@ def test_critic_uses_independent_backbone_and_value_head_lrs(monkeypatch):
         lambda *_args, **_kwargs: backbone,
     )
     monkeypatch.setattr(
-        "slim.backends.nemo.critic.build_critic_model",
-        lambda *_args: CriticModules(backbone=backbone, value_head=value_head),
+        "slim.backends.nemo.critic.build_value_head",
+        lambda *_args: value_head,
     )
 
-    def capture_optimizer(_args, _model, _mesh, *, param_groups):
+    def capture_optimizer(_args, _mesh, *, param_groups):
         captured["groups"] = param_groups
         return torch.optim.AdamW(param_groups, lr=1e-6)
 

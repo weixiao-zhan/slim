@@ -7,7 +7,7 @@
 # the (now tuned) Triton kernel. Backends that don't support block-FP8 / SM120 are expected to error;
 # we record that as a result ("unsupported") rather than a silent omission.
 #
-# Run AFTER tune_qwen35_fp8_moe.sh + patch_sglang.py, so `triton` here = the tuned kernel.
+# Run AFTER tune_qwen35_fp8_moe.sh + patch_dependencies.py, so `triton` here = the tuned kernel.
 #
 #   bash report/fp8_r3/bench_moe_backends.sh
 #   BACKENDS="triton cutlass" BATCH="16 32" bash report/fp8_r3/bench_moe_backends.sh

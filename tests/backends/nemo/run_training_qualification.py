@@ -432,8 +432,6 @@ def _build_trainer(
     trainer_type = ActorNeMoTrainer if cli.role == "actor" else CriticNeMoTrainer
     trainer = trainer_type.__new__(trainer_type)
     trainer.args = args
-    trainer.role = cli.role
-    trainer.with_ref = cli.role == "actor" and cli.checkpoint_dir is not None
     trainer.global_step = 0
     trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")

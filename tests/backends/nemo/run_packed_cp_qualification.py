@@ -215,7 +215,6 @@ def main() -> None:
     config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     validate_config(config, topology)
     model = build_model(
-        config,
         args,
         cli.checkpoint,
         setup,

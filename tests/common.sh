@@ -18,7 +18,7 @@ NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 
 # Install tuned SGLang kernel configs and configure CUDA IPC support.
-(cd "$REPO_DIR" && uv run python patch_sglang.py)
+(cd "$REPO_DIR" && uv run python patch_dependencies.py)
 
 cleanup() {
     pkill -9 sglang 2>/dev/null || true

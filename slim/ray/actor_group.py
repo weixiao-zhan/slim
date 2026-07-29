@@ -82,27 +82,23 @@ class RayTrainGroup:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())
             self._actor_handlers.append(actor)
 
-    def async_init(self, args, role, with_ref=False):
+    def async_init(self):
         """
         Allocate GPU resourced and initialize model, optimzier, local ckpt, etc.
         """
-        self.args = args
-        return [
-            actor.init.remote(args, role, with_ref=with_ref)
-            for actor in self._actor_handlers
-        ]
+        return [actor.init.remote(self.args) for actor in self._actor_handlers]
 
     def async_train(self, rollout_id, rollout_data_ref, values_refs=None):
         """Do one rollout training"""
         return [actor.train.remote(rollout_id, rollout_data_ref, values_refs) for actor in self._actor_handlers]
 
-    def compute_values(self, rollout_id, rollout_data_ref):
+    def compute_values(self, rollout_data_ref):
         """Compute per-token value predictions (critic only). Returns list of ObjectRefs."""
-        return [actor.compute_values.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+        return [actor.compute_values.remote(rollout_data_ref) for actor in self._actor_handlers]
 
-    def compute_log_probs(self, rollout_id, rollout_data_ref):
+    def compute_log_probs(self, rollout_data_ref):
         """Pre-compute log-probs and cache packed batches (actor only). Returns list of ObjectRefs."""
-        return [actor.compute_log_probs.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+        return [actor.compute_log_probs.remote(rollout_data_ref) for actor in self._actor_handlers]
 
     def save_model(self, rollout_id, force_sync=False):
         """Save actor model"""
