@@ -58,7 +58,7 @@ class Episode:
     _sampling_params: dict[str, Any] | None = None     # transient rollout request params; cleared by freeze()
 
     # Training targets, populated after rollout.
-    rollout_index: int | None = None
+    episode_index: int | None = None
     advantages: Any | None = None
     values: Any | None = None
     value_targets: Any | None = None
@@ -88,10 +88,10 @@ class Episode:
         return max(len(self.tokens) - 1, 0)
 
     def ensure_edge_alignment(self) -> None:
-        """Validate / materialize loss_mask. Call before freeze()."""
+        """Validate edge-aligned rollout fields. Call before freeze()."""
         edge_len = self.num_edges
         if self.loss_mask is None:
-            self.loss_mask = [1] * edge_len
+            raise ValueError("loss_mask must be present")
         if len(self.loss_mask) != edge_len:
             raise ValueError(f"loss_mask length {len(self.loss_mask)} != num_edges {edge_len}")
         if self.rollout_log_probs is not None and len(self.rollout_log_probs) != edge_len:

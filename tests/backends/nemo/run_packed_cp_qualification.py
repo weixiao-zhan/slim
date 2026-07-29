@@ -77,7 +77,7 @@ def _pack(first_document: list[int]) -> dict:
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
-        "_episode_indices": [0, 1],
+        "_episode_dp_indices": [0, 1],
     }
 
 

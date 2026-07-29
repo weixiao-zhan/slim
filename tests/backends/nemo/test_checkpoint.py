@@ -40,7 +40,7 @@ def test_hf_checkpoint_is_not_treated_as_training_resume(tmp_path):
 
 
 @pytest.mark.unit
-def test_fresh_scheduler_resumes_from_optimizer_global_step(monkeypatch, tmp_path):
+def test_skipped_scheduler_state_keeps_fresh_lr_step(monkeypatch, tmp_path):
     trainer = SimpleNamespace(
         role="critic",
         global_step=0,
@@ -48,7 +48,6 @@ def test_fresh_scheduler_resumes_from_optimizer_global_step(monkeypatch, tmp_pat
         args=SimpleNamespace(
             no_load_rng=True,
             no_load_lr_scheduler=True,
-            lr_scheduler_start_step=None,
             start_rollout_id=0,
         ),
     )
@@ -63,7 +62,7 @@ def test_fresh_scheduler_resumes_from_optimizer_global_step(monkeypatch, tmp_pat
     finalize_load(trainer, payload)
 
     assert trainer.global_step == 12
-    assert trainer.lr_scheduler.last_epoch == 12
+    assert trainer.lr_scheduler.last_epoch == 0
     assert trainer.args.start_rollout_id == 4
 
 

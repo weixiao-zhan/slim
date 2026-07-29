@@ -55,7 +55,6 @@ class NeMoLRScheduler(LRScheduler):
         self.lr_decay_steps = lr_decay_steps
         self.wsd_decay_steps = wsd_decay_steps
         self.lr_wsd_decay_style = lr_wsd_decay_style
-
         assert self.lr_decay_steps > 0
         assert self.lr_warmup_steps < self.lr_decay_steps
 
@@ -63,7 +62,23 @@ class NeMoLRScheduler(LRScheduler):
         if self.lr_decay_style == "WSD":
             assert self.wsd_decay_steps is not None
 
-        # Initialize parent class
+        schedule_end = self.lr_decay_steps
+        warmup_end_limit = (
+            schedule_end - self.wsd_decay_steps
+            if self.lr_decay_style == "WSD"
+            else schedule_end - 1
+        )
+        for index, group in enumerate(optimizer.param_groups):
+            name = group.get("name", f"param_group_{index}")
+            start_step = group.get("start_step", 0)
+            if start_step < 0:
+                raise ValueError(f"{name} start_step must be non-negative, got {start_step}")
+            if start_step + self.lr_warmup_steps > warmup_end_limit:
+                raise ValueError(
+                    f"{name} warmup ends at step {start_step + self.lr_warmup_steps}, "
+                    f"after the allowed shared-schedule boundary {warmup_end_limit}"
+                )
+
         super().__init__(optimizer, last_epoch)
 
         logger.info(f"> learning rate decay style: {self.lr_decay_style}")
@@ -79,30 +94,34 @@ class NeMoLRScheduler(LRScheduler):
         """
         max_lr = param_group.get("max_lr", self.max_lr)
         min_lr = param_group.get("min_lr", self.min_lr)
+        start_step = param_group.get("start_step", 0)
+        if self.last_epoch < start_step:
+            return 0.0
 
-        # Use linear warmup for the initial part.
-        if self.lr_warmup_steps > 0 and self.last_epoch <= self.lr_warmup_steps:
+        component_step = self.last_epoch - start_step
+
+        if self.lr_warmup_steps > 0 and component_step <= self.lr_warmup_steps:
             return self.init_lr + (
-                (max_lr - self.init_lr) * float(self.last_epoch) / float(self.lr_warmup_steps)
+                (max_lr - self.init_lr)
+                * float(component_step)
+                / float(self.lr_warmup_steps)
             )
 
-        # If the learning rate is constant, just return the initial value.
         if self.lr_decay_style == "constant":
             return max_lr
 
-        # For any steps larger than `self.lr_decay_steps`, use `min_lr`.
         if self.last_epoch > self.lr_decay_steps:
             return min_lr
 
-        # If we are done with the warmup period, use the decay style.
         if self.lr_decay_style == "inverse-square-root":
             warmup_steps = max(self.lr_warmup_steps, 1)
-            num_steps = max(self.last_epoch, 1)
+            num_steps = max(component_step, 1)
             lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
             return max(min_lr, lr)
 
-        num_steps_ = self.last_epoch - self.lr_warmup_steps
-        decay_steps_ = self.lr_decay_steps - self.lr_warmup_steps
+        decay_start = start_step + self.lr_warmup_steps
+        num_steps_ = self.last_epoch - decay_start
+        decay_steps_ = self.lr_decay_steps - decay_start
         decay_ratio = float(num_steps_) / float(decay_steps_)
         assert decay_ratio >= 0.0
         assert decay_ratio <= 1.0
@@ -115,7 +134,6 @@ class NeMoLRScheduler(LRScheduler):
         elif self.lr_decay_style == "cosine":
             coeff = 0.5 * (math.cos(math.pi * decay_ratio) + 1.0)
         elif self.lr_decay_style == "WSD":
-            # The anneal is anchored to the global run end (last_epoch),
             wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
             if self.last_epoch <= wsd_anneal_start_:
                 coeff = 1.0
@@ -144,6 +162,14 @@ class NeMoLRScheduler(LRScheduler):
             list[float]: A list of learning rates, one for each parameter group.
         """
         return [self._get_lr_for_group(group) for group in self.optimizer.param_groups]
+
+    def reset(self) -> None:
+        """Reset the learning-rate timeline to step zero."""
+        self.last_epoch = 0
+        self._step_count = 1
+        self._last_lr = self.get_lr()
+        for param_group, lr in zip(self.optimizer.param_groups, self._last_lr, strict=True):
+            param_group["lr"] = lr
 
 
 def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> NeMoLRScheduler:

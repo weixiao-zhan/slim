@@ -97,8 +97,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--max-tokens-per-gpu", type=int, default=2048)
     parser.add_argument(
         "--freeze-vision-tower",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
     )
     parser.add_argument("--weight-conversion-only", action="store_true")
     parser.add_argument("--checkpoint-dir", type=Path)
@@ -129,7 +129,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         eps_clip_c=None,
         eps_clip_high=0.2,
         expert_model_parallel_size=cli.expert_parallel_size,
-        freeze_audio_tower=True,
+        freeze_audio_tower=False,
         freeze_language_model=False,
         freeze_vision_tower=cli.freeze_vision_tower,
         get_mismatch_metrics=False,
@@ -141,12 +141,14 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         loss_type="policy_loss",
         lr=1e-2,
         lr_actor=1e-2,
+        lr_actor_start_step=0,
         lr_critic=1e-2,
+        lr_critic_start_step=0,
         lr_critic_value_head=1e-2,
+        lr_critic_value_head_start_step=0,
         lr_decay_iters=None,
         lr_decay_style="constant",
         lr_min=0.0,
-        lr_scheduler_start_step=None,
         lr_warmup_fraction=None,
         lr_warmup_init=0.0,
         lr_warmup_iters=0,
@@ -210,7 +212,7 @@ def _pack(processor=None) -> dict:
         "cu_seqlens": torch.tensor([0, first_end, tokens.numel()], dtype=torch.int32),
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
-        "_episode_indices": [0, 1],
+        "_episode_dp_indices": [0, 1],
     }
     if multimodal_inputs:
         pack["multimodal_inputs"] = multimodal_inputs

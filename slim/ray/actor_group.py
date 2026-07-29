@@ -8,7 +8,6 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from slim.backends.nemo import ActorNeMoTrainer, CriticNeMoTrainer
-from slim.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
 from slim.utils.env_utils import get_nvidia_ld_library_path
 
 
@@ -59,7 +58,6 @@ class RayTrainGroup:
             "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
             "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
             "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
-            **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }
 

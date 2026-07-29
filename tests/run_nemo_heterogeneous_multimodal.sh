@@ -54,6 +54,6 @@ for topology in \
     "cp1_ep8 1 8"
 do
     read -r topology_name cp_size ep_size <<<"$topology"
-    run_case "${topology_name}_frozen_vision" "$cp_size" "$ep_size"
-    run_case "${topology_name}_trainable_vision" "$cp_size" "$ep_size" --no-freeze-vision-tower
+    run_case "${topology_name}_frozen_vision" "$cp_size" "$ep_size" --freeze-vision-tower
+    run_case "${topology_name}_trainable_vision" "$cp_size" "$ep_size"
 done

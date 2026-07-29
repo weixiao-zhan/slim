@@ -14,12 +14,12 @@ An episode is created from a dataset row via `Episode.from_example(example)`, wh
 | `generate_function_path` | `str \| None` | Override path to a custom generate function for this episode |
 | `session_id` | `str \| None` | UUID for consistent-hashing router affinity |
 | `tokens` | `list[int]` | Full token sequence (prompt + generated) |
-| `loss_mask` | `list[int] \| None` | Edge-aligned; 0 for prompt edges, 1 for generated edges |
+| `loss_mask` | `list[int] \| None` | Edge-aligned; 0 for prompt edges, 1 for generated edges; required before training |
 | `rollout_log_probs` | `list[float] \| None` | Edge-aligned log-probabilities under the rollout policy |
 | `rollout_routed_experts` | `np.ndarray [num_edges, num_layers, top_k] \| None` | MoE expert indices recorded during rollout for replay in training |
 | `multimodal_inputs` | `dict[str, Tensor] \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
 | `reward` | `float \| None` | Raw scalar reward assigned by the reward model |
-| `rollout_index` | `int \| None` | Stable position in the complete rollout batch |
+| `episode_index` | `int \| None` | Stable position in the complete rollout batch |
 | `advantages` | edge-aligned values or `None` | Policy training targets |
 | `values` | edge-aligned values or `None` | Critic predictions used to construct PPO targets |
 | `value_targets` | edge-aligned values or `None` | Critic regression targets |
@@ -57,7 +57,7 @@ This design keeps the episode as a single growing sequence — no separate promp
 Entry `i` describes the prediction of `tokens[i+1]` given `tokens[:i+1]`.
 Prompt edges are 0 in `loss_mask`; generated edges are 1.
 
-`episode.ensure_edge_alignment()` materializes and validates rollout-produced edge fields before freeze.
+`episode.ensure_edge_alignment()` requires `loss_mask` and validates rollout-produced edge fields before freeze.
 `episode.set_train_targets()` validates and assigns the training targets after reward and value processing.
 
 ### Processor Output Format (VLM)

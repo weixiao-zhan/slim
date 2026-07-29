@@ -65,11 +65,16 @@ class CriticNeMoTrainer(NeMoTrainer):
         groups = [
             {
                 "params": backbone_parameters,
+                "name": "critic",
                 "max_lr": self.args.lr_critic,
+                "start_step": self.args.lr_critic_start_step * self._steps_per_rollout(),
             },
             {
                 "params": head_parameters,
+                "name": "critic_value_head",
                 "max_lr": self.args.lr_critic_value_head,
+                "start_step": self.args.lr_critic_value_head_start_step
+                * self._steps_per_rollout(),
             },
         ]
         self.optimizer = build_optimizer(
@@ -118,7 +123,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         all_values: list[torch.Tensor | None] = [None] * len(episodes)
         for pack in packed_batches:
             for episode_index, batch in zip(
-                pack["_episode_indices"],
+                pack["_episode_dp_indices"],
                 unpack_sequences(pack),
                 strict=True,
             ):
