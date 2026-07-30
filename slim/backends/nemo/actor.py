@@ -30,7 +30,7 @@ from .data_packing import (
     fill_document_terminal_slots,
     unpack_sequences,
 )
-from .forward import model_forward, prepare_forward
+from .packed_cp_forward import prepare_forward
 from .loss import (
     count_global_denominators,
     entropy_from_logits,
@@ -109,15 +109,6 @@ class ActorNeMoTrainer(NeMoTrainer):
         updater_type = UpdateWeightFromTensor if self.args.rollout_colocate else UpdateWeightFromDistributed
         self.weight_updater = updater_type(self.args, self.model, quantizer)
 
-    def _padding_token_id(self) -> int:
-        return self.tokenizer.pad_token_id or 0
-
-    def _routing_targets(self, prepared, *, required: bool):
-        targets = prepared.fields.get("rollout_routed_experts")
-        if required and targets is None:
-            raise KeyError("rollout_routed_experts is required when rollout routing replay is enabled")
-        return targets
-
     def _compute_log_prob(
         self,
         model_tag: str,
@@ -146,12 +137,12 @@ class ActorNeMoTrainer(NeMoTrainer):
                         active_model,
                         self.device_mesh,
                         pack,
-                        padding_token_id=self._padding_token_id(),
+                        padding_token_id=self.tokenizer.pad_token_id,
                     )
                     replay_enabled = not is_reference and self.args.use_rollout_routing_replay
-                    targets = self._routing_targets(prepared, required=replay_enabled)
-                    with prepared.context_factory(), replay_router_targets(targets if replay_enabled else None):
-                        output = model_forward(active_model, prepared.model_batch)
+                    targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
+                    with prepared.context_factory(), replay_router_targets(targets):
+                        output = active_model(**prepared.model_batch)
                         local_log_probs = selective_log_probs(
                             output.logits,
                             prepared.fields["labels"],
@@ -426,18 +417,18 @@ class ActorNeMoTrainer(NeMoTrainer):
             self.model,
             self.device_mesh,
             pack,
-            padding_token_id=self._padding_token_id(),
+            padding_token_id=self.tokenizer.pad_token_id,
         )
         if is_final:
             self._prepare_final_backward()
         replay_enabled = self.args.use_rollout_routing_replay
-        targets = self._routing_targets(prepared, required=replay_enabled)
+        targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
         with (
             self._sync_context(is_final),
             prepared.context_factory(),
-            replay_router_targets(targets if replay_enabled else None),
+            replay_router_targets(targets),
         ):
-            output = model_forward(self.model, prepared.model_batch)
+            output = self.model(**prepared.model_batch)
             if self.args.loss_type == "custom_loss":
                 local_entropy = None
                 if self.args.entropy_coef != 0:

@@ -38,4 +38,5 @@ Thus we forked `slim` — keeping Slime's customizability and efficient RL orche
 
 ```bash
 uv sync --extra dev
+uv run python patch_dependencies.py
 ```

@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from nemo_automodel.components.distributed.config import DistributedSetup, FSDP2Config
 from nemo_automodel.components.distributed.mesh import ParallelismSizes
-from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
 
 
 @dataclass(frozen=True)
@@ -55,13 +54,3 @@ class NeMoTopology:
             world_size=self.world_size,
             timeout_minutes=args.distributed_timeout_minutes,
         )
-
-
-def flat_mesh(device_mesh, name: str):
-    return get_flat_mesh(device_mesh, name)
-
-
-def mesh_rank(mesh) -> int:
-    if mesh is None or mesh.size() == 1:
-        return 0
-    return mesh.get_local_rank()

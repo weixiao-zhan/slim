@@ -24,7 +24,10 @@ Create or refresh the environment with:
 
 ```bash
 uv sync --extra dev
+uv run python patch_dependencies.py
 ```
+
+`patch_dependencies.py` enables AutoModel's block-diagonal batch context at CP1 and installs the runtime dependency fixes and kernel configurations used by Slim.
 
 The pinned revision supplies Qwen3.5 CP token sharding verbs, block-diagonal attention and Gated DeltaNet runtimes, grouped-expert state-dict conversion, and CP vision sharding. Slim applies these primitives through one packed Qwen3.5 integration for dense and MoE models. The corresponding upstream tracker is [NVIDIA-NeMo/Automodel#2985](https://github.com/NVIDIA-NeMo/Automodel/issues/2985).
 

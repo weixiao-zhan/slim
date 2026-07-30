@@ -17,7 +17,7 @@ import torch.distributed as dist
 from transformers import AutoConfig
 
 from slim.backends.nemo.data_packing import fill_document_terminal_slots
-from slim.backends.nemo.forward import model_forward, prepare_forward
+from slim.backends.nemo.packed_cp_forward import prepare_forward
 from slim.backends.nemo.loss import selective_log_probs
 from slim.backends.nemo.models import build_model, validate_config
 from slim.backends.nemo.topology import NeMoTopology
@@ -95,7 +95,7 @@ def _pack(first_document: list[int]) -> dict:
 def _forward_log_probs(model, device_mesh, pack: dict) -> tuple[torch.Tensor, object]:
     prepared = prepare_forward(model, device_mesh, pack, padding_token_id=0)
     with prepared.context_factory():
-        output = model_forward(model, prepared.model_batch)
+        output = model(**prepared.model_batch)
         local = selective_log_probs(output.logits, prepared.fields["labels"])
     return prepared.gather(local, fill=0), prepared
 
@@ -262,7 +262,7 @@ def main() -> None:
     reset_cp_attn_fire_count()
     prepared = prepare_forward(model, device_mesh, baseline_pack, padding_token_id=0)
     with prepared.context_factory():
-        output = model_forward(model, prepared.model_batch)
+        output = model(**prepared.model_batch)
         local = selective_log_probs(output.logits, prepared.fields["labels"])
         valid = prepared.fields["labels"] != -100
         valid_targets = baseline_pack["tokens"].numel() - baseline_pack["cu_seqlens"].numel() + 1

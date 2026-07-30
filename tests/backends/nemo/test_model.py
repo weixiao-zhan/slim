@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from slim.backends.nemo.model import final_hidden_state
 from slim.backends.nemo.models import build_model
 from slim.backends.nemo.models.qwen3_5 import (
     register_qwen3_5_moe_parallel_strategy,
@@ -24,15 +23,6 @@ def test_qwen3_5_validation_rejects_unsupported_models():
             SimpleNamespace(model_type="unsupported"),
             SimpleNamespace(expert_model_parallel_size=1),
         )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("container", [lambda value: value, lambda value: (value,)])
-def test_final_hidden_state_accepts_dense_and_moe_outputs(container):
-    hidden = torch.randn(1, 4, 8)
-    output = SimpleNamespace(hidden_states=container(hidden))
-
-    assert final_hidden_state(output) is hidden
 
 
 @pytest.mark.unit

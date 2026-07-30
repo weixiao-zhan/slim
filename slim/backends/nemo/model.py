@@ -13,10 +13,6 @@ from nemo_automodel.components.optim import AdamWConfig
 from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 
 
-def text_config(config):
-    return getattr(config, "text_config", config)
-
-
 def build_optimizer(args, device_mesh, *, param_groups: list[dict]):
     config = AdamWConfig(
         lr=args.lr,
@@ -39,16 +35,6 @@ class ScalarValueHead(nn.Module):
         return self.proj(hidden_states.to(dtype=self.proj.weight.dtype)).squeeze(-1).float()
 
 
-def final_hidden_state(output) -> torch.Tensor:
-    """Normalize AutoModel dense and MoE final-hidden-state output contracts."""
-    final_state = get_final_hidden_states(output)
-    if final_state is None:
-        raise RuntimeError("critic backbone did not return final hidden states")
-    if not isinstance(final_state, torch.Tensor):
-        raise TypeError(f"expected final hidden state tensor, got {type(final_state).__name__}")
-    return final_state
-
-
 class CriticModel(nn.Module):
     """Checkpointable AutoModel backbone and scalar value head."""
 
@@ -59,15 +45,13 @@ class CriticModel(nn.Module):
 
     def forward(self, **kwargs) -> torch.Tensor:
         output = self.backbone(logits_to_keep=1, output_hidden_states=True, **kwargs)
-        return self.value_head(final_hidden_state(output))
+        return self.value_head(get_final_hidden_states(output))
 
 
 def build_value_head(backbone: nn.Module, distributed_setup) -> nn.Module:
-    output_embeddings = backbone.get_output_embeddings()
-    if output_embeddings is not None:
-        output_embeddings.requires_grad_(False)
+    backbone.get_output_embeddings().requires_grad_(False)
 
-    config = text_config(backbone.config)
+    config = backbone.config.get_text_config()
     storage_dtype = next(parameter.dtype for parameter in backbone.parameters() if parameter.is_floating_point())
     head = ScalarValueHead(
         hidden_size=config.hidden_size,
@@ -85,17 +69,3 @@ def build_value_head(backbone: nn.Module, distributed_setup) -> nn.Module:
         reshard_after_forward=False,
     )
     return head
-
-
-def resolve_state_dict_adapter(model):
-    candidates = [
-        model,
-        getattr(model, "model", None),
-        getattr(model, "base_model", None),
-        getattr(getattr(model, "base_model", None), "model", None),
-    ]
-    for candidate in candidates:
-        adapter = getattr(candidate, "state_dict_adapter", None)
-        if adapter is not None:
-            return adapter
-    raise RuntimeError(f"{type(model).__name__} does not expose a NeMo state_dict_adapter")
