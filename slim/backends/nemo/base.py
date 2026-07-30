@@ -49,7 +49,7 @@ from .data_packing import (
 )
 from .lr_scheduler import get_lr_scheduler
 from .models import validate_config
-from .topology import NeMoTopology, mesh_rank
+from .topology import NeMoTopology
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,9 @@ class NeMoTrainer(RayWorker):
         self.dp_group = self.dp_mesh.get_group()
         self.cp_group = self.cp_mesh.get_group()
         self.dp_size = self.dp_mesh.size()
-        self.dp_rank = mesh_rank(self.dp_mesh)
+        self.dp_rank = self.dp_mesh.get_local_rank()
         self.cp_size = self.cp_mesh.size()
-        self.cp_rank = mesh_rank(self.cp_mesh)
+        self.cp_rank = self.cp_mesh.get_local_rank()
         self.backward_group_size = dist.get_world_size()
         logger.info(
             "NeMo topology rank=%d world=%d logical_dp=%d dp_rank=%d cp=%d cp_rank=%d ep=%d",
@@ -201,6 +201,7 @@ class NeMoTrainer(RayWorker):
         self._create_model_and_optimizer(model_checkpoint)
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
         self.checkpointer = checkpoint.build_checkpointer(self)
+        self._pending_checkpoint = None
         checkpoint_payload = checkpoint.load(self)
         self._post_model_setup()
 

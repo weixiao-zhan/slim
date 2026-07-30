@@ -23,6 +23,7 @@ from nemo_automodel.components.distributed.cp_vision_shard import (
     reset_cp_vision_group,
     set_cp_vision_group,
 )
+from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
 from nemo_automodel.components.distributed.parallelizer import (
     PARALLELIZATION_STRATEGIES,
     Qwen3_5ParallelizationStrategy,
@@ -33,22 +34,16 @@ from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareG
 from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
 from nemo_automodel.components.moe.layers import MoE
 
-from ..topology import flat_mesh
-
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
 CP_VISION_SHARDING = CpVisionShardingConfig(enabled=True)
 
 
-def _text_config(config):
-    return getattr(config, "text_config", config)
-
-
 def _is_moe(config) -> bool:
-    return getattr(config, "model_type", "") == "qwen3_5_moe"
+    return config.model_type == "qwen3_5_moe"
 
 
 def validate_config(config, topology) -> None:
-    model_type = getattr(config, "model_type", "")
+    model_type = config.model_type
     if model_type not in MODEL_TYPES:
         supported = ", ".join(MODEL_TYPES)
         raise ValueError(
@@ -60,7 +55,7 @@ def validate_config(config, topology) -> None:
             raise ValueError("dense Qwen3.5 requires expert_model_parallel_size=1")
         return
 
-    num_experts = int(_text_config(config).num_experts)
+    num_experts = int(config.get_text_config().num_experts)
     if num_experts % topology.expert_model_parallel_size:
         raise ValueError(
             f"num_experts {num_experts} must be divisible by expert_model_parallel_size "
@@ -124,8 +119,6 @@ def build_model(
 
 def _blockdiag_attention(self, query, key, value, **attn_kwargs):
     if current_blockdiag_cp_state() is not None:
-        if self.backend.attn != "sdpa":
-            raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
         return cp_blockdiag_sdpa(query, key, value, **attn_kwargs)
     return self._slim_base_attn_func(query, key, value, **attn_kwargs)
 
@@ -139,8 +132,6 @@ def _install_attention_dispatch(model: torch.nn.Module) -> None:
         seen.add(id(attention))
         if getattr(attention, "_slim_packed_cp_dispatch", False):
             continue
-        if attention.backend.attn != "sdpa":
-            raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
         attention._slim_base_attn_func = attention.attn_func
         attention.attn_func = MethodType(_blockdiag_attention, attention)
         attention._slim_packed_cp_dispatch = True
@@ -221,7 +212,7 @@ def _global_media_presence(
 
 def _vision_sync_group(device_mesh):
     """Return the FSDP-shard group that aligns multimodal forward branches."""
-    return flat_mesh(device_mesh, "dp_shard_cp").get_group()
+    return get_flat_mesh(device_mesh, "dp_shard_cp").get_group()
 
 
 def _dummy_visual_inputs(model: torch.nn.Module, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -338,10 +329,6 @@ def _install_primary_shard(model: torch.nn.Module, cp_mesh) -> None:
     if getattr(model, "_slim_packed_cp_primary_shard", False):
         return
 
-    prepare_inputs_embeds = getattr(model, "_embed_and_splice_for_cp", None)
-    if prepare_inputs_embeds is None:
-        raise TypeError("Qwen3.5 AutoModel must expose _embed_and_splice_for_cp")
-
     def shard_primary(
         module: torch.nn.Module,
         args: tuple[Any, ...],
@@ -390,8 +377,7 @@ def _install_primary_shard(model: torch.nn.Module, cp_mesh) -> None:
 
 def install_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     """Install the packed training path missing from Qwen3.5 AutoModel."""
-    backend = getattr(model, "backend", None)
-    if getattr(backend, "attn", None) != "sdpa":
+    if model.backend.attn != "sdpa":
         raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
 
     configure_cp_varlen(attn_backend="flash", kv_exchange="halo")
@@ -427,10 +413,6 @@ def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: d
             model_batch["image_grid_thw"] = image_grid_hws
         model_batch.pop("image_grid_hws")
 
-    prepare = getattr(model, "prepare_model_inputs_for_cp", None)
-    if prepare is None:
-        raise TypeError("Qwen3.5 AutoModel must expose prepare_model_inputs_for_cp")
-
     boundaries = pack["cu_seqlens"].tolist()
     counts = pack.get("multimodal_num_items") or {}
     offsets = {}
@@ -451,6 +433,6 @@ def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: d
             item_start, item_end = cursor[document_index : document_index + 2]
             if item_end > item_start:
                 document_batch[name] = tensor[item_start:item_end]
-        prepared = prepare(document_batch, num_chunks=1)
+        prepared = model.prepare_model_inputs_for_cp(document_batch, num_chunks=1)
         pieces.append(prepared["position_ids"])
     return torch.cat(pieces, dim=-1)

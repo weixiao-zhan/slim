@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from nemo_automodel.components.distributed.blockdiag_cp import make_cp_blockdiag_batch_and_ctx
 
 from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.models.qwen3_5 import (
@@ -19,9 +20,8 @@ from slim.backends.nemo.models.qwen3_5 import (
     build_packed_position_ids,
     install_packed_cp,
 )
-from slim.backends.nemo.packed_cp import (
+from slim.backends.nemo.packed_cp_forward import (
     build_packed_cp_sharder,
-    make_packed_cp_batch_and_ctx,
 )
 from slim.utils.types import Episode
 from tests.backends.nemo.run_packed_cp_qualification import _compare_with_baseline
@@ -117,7 +117,7 @@ def test_vision_sync_uses_flat_dp_shard_cp_group(monkeypatch):
         calls.append((mesh, name))
         return flat_dp_shard_cp_mesh
 
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.flat_mesh", fake_flat_mesh)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.get_flat_mesh", fake_flat_mesh)
 
     assert _vision_sync_group(device_mesh) is group
     assert calls == [(device_mesh, "dp_shard_cp")]
@@ -164,7 +164,7 @@ def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
     model = nn.Module()
     model.backend = SimpleNamespace(attn="sdpa")
     model.config = SimpleNamespace(model_type="qwen3_5")
-    cp_mesh = SimpleNamespace(size=lambda: 1)
+    cp_mesh = SimpleNamespace(size=lambda: 1, get_group=lambda: object())
     device_mesh = {"cp": cp_mesh}
 
     monkeypatch.setattr(
@@ -177,7 +177,7 @@ def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_moe_cp", lambda model, mesh: None)
     monkeypatch.setattr(
         "slim.backends.nemo.models.qwen3_5._install_synchronized_vision",
-        lambda model, group: None,
+        lambda model, sync_group, cp_group: None,
     )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_primary_shard", lambda model, mesh: None)
 
@@ -240,7 +240,7 @@ def test_common_sharder_is_contiguous_block_diagonal():
 
     sharder = build_packed_cp_sharder(_FakeDeviceMesh(), padding_token_id=17)
 
-    assert sharder.shard_batch.func is make_packed_cp_batch_and_ctx
+    assert sharder.shard_batch.func is make_cp_blockdiag_batch_and_ctx
     assert sharder.shard_batch.keywords == {"shard_primary": False}
     assert sharder.local_token_global_indices is contiguous_local_indices
     assert sharder._padding_token_id == 17
@@ -432,7 +432,7 @@ def test_cp1_uses_padded_block_diagonal_state(monkeypatch):
         "_packed_seq_ids": torch.tensor([[1, 1, 2, 2, 2]]),
     }
 
-    context_factory, sharded, layout = make_packed_cp_batch_and_ctx(
+    context_factory, sharded, layout = make_cp_blockdiag_batch_and_ctx(
         _FakeCPMesh(size=1),
         None,
         batch,
@@ -448,6 +448,26 @@ def test_cp1_uses_padded_block_diagonal_state(monkeypatch):
         assert step_state["doc_ids"].tolist() == [[1, 1, 2, 2, 2, 0]]
         assert step_state["packed_cu_seqlens"].tolist() == [0, 2, 5, 6]
         assert step_state["varlen_meta"] == "meta"
+
+
+@pytest.mark.unit
+def test_cp1_kv_gather_is_differentiable_identity(monkeypatch):
+    from nemo_automodel.components.distributed.blockdiag_cp.exchange import _AllGatherSeqDiff
+
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group: 1)
+
+    def unexpected_collective(*args, **kwargs):
+        raise AssertionError("CP1 K/V gather must not launch a collective")
+
+    monkeypatch.setattr(torch.distributed, "all_gather", unexpected_collective)
+    monkeypatch.setattr(torch.distributed, "reduce_scatter", unexpected_collective)
+
+    tensor = torch.randn(1, 2, 3, 4, requires_grad=True)
+    gathered = _AllGatherSeqDiff.apply(tensor, object(), 2)
+    gathered.sum().backward()
+
+    assert torch.equal(gathered, tensor)
+    assert torch.equal(tensor.grad, torch.ones_like(tensor))
 
 
 @pytest.mark.unit

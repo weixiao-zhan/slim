@@ -6,6 +6,7 @@
 # Install dependencies.
 # AutoModel, FLA, FlashAttention-2, and FlashAttention-3 are core dependencies.
 uv sync --extra dev
+uv run python patch_dependencies.py
 ```
 
 ## Models

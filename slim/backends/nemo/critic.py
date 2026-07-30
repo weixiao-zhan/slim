@@ -9,6 +9,7 @@ import logging
 
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 from tqdm import tqdm
 
 from slim.utils.data import process_rollout_data
@@ -18,9 +19,9 @@ from slim.utils.timer import timer
 from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
-from .forward import model_forward, prepare_forward
+from .packed_cp_forward import prepare_forward
 from .loss import count_global_denominators, normalize_sequence_values
-from .model import CriticModel, build_optimizer, build_value_head, final_hidden_state
+from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
 
 logger = logging.getLogger(__name__)
@@ -85,15 +86,12 @@ class CriticNeMoTrainer(NeMoTrainer):
         self.model.train()
         self.value_head.train()
 
-    def _padding_token_id(self) -> int:
-        return self.tokenizer.pad_token_id or 0
-
     def _forward_values(self, prepared) -> torch.Tensor:
         model_batch = dict(prepared.model_batch)
         model_batch["output_hidden_states"] = True
         model_batch["logits_to_keep"] = 1
-        output = model_forward(self.model, model_batch)
-        return self.value_head(final_hidden_state(output))
+        output = self.model(**model_batch)
+        return self.value_head(get_final_hidden_states(output))
 
     def compute_values(self, rollout_data_ref: list) -> dict:
         episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
@@ -108,7 +106,7 @@ class CriticNeMoTrainer(NeMoTrainer):
                     self.model,
                     self.device_mesh,
                     pack,
-                    padding_token_id=self._padding_token_id(),
+                    padding_token_id=self.tokenizer.pad_token_id,
                 )
                 with prepared.context_factory():
                     local_values = self._forward_values(prepared)
@@ -149,7 +147,7 @@ class CriticNeMoTrainer(NeMoTrainer):
             self.model,
             self.device_mesh,
             pack,
-            padding_token_id=self._padding_token_id(),
+            padding_token_id=self.tokenizer.pad_token_id,
         )
         if is_final:
             self._prepare_final_backward()

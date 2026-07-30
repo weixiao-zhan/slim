@@ -31,7 +31,7 @@ from slim.backends.nemo.data_packing import (
     fill_document_terminal_slots,
     pack_sequences,
 )
-from slim.backends.nemo.forward import model_forward, prepare_forward
+from slim.backends.nemo.packed_cp_forward import prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
 from slim.backends.nemo.lr_scheduler import get_lr_scheduler
 from slim.backends.nemo.models import validate_config
@@ -535,7 +535,7 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
     replay_count = len(RouterReplay.instances())
     if replay_count:
         with torch.no_grad(), RouterReplay.record(), prepared.context_factory():
-            output = model_forward(trainer.model, prepared.model_batch)
+            output = trainer.model(**prepared.model_batch)
             local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
         recorded = RouterReplay.collect()
         local_routes = torch.stack(recorded, dim=1).unsqueeze(0)
@@ -546,7 +546,7 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
         ).to(device="cpu", dtype=torch.int32)
     else:
         with torch.no_grad(), prepared.context_factory():
-            output = model_forward(trainer.model, prepared.model_batch)
+            output = trainer.model(**prepared.model_batch)
             local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
     full_log_probs = prepared.gather(local_log_probs, fill=0)
     pack["rollout_log_probs"] = (
@@ -757,7 +757,7 @@ def _write_actor_score_artifact(cli: argparse.Namespace, trainer: ActorNeMoTrain
     prepared = prepare_forward(trainer.model, trainer.device_mesh, pack, padding_token_id=0)
     trainer.model.eval()
     with torch.no_grad(), prepared.context_factory():
-        model_output = model_forward(trainer.model, prepared.model_batch)
+        model_output = trainer.model(**prepared.model_batch)
         local_log_probs = selective_log_probs(model_output.logits, prepared.fields["labels"])
     log_probs = prepared.gather(local_log_probs, fill=0).cpu()
     if dist.get_rank() == 0:

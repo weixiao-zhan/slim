@@ -83,9 +83,8 @@ def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
 
 
 def _checkpoint_root(trainer: Any) -> str:
-    save_dir = getattr(trainer, "_checkpoint_save_dir", None)
-    load_dir = getattr(trainer, "_checkpoint_load_dir", None)
-    return str(Path(save_dir or load_dir or trainer.args.hf_checkpoint).expanduser())
+    checkpoint_dir = trainer._checkpoint_save_dir or trainer._checkpoint_load_dir
+    return str(Path(checkpoint_dir or trainer.args.hf_checkpoint).expanduser())
 
 
 def build_checkpointer(trainer: Any):
@@ -100,13 +99,12 @@ def build_checkpointer(trainer: Any):
         wait_for_staging=trainer.args.async_save,
         cpu_offload=trainer.args.checkpoint_cpu_offload,
     )
-    process_group = getattr(trainer.mesh_context, "process_group", None)
     return config.build(
         dp_rank=dist.get_rank(),
         tp_rank=0,
         pp_rank=0,
         moe_mesh=trainer.moe_mesh,
-        process_group=process_group,
+        process_group=trainer.mesh_context.process_group,
     )
 
 
@@ -117,7 +115,7 @@ def _has_rank_state(checkpoint_dir: Path, state_name: str) -> bool:
 
 def load(trainer: Any) -> dict[str, Any] | None:
     """Restore model and optional optimizer state from a Slim checkpoint."""
-    load_root = getattr(trainer, "_checkpoint_load_dir", None)
+    load_root = trainer._checkpoint_load_dir
     checkpoint_dir = resolve_checkpoint_dir(load_root, trainer.args)
     if checkpoint_dir is None:
         logger.info("No NeMo checkpoint found at %s", load_root)
@@ -192,7 +190,7 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
 
 
 def _complete_pending_save(trainer: Any) -> None:
-    pending = getattr(trainer, "_pending_checkpoint", None)
+    pending = trainer._pending_checkpoint
     if pending is None:
         return
 
@@ -209,8 +207,6 @@ def _complete_pending_save(trainer: Any) -> None:
 
 def _initialize_missing_adamw_state(optimizer: torch.optim.Optimizer) -> None:
     """Give every optimized parameter a checkpointable AdamW state."""
-    if not isinstance(optimizer, torch.optim.AdamW):
-        raise TypeError(f"NeMo checkpointing expects AdamW, got {type(optimizer).__name__}")
     with torch.no_grad():
         for group in optimizer.param_groups:
             step_on_parameter_device = group.get("capturable", False) or group.get("fused", False)

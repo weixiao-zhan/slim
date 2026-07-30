@@ -6,13 +6,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import torch
-from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
+from nemo_automodel.components.distributed.blockdiag_cp import make_cp_blockdiag_batch_and_ctx
+from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
+from nemo_automodel.components.distributed.context_parallel.sharder import contiguous_local_indices
 
 from .data_packing import build_model_batch, build_training_fields
 from .models import build_packed_position_ids
-from .packed_cp import build_packed_cp_sharder
 
 
 def move_to_device(value, device):
@@ -32,6 +34,16 @@ class PreparedForward:
 
     def gather(self, tensor: torch.Tensor, *, fill=0) -> torch.Tensor:
         return self.sharder.gather_token_tensor(tensor, seq_dim=1, trim=True, fill=fill)
+
+
+def build_packed_cp_sharder(device_mesh, *, padding_token_id: int):
+    """Build the common contiguous block-diagonal sharder."""
+    return ContextParallelSharder(
+        device_mesh=device_mesh,
+        shard_batch=partial(make_cp_blockdiag_batch_and_ctx, shard_primary=False),
+        local_token_global_indices=contiguous_local_indices,
+        padding_token_id=padding_token_id,
+    )
 
 
 def prepare_forward(
@@ -57,7 +69,3 @@ def prepare_forward(
         fields[name] = sharder.shard_token_tensor(value, seq_dim=1, fill=fill)
     fields["labels"] = labels
     return PreparedForward(context_factory, model_batch, fields, sharder)
-
-
-def model_forward(model, model_batch: dict):
-    return model(**filter_forward_kwargs(model, model_batch))

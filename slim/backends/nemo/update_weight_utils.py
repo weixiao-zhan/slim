@@ -20,8 +20,6 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from slim.utils.distributed_utils import get_gloo_group, init_process_group
 
-from .model import resolve_state_dict_adapter
-
 logger = logging.getLogger(__name__)
 
 
@@ -37,7 +35,7 @@ class UpdateWeight(abc.ABC):
         self.args = args
         self.model = model
         self.quantizer = quantizer
-        self.state_dict_adapter = resolve_state_dict_adapter(model)
+        self.state_dict_adapter = model.state_dict_adapter
         self.weight_version = 0
 
     @abc.abstractmethod
