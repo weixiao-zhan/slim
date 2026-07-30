@@ -25,7 +25,7 @@ envs:
 setup: | # shell
   set -ex
   uv sync --prerelease=allow
-  uv run python patch_sglang.py
+  uv run python patch_dependencies.py
 
 run: | # shell
   set -ex
@@ -165,15 +165,13 @@ run: | # shell
     --rollout-colocate \
     \
     --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
-    --actor-num-gpus-per-replica ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
-    --attn-implementation flash_attention_3 \
-    --gradient-checkpointing \
+    --activation-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 12288 \
     \
     --advantage-estimator gspo \
-    --disable-rewards-std-normalization \
+    --disable-group-advantage-std-normalization \
     --old-logprob-source rollout \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \
@@ -181,7 +179,6 @@ run: | # shell
     --kl-loss-coef 0.00 \
     --kl-loss-type low_var_kl \
     \
-    --optimizer adam \
     --lr 1e-5 \
     --lr-warmup-iters 10 \
     --lr-decay-style constant \
@@ -196,5 +193,3 @@ run: | # shell
     ${WANDB_ARGS[@]}
 
     # --save-interval 20 \
-    # --use-peft \
-    # --peft-config '{"r": 64, "lora_alpha": 128, "target_modules": "all-linear"}' \

@@ -39,21 +39,17 @@ COMMON_ARGS="
     --rollout-colocate
 
     --actor-num-gpus $NUM_GPUS
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --policy-surrogate cis
     --old-logprob-source rollout
     --eps-clip 1
     --eps-clip-high 1
 
-    --optimizer adam
     --lr 1e-6
     --lr-decay-style constant
 "

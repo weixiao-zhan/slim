@@ -32,22 +32,18 @@ COMMON_ARGS="
     --sglang-page-size 64
     --rollout-colocate
 
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
     --old-logprob-source rollout
-    --optimizer adam
     --lr 1e-6
     --hf-checkpoint $MODEL_DIR
 "
 
 # Single-line algorithm specs (split on newlines by read).
-GRPO_ARGS="--advantage-estimator grpo --disable-rewards-std-normalization --actor-num-gpus 8"
-GSPO_ARGS="--advantage-estimator gspo --disable-rewards-std-normalization --eps-clip 3e-4 --eps-clip-high 4e-4 --actor-num-gpus 8"
+GRPO_ARGS="--advantage-estimator grpo --disable-group-advantage-std-normalization --actor-num-gpus 8"
+GSPO_ARGS="--advantage-estimator gspo --disable-group-advantage-std-normalization --eps-clip 3e-4 --eps-clip-high 4e-4 --actor-num-gpus 8"
 PPO_ARGS="--advantage-estimator ppo_gae --value-clip 0.2 --eps-clip 0.2 --eps-clip-high 0.28 --lr-critic 5e-5 --actor-num-gpus 8 --critic-num-gpus 8 --critic-colocate"
 
 # combo -> "expect_actor|expect_critic|combo_args"

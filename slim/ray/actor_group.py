@@ -7,7 +7,7 @@ import ray
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from slim.ray.utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+from slim.backends.nemo import ActorNeMoTrainer, CriticNeMoTrainer
 from slim.utils.env_utils import get_nvidia_ld_library_path
 
 
@@ -58,16 +58,10 @@ class RayTrainGroup:
             "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
             "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
             "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
-            **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }
 
-        # Imported here, where the Ray actor is built, rather than at module top:
-        # the driver imports this module only to call .remote(), and does not run
-        # the FSDP backend itself.
-        from slim.backends.fsdp_utils import CriticFSDPTrainer, ActorFSDPTrainer
-
-        trainer_cls = CriticFSDPTrainer if self.role == "critic" else ActorFSDPTrainer
+        trainer_cls = CriticNeMoTrainer if self.role == "critic" else ActorNeMoTrainer
         TrainerActor = ray.remote(num_gpus=1, runtime_env={"env_vars": env_vars})(trainer_cls)
 
         # Create worker actors
@@ -86,27 +80,31 @@ class RayTrainGroup:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())
             self._actor_handlers.append(actor)
 
-    def async_init(self, args, role, with_ref=False):
+    def async_init(self):
         """
         Allocate GPU resourced and initialize model, optimzier, local ckpt, etc.
         """
-        self.args = args
-        return [
-            actor.init.remote(args, role, with_ref=with_ref)
-            for actor in self._actor_handlers
-        ]
+        return [actor.init.remote(self.args) for actor in self._actor_handlers]
 
-    def async_train(self, rollout_id, rollout_data_ref, values_refs=None):
+    def async_train(self, rollout_id, rollout_data_ref):
         """Do one rollout training"""
-        return [actor.train.remote(rollout_id, rollout_data_ref, values_refs) for actor in self._actor_handlers]
+        return [actor.train.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
 
-    def compute_values(self, rollout_id, rollout_data_ref):
-        """Compute per-token value predictions (critic only). Returns list of ObjectRefs."""
-        return [actor.compute_values.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+    def compute_values(self, rollout_data_ref):
+        """Compute per-token value payloads (critic only). Returns list of ObjectRefs."""
+        return [actor.compute_values.remote(rollout_data_ref) for actor in self._actor_handlers]
 
-    def compute_log_probs(self, rollout_id, rollout_data_ref):
+    def needs_log_prob_precompute(self) -> bool:
+        return self.role == "actor" and (
+            self.args.kl_loss_coef != 0
+            or self.args.old_logprob_source == "actor"
+            or self.args.mismatch_correction != "none"
+            or self.args.get_mismatch_metrics
+        )
+
+    def compute_log_probs(self, rollout_data_ref):
         """Pre-compute log-probs and cache packed batches (actor only). Returns list of ObjectRefs."""
-        return [actor.compute_log_probs.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
+        return [actor.compute_log_probs.remote(rollout_data_ref) for actor in self._actor_handlers]
 
     def save_model(self, rollout_id, force_sync=False):
         """Save actor model"""
@@ -115,23 +113,6 @@ class RayTrainGroup:
     def update_weights(self):
         """Broadcast weights from rank 0 to all other ranks."""
         return ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
-
-    def onload(self):
-        return ray.get([actor.wake_up.remote() for actor in self._actor_handlers])
-
-    def offload(self):
-        return ray.get([actor.sleep.remote() for actor in self._actor_handlers])
-
-    def clear_memory(self):
-        return ray.get([actor.clear_memory.remote() for actor in self._actor_handlers])
-
-    def connect(self, critic_group):
-        return ray.get(
-            [
-                actor.connect_actor_critic.remote(critic)
-                for actor, critic in zip(self._actor_handlers, critic_group._actor_handlers, strict=False)
-            ]
-        )
 
     def set_rollout_manager(self, rollout_manager):
         return ray.get([actor.set_rollout_manager.remote(rollout_manager) for actor in self._actor_handlers])

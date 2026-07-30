@@ -3,7 +3,8 @@
 
 import ray
 
-from slim.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from slim.ray.advantage_estimator import RayAdvantageEstimator
+from slim.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_groups
 from slim.utils.arguments import parse_args
 from slim.utils.logging_utils import configure_logger, finish_tracking, init_tracking
 from slim.utils.misc import should_run_periodic_action
@@ -21,12 +22,13 @@ def train(args):
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
 
-    # create the actor and critic models
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
+    # create the actor and critic training groups
+    actor_train_group, critic_train_group = create_training_groups(args, pgs, rollout_manager)
+    advantage_estimator = RayAdvantageEstimator.remote(args)
 
     # always update weight first so that sglang has the loaded weights from training.
     if not args.critic_train_only:
-        actor_model.update_weights()
+        actor_train_group.update_weights()
 
         if args.check_weight_update_equal:
             ray.get(rollout_manager.check_weights.remote(action="compare"))
@@ -43,51 +45,66 @@ def train(args):
             rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
 
         if args.use_critic:
-            should_train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
+            train_actor = rollout_id >= args.lr_actor_start_step and not args.critic_train_only
             if args.critic_colocate:
-                values_refs = critic_model.compute_values(rollout_id, rollout_data_curr_ref)
-                ray.get(values_refs)
-                ray.get(critic_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
-                if should_train_actor:
-                    ray.get(actor_model.compute_log_probs(rollout_id, rollout_data_curr_ref))
-                    ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs))
+                value_payloads = ray.get(critic_train_group.compute_values(rollout_data_curr_ref))
+                train_episode_refs = ray.get(
+                    advantage_estimator.compute_training_targets.remote(rollout_data_curr_ref, value_payloads)
+                )
+                ray.get(critic_train_group.async_train(rollout_id, train_episode_refs))
+                if train_actor:
+                    ray.get(actor_train_group.async_train(rollout_id, train_episode_refs))
             else:
-                values_refs = critic_model.compute_values(rollout_id, rollout_data_curr_ref)
-                logprobs_refs = actor_model.compute_log_probs(rollout_id, rollout_data_curr_ref) if should_train_actor else []
-                ray.get(values_refs + logprobs_refs)  # wait for both to finish
-                critic_train_handle = critic_model.async_train(rollout_id, rollout_data_curr_ref, values_refs)
+                value_refs = critic_train_group.compute_values(rollout_data_curr_ref)
+                logprobs_refs = (
+                    actor_train_group.compute_log_probs(rollout_data_curr_ref)
+                    if train_actor and actor_train_group.needs_log_prob_precompute()
+                    else []
+                )
+                value_payloads = ray.get(value_refs)
+                train_episode_refs = ray.get(
+                    advantage_estimator.compute_training_targets.remote(rollout_data_curr_ref, value_payloads)
+                )
+                ray.get(logprobs_refs)
+                critic_train_handle = critic_train_group.async_train(rollout_id, train_episode_refs)
                 actor_train_handle = (
-                    actor_model.async_train(rollout_id, rollout_data_curr_ref, values_refs) if should_train_actor else []
+                    actor_train_group.async_train(rollout_id, train_episode_refs) if train_actor else []
                 )
                 ray.get(critic_train_handle + actor_train_handle)  # train both in parallel
         else:
-            ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
+            train_episode_refs = ray.get(
+                advantage_estimator.compute_training_targets.remote(rollout_data_curr_ref)
+            )
+            ray.get(actor_train_group.async_train(rollout_id, train_episode_refs))
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-            if not args.critic_train_only:
-                actor_model.save_model(
+            if (not args.use_critic) or (
+                rollout_id >= args.lr_actor_start_step and not args.critic_train_only
+            ):
+                actor_train_group.save_model(
                     rollout_id,
                     force_sync=rollout_id == args.num_rollout - 1,
                 )
             if args.use_critic:
-                critic_model.save_model(
+                critic_train_group.save_model(
                     rollout_id,
                     force_sync=rollout_id == args.num_rollout - 1,
                 )
             if args.rollout_global_dataset:
                 ray.get(rollout_manager.save.remote(rollout_id))
 
-        if (rollout_id + 1) % args.update_weights_interval == 0:
+        if not args.critic_train_only:
             # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = ray.get(x) if (x := rollout_data_next_future) is not None else None
-            rollout_data_next_future = None
-            if not args.critic_train_only:
-                actor_model.update_weights()
+            if rollout_data_next_future is not None:
+                rollout_data_curr_ref = ray.get(rollout_data_next_future)
+                rollout_data_next_future = None
+            actor_train_group.update_weights()
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
             ray.get(rollout_manager.eval.remote(rollout_id))
 
     ray.get(rollout_manager.dispose.remote())
+    ray.kill(advantage_estimator)
     finish_tracking(args)
 
 

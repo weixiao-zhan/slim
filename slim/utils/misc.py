@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+from collections import defaultdict
 
 try:
     import ray
@@ -37,8 +38,6 @@ class SingletonMeta(type):
 
     def clear_instances(cls):
         cls._instances = {}
-
-
 
 
 def get_current_node_ip():
@@ -80,9 +79,6 @@ def should_run_periodic_action(
 
     step = rollout_id + 1
     return (step % interval == 0) or (num_rollout_per_epoch is not None and step % num_rollout_per_epoch == 0)
-
-
-from collections import defaultdict
 
 
 def group_by(iterable, key=None):

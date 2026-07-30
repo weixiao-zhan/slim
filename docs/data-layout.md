@@ -13,17 +13,21 @@ An episode is created from a dataset row via `Episode.from_example(example)`, wh
 | `example` | `dict` | Raw dataset row; rollout/RM functions read whatever columns they need |
 | `generate_function_path` | `str \| None` | Override path to a custom generate function for this episode |
 | `session_id` | `str \| None` | UUID for consistent-hashing router affinity |
-| `tokens` | `list[int]` | Full token sequence (prompt + generated) |
-| `loss_mask` | `list[int] \| None` | Edge-aligned; 0 for prompt edges, 1 for generated edges |
-| `rollout_log_probs` | `list[float] \| None` | Edge-aligned log-probabilities under the rollout policy |
-| `rollout_routed_experts` | `np.ndarray [num_edges, num_layers, top_k] \| None` | MoE expert indices recorded during rollout for replay in training |
+| `tokens` | `list[int]` or `LongTensor [T]` | Full token sequence (prompt + generated) |
+| `loss_mask` | `list[int]` or `IntTensor [T]` | Source-token mask; 0 for prompt and terminal positions, 1 for generated predictions |
+| `rollout_log_probs` | `list[float]` or `FloatTensor [T]` | Source-token-aligned log-probabilities under the rollout policy |
+| `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| None` | Source-token-aligned MoE expert indices recorded during rollout |
 | `multimodal_inputs` | `dict[str, Tensor] \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
-| `reward` | `float \| None` | Scalar reward assigned by the reward model |
+| `reward` | `float \| None` | Raw scalar reward assigned by the reward model |
+| `episode_index` | `int \| None` | Stable position in the complete rollout batch |
+| `advantages` | `FloatTensor [T] \| None` | Source-token-aligned policy training targets |
+| `values` | `FloatTensor [T] \| None` | Source-token-aligned critic predictions used to construct PPO targets |
+| `value_targets` | `FloatTensor [T] \| None` | Source-token-aligned critic regression targets |
 | `text` | `str \| None` | Decoded full sequence (prompt + response) |
-| `generated_text` | `str \| None` | Decoded response region only (loss_mask==1 tokens) |
+| `generated_text` | `str \| None` | Decoded target tokens selected by active prediction slots |
 | `non_generation_time` | `float` | Wall-clock time spent outside token generation |
 | `max_tokens` | `int` | Maximum context length for this episode |
-| `_sampling_params` | `dict \| None` | Transient rollout request params; cleared by `freeze()` |
+| `_sampling_params` | `dict \| None` | Transient rollout request params; cleared during source-token finalization |
 | `status` | `str` | One of `PENDING`, `COMPLETED`, `TRUNCATED`, `ABORTED`, `FAILED` |
 
 ## Dataset Columns
@@ -47,13 +51,14 @@ Custom columns are free-form. Custom generate functions and reward models access
 Generation is append-only: the generate function tokenizes the prompt into `episode.tokens`, then extends `tokens`, `loss_mask`, and `rollout_log_probs` as new tokens arrive.
 This design keeps the episode as a single growing sequence — no separate prompt/response buffers, no index bookkeeping.
 
-### Edge Alignment
+### Source-Token Alignment
 
-`loss_mask`, `rollout_log_probs`, and `rollout_routed_experts` are **edge-aligned**: length is `len(tokens) - 1`.
-Entry `i` describes the prediction of `tokens[i+1]` given `tokens[:i+1]`.
-Prompt edges are 0 in `loss_mask`; generated edges are 1.
+During generation, `loss_mask`, `rollout_log_probs`, and `rollout_routed_experts` are temporary Python or NumPy values with length `len(tokens) - 1`.
+`episode.finalize_source_token_alignment()` appends one neutral terminal slot and converts the sequence fields to CPU tensors with length `len(tokens)`.
 
-`episode.ensure_edge_alignment()` validates that all edge-aligned fields share the required length.
+After finalization, entry `i` describes the prediction of `tokens[i+1]` given `tokens[:i+1]`.
+The final source position has no prediction target, so its mask and numeric training fields are zero.
+`episode.set_train_targets()` accepts only source-token-aligned targets with this complete token length.
 
 ### Processor Output Format (VLM)
 
@@ -73,21 +78,23 @@ This ensures the same experts are activated in both passes; without replay, stoc
 The gather operation (`gather_replayed_topk`) is differentiable: router weights still receive gradient, only the expert *choice* is frozen.
 The buffer stays active across both the forward pass and gradient-checkpointing recomputation during backward.
 
-## Freeze
+## Finalization
 
-After generation and reward assignment, `episode.ensure_edge_alignment()` validates lengths and `episode.freeze()` converts sequence fields to tensors:
+After generation and reward assignment, `episode.finalize_source_token_alignment()` validates lengths, appends the terminal source slot, and converts sequence fields to tensors:
 
 - `tokens` → `torch.long`
 - `loss_mask` → `torch.int`
 - `rollout_log_probs` → `torch.float32`
-- `rollout_routed_experts` → `torch.int32` (via `torch.from_numpy`)
+- `rollout_routed_experts` → `torch.int32`
 - `_sampling_params` → cleared
 
-After freeze, episodes are consumed by:
+After finalization, episodes are consumed by:
 
-1. **Normalization** — advantage and return computation over the batch.
-2. **Packing** — `pack_sequences` (`slim/backends/fsdp_utils/data_packing.py`) concatenates multiple episodes into dense batches with `cu_seqlens` for flash-attention, per-sequence `position_ids`, and cumulative edge-offset bookkeeping for slicing edge-aligned fields (`loss_masks`, `rollout_log_probs`, `advantages`, `returns`, `rollout_routed_experts`).
-3. **Training loop** — packed batches are unpacked per micro-batch via `unpack_sequences`, which slices token-aligned fields by `cu_seqlens` and edge-aligned fields by cumulative edge offsets.
+1. **Target preparation**: `AdvantageEstimator` restores global rollout order, computes group-relative GRPO or GSPO advantages without changing rewards, or combines PPO critic values with rewards to produce training targets.
+2. **Role-local packing**: actor and critic independently call `pack_sequences` (`slim/backends/nemo/data_packing.py`). Every sequence field is concatenated using the same token boundaries recorded in `cu_seqlens`.
+3. **Training loop**: `unpack_sequences` slices every sequence field directly by those token boundaries.
+
+Actor or critic precompute may create packs before targets are available. `update_packed_targets()` attaches `advantages`, `old_values`, and `value_targets` to those cached role-local packs before training.
 
 ---
 

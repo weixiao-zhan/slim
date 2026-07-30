@@ -115,8 +115,14 @@ def decode_text(args: Namespace, episode: Episode) -> str:
 
 
 def decode_generated_text(args: Namespace, episode: Episode) -> str:
-    """Decode only the generated (loss_mask==1) tokens — the response region rule-based RMs score."""
-    gen_ids = episode.get_generated_token_ids()
+    """Decode generated targets from a rollout-stage episode."""
+    if episode.loss_mask is None:
+        raise ValueError("loss_mask must be present")
+    gen_ids = [
+        token
+        for token, active in zip(episode.tokens[1:], episode.loss_mask, strict=True)
+        if active
+    ]
     if not gen_ids:
         return ""
     return GenerateState(args).tokenizer.decode(gen_ids)
@@ -145,17 +151,20 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
     if episode.has_multimodal and state.processor is None:
         raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
 
-    if isinstance(prompt, list) and state.processor:
-        # VLM processor + conversation
-        prompt_text = state.processor.apply_chat_template(
-            prompt,
-            tools=tools,
-            tokenize=False,
-            add_generation_prompt=True,
-            **state.chat_template_kwargs,
+    if episode.has_multimodal:
+        prompt_text = (
+            state.tokenizer.apply_chat_template(
+                prompt,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=True,
+                **state.chat_template_kwargs,
+            )
+            if isinstance(prompt, list)
+            else prompt
         )
         mm = {k: episode.example[k] for k in ("images", "videos", "audios") if episode.example.get(k)}
-        # Disable mm_token_type_ids — we synthesize it at training time from input_ids.
+        # Disable mm_token_type_ids because training synthesizes it from input_ids.
         processor_output = await asyncio.to_thread(
             state.processor,
             text=prompt_text,
@@ -170,11 +179,11 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
         } or None
     elif isinstance(prompt, list):
-        # LLM tokenizer + conversation
         prompt_ids = state.tokenizer.apply_chat_template(
             prompt,
             tools=tools,
             tokenize=True,
+            return_dict=False,
             add_generation_prompt=True,
             **state.chat_template_kwargs,
         )
@@ -258,7 +267,6 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
 
             episode.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
 
-    episode.ensure_edge_alignment()
     episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
 
@@ -419,9 +427,6 @@ async def generate_rollout_async(
     state.reset()
 
     episodes = [episode for group in kept_groups for episode in group.episodes]
-    for episode in episodes:
-        episode.ensure_edge_alignment()
-        episode.freeze()
 
     if args.rollout_sample_filter_path is not None:
         filter_func = load_function(args.rollout_sample_filter_path)
@@ -489,8 +494,6 @@ async def eval_rollout_single_dataset(
     for i, episode in enumerate(raw_episodes):
         if i == 0:
             logger.info(f"eval_rollout_single_dataset example data: {[episode.text]} reward={episode.reward}")
-        episode.ensure_edge_alignment()
-        episode.freeze()
         episodes.append(episode)
 
     return {dataset_cfg.name: episodes}

@@ -3,7 +3,7 @@
 
 """Weight-only quantization shared by the offline converter
 (tools/convert_hf_to_fp8.py) and the online rollout weight-sync path
-(backends/fsdp_utils/update_weight_utils.py).
+(backends/nemo/update_weight_utils.py).
 
 Both paths quantize through the same `block_fp8`, so the weights the rollout engine
 serves during training match what a deployed quantized checkpoint would serve.

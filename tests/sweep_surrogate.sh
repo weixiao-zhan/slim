@@ -32,17 +32,13 @@ COMMON_ARGS="
     --rollout-colocate
 
     --actor-num-gpus 8
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --old-logprob-source rollout
-    --optimizer adam
     --lr 1e-6
     --hf-checkpoint $MODEL_DIR
 "

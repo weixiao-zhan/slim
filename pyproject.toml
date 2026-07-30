@@ -6,11 +6,13 @@ dependencies = [
     "accelerate",
     "aiohttp",
     "datasets>=3.2.0",
+    "flash-attn",
+    "flash-attn-3",
     "httpx[http2]",
     "liger-kernel",
+    "nemo-automodel[fla,vlm]",
     "omegaconf",
     "packaging",
-    "peft",
     "orjson",
     "pylatexenc",
     "pybase64",
@@ -40,19 +42,12 @@ slim-train-async = "slim.train_async:main"
 [project.optional-dependencies]
 dev = [
     "memray",
+    "nvidia-ml-py",
+    "pillow",
     "pre-commit",
     "pytest",
+    "ruff",
     "viztracer",
-]
-fa2 = [
-    "flash-attn",
-]
-fa3 = [
-    "flash-attn-3",
-]
-fla = [
-    "causal-conv1d",
-    "flash-linear-attention",
 ]
 [build-system]
 requires = ["hatchling"]
@@ -62,12 +57,13 @@ build-backend = "hatchling.build"
 packages = ["slim"]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
-torchaudio = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
+torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
+torchaudio = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_x86_64.whl" }
 flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.05.11-5e0e3b1/flash_attn_3-3.0.0%2B20260511.cu130torch2110cxx11abitrue.ab6632-cp39-abi3-linux_x86_64.whl" }
-causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.2.post1/causal_conv1d-1.6.2.post1%2Bcu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+# Pin for Qwen3.5 packed attention/Gated DeltaNet CP and CP vision-tower sharding; bump to the next release.
+nemo-automodel = { git = "https://github.com/NVIDIA-NeMo/Automodel.git", rev = "2de37e53d42e26409f08a8a9fa3a1269c56479a4" }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
@@ -91,6 +87,8 @@ line_length = 119
 
 [tool.ruff]
 line-length = 320  # TODO
+
+[tool.ruff.lint]
 select = [
     "E",      # Pycodestyle Errors (Structural/Fundamental Errors like bad indentation)
     "F",      # Pyflakes (Core Errors: Unused imports, undefined names)
@@ -136,4 +134,5 @@ markers = [
 ]
 
 [tool.uv]
+environments = ["sys_platform == 'linux'"]
 prerelease = "allow"

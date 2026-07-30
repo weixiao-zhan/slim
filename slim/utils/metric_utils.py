@@ -187,10 +187,7 @@ def compression_ratio(
 
 
 def has_repetition(text: str):
-    if len(text) > 10000 and compression_ratio(text[-10000:])[0] > 10:
-        return True
-    else:
-        return False
+    return len(text) > 10000 and compression_ratio(text[-10000:])[0] > 10
 
 
 def compute_rollout_step(args, rollout_id):

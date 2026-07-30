@@ -22,7 +22,7 @@
 #   bash tools/tuning/tune_qwen35_fp8_moe.sh                 # tune 35B-A3B-FP8 on this GPU
 #   MODEL_DIR=models/Qwen3.5-122B-A10B-FP8 bash tools/tuning/tune_qwen35_fp8_moe.sh
 #
-# After tuning, run `uv run python patch_sglang.py` to install the new config into the active
+# After tuning, run `uv run python patch_dependencies.py` to install the new config into the active
 # sglang, then re-benchmark (report/fp8_r3/bench_fp8_vs_bf16.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -66,4 +66,4 @@ for f in E=*.json; do
 done
 echo "Done. Moved $moved tuned config(s) into $SAVE_DIR :"
 ls -1 "$SAVE_DIR" | grep -iE "Blackwell|RTX_PRO" || true
-echo "Next: uv run python patch_sglang.py   # install into active sglang"
+echo "Next: uv run python patch_dependencies.py   # install into active sglang"

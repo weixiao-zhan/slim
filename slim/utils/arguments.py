@@ -42,30 +42,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Total number of GPUs for the training actor.",
             )
             parser.add_argument(
-                "--actor-num-gpus-per-replica",
-                type=int,
-                default=None,
-                help=(
-                    "Number of GPUs each actor replica spans (the FSDP shard group size). "
-                    "Replica count is actor_num_gpus // actor_num_gpus_per_replica. "
-                    "Equal to actor_num_gpus -> a single full-shard FSDP replica; "
-                    "equal to 1 -> pure DDP; in between -> HSDP. Defaults to actor_num_gpus."
-                ),
-            )
-            parser.add_argument(
                 "--critic-num-gpus",
                 type=int,
                 default=None,
                 help="Total number of GPUs for the critic. Must equal actor_num_gpus. Defaults to actor_num_gpus.",
-            )
-            parser.add_argument(
-                "--critic-num-gpus-per-replica",
-                type=int,
-                default=None,
-                help=(
-                    "Number of GPUs each critic replica spans (the FSDP shard group size). "
-                    "Defaults to critic_num_gpus (single full-shard replica)."
-                ),
             )
 
             parser.add_argument(
@@ -123,50 +103,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default="{}",
                 help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
             )
-            parser.add_argument(
-                "--train-memory-margin-bytes",
-                type=int,
-                default=1024**3,
-                help="Add margin for train memory allocation. By default we will reserve 1GB as margin.",
-            )
-            parser.add_argument(
-                "--only-train-params-name-list",
-                type=str,
-                nargs="*",
-                default=None,
-                help="""List of regex patterns of parameter names to TRAIN. All other parameters will be FROZEN.
-                        Supports Python regex syntax (re.search).
-                        """,
-            )
-            parser.add_argument(
-                "--freeze-params-name-list",
-                type=str,
-                nargs="*",
-                default=None,
-                help="""List of regex patterns of parameter names to FREEZE. Other parameters will remain trainable.
-                        Supports Python regex syntax (re.search).
-                        """,
-            )
-
-            # PEFT (LoRA/DoRA) support
-            parser.add_argument(
-                "--use-peft",
-                action="store_true",
-                default=False,
-                help="Apply PEFT (LoRA/DoRA) adapters to the model after loading.",
-            )
-            parser.add_argument(
-                "--peft-config",
-                type=json.loads,
-                default="{}",
-                help=(
-                    "JSON string of LoraConfig overrides for PEFT. "
-                    'Defaults: {"r": 16, "lora_alpha": 32, "use_dora": false, '
-                    '"target_modules": "all-linear", '
-                    '"exclude_modules": ["visual", "vision_tower", "vision_model", "audio", "speech"], '
-                    '"lora_dropout": 0.0, "bias": "none", "task_type": "CAUSAL_LM"}'
-                ),
-            )
 
             return parser
 
@@ -194,7 +130,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "and then set this to the path of your custom rollout function. "
                     "The signature of the function should be "
                     "`def generate_rollout(args, rollout_id, data_source, evaluation=False) -> RolloutFnTrainOutput | RolloutFnEvalOutput`"
-                    "and within the output sample, you should at least set `tokens`, `response_length`, `reward` "
+                    "and within the output sample, you should at least set `tokens`, `loss_mask`, `reward` "
                     "and `status`."
                 ),
             )
@@ -313,22 +249,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "buffer size for update weight, in bytes. "
                     "This is used for updating weights by chunk and should be useful for MoE models."
-                ),
-            )
-            parser.add_argument(
-                "--update-weights-interval",
-                type=int,
-                default=1,
-                help="Interval for updating the weights",
-            )
-
-            parser.add_argument(
-                "--rollout-data-postprocess-path",
-                type=str,
-                default=None,
-                help=(
-                    "The called after we have all the rollout data including log_probs. "
-                    "It may be helpful for updating loss mask."
                 ),
             )
             parser.add_argument(
@@ -470,10 +390,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             reset_arg(parser, "--micro-batch-size", type=int, default=1)
             parser.add_argument(
                 "--balance-data",
-                action="store_true",
-                default=False,
+                action=argparse.BooleanOptionalAction,
+                default=True,
                 help=(
-                    "Balance the number of tokens between data parallel ranks with `karmarkar_karp` for verl. "
+                    "Balance token counts across data-parallel ranks with Karmarkar-Karp partitioning. "
                     "Note that this may allocate the different response of the same prompt into different training steps."
                 ),
             )
@@ -496,16 +416,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "The maximum number of tokens per GPU for dynamic batch size. "
                     "Note: this value should typically be close to `max_response_len`."
-                ),
-            )
-            parser.add_argument(
-                "--log-probs-max-tokens-per-gpu",
-                type=int,
-                default=None,
-                help=(
-                    "The maximum number of tokens per GPU for calculating log probs. "
-                    "This is used to calculate the log probs of the responses during rollout, "
-                    "and should be set to a larger value than `max_tokens_per_gpu` if you want better performance. "
                 ),
             )
             return parser
@@ -617,10 +527,22 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Max LR for the actor (RL policy). Defaults to --lr.",
             )
             parser.add_argument(
+                "--lr-actor-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the actor (RL policy) starts training.",
+            )
+            parser.add_argument(
                 "--lr-critic",
                 type=float,
                 default=None,
                 help="Max LR for the critic backbone. Defaults to --lr.",
+            )
+            parser.add_argument(
+                "--lr-critic-start-step",
+                type=int,
+                default=0,
+                help="Rollout step at which the critic backbone learning rate leaves 0.",
             )
             parser.add_argument(
                 "--lr-critic-value-head",
@@ -629,22 +551,10 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Max LR for the critic value head. Defaults to --lr-critic.",
             )
             parser.add_argument(
-                "--lr-actor-start-step",
-                type=int,
-                default=0,
-                help="Rollout step at which the actor (RL policy) starts training.",
-            )
-            parser.add_argument(
-                "--lr-critic-start-step",
-                type=int,
-                default=0,
-                help="Rollout step at which the critic backbone learning rate leaves 0 (warmup begins).",
-            )
-            parser.add_argument(
                 "--lr-critic-value-head-start-step",
                 type=int,
                 default=0,
-                help="Rollout step at which the critic value head learning rate leaves 0 (warmup begins).",
+                help="Rollout step at which the critic value head learning rate leaves 0.",
             )
             parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
             parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
@@ -723,16 +633,16 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--lambd", type=float, default=0.95, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
-                "--disable-rewards-std-normalization",
+                "--disable-group-advantage-normalization",
                 action="store_false",
-                dest="rewards_std_normalization",
-                help="Disable reward standard-deviation normalization after group mean centering.",
+                dest="group_advantage_normalization",
+                help="Use raw rewards directly as GRPO or GSPO advantages.",
             )
             parser.add_argument(
-                "--disable-rewards-normalization",
+                "--disable-group-advantage-std-normalization",
                 action="store_false",
-                dest="rewards_normalization",
-                help="Disable rewards normalization",
+                dest="group_advantage_std_normalization",
+                help="Disable standard-deviation scaling after GRPO or GSPO group mean centering.",
             )
             parser.add_argument(
                 "--get-mismatch-metrics",
@@ -757,7 +667,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "Replay rollout-time MoE expert routing during training. Captures top-k expert "
                     "indices from sglang via enable_return_routed_experts and forces the actor's "
                     "router to gather scores at those same indices. Eliminates train/inference "
-                    "expert-selection mismatch on MoE models. Currently wired for Qwen3.5-MoE."
+                    "expert-selection mismatch when supported by the selected training model family."
                 ),
             )
             parser.add_argument(
@@ -773,13 +683,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Dotted path to a custom mismatch correction function.",
             )
-            parser.add_argument(
-                "--custom-pg-loss-reducer-function-path",
-                type=str,
-                default=None,
-                help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, pg_kl_k3, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
-            )
-
             return parser
 
         def add_router_arguments(parser):
@@ -976,9 +879,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 "--custom-reward-post-process-path",
                 type=str,
                 default=None,
-                help=(
-                    "Path to the custom function that will post process reward, by default it will be the normalization for grpo. "
-                ),
+                help="Path to a custom function that shapes episode rewards before advantage estimation.",
             )
             return parser
 
@@ -1088,10 +989,10 @@ def parse_args(add_custom_arguments=None):
     if not skip_sglang:
         sglang_ns = sglang_parse_args()
 
-    # Phase 2: Parse FSDP + slim args.
-    from slim.backends.fsdp_utils.arguments import fsdp_parse_args
+    # Phase 2: Parse NeMo + slim args.
+    from slim.backends.nemo.arguments import nemo_parse_args
 
-    args = fsdp_parse_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
+    args = nemo_parse_args(extra_args_provider=add_slim_arguments, ignore_unknown_args=True)
 
     # Merge pre-parsed args into the main namespace
     for key, value in vars(pre).items():
@@ -1187,8 +1088,6 @@ def slim_validate_args(args):
 
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
-        if args.log_probs_max_tokens_per_gpu is None:
-            args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
     if args.eps_clip_high is None:
         args.eps_clip_high = args.eps_clip
@@ -1217,10 +1116,6 @@ def slim_validate_args(args):
             )
     if args.critic_num_gpus is None:
         args.critic_num_gpus = args.actor_num_gpus
-    if args.actor_num_gpus_per_replica is None:
-        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
-    if args.critic_num_gpus_per_replica is None:
-        args.critic_num_gpus_per_replica = args.critic_num_gpus or 1
     if args.critic_load is None:
         args.critic_load = args.load
     if args.lr_actor is None:
@@ -1229,18 +1124,6 @@ def slim_validate_args(args):
         args.lr_critic = args.lr
     if args.lr_critic_value_head is None:
         args.lr_critic_value_head = args.lr_critic
-
-    # A replica size must evenly divide the role's GPU total.
-    if args.actor_num_gpus:
-        assert args.actor_num_gpus % args.actor_num_gpus_per_replica == 0, (
-            f"actor_num_gpus {args.actor_num_gpus} not divisible by "
-            f"actor_num_gpus_per_replica {args.actor_num_gpus_per_replica}"
-        )
-    if args.use_critic and args.critic_num_gpus:
-        assert args.critic_num_gpus % args.critic_num_gpus_per_replica == 0, (
-            f"critic_num_gpus {args.critic_num_gpus} not divisible by "
-            f"critic_num_gpus_per_replica {args.critic_num_gpus_per_replica}"
-        )
 
     # Actor and critic share one rollout-data split and pair rank-wise, so their
     # GPU totals must match (this also satisfies the --critic-colocate C == A rule).
@@ -1263,12 +1146,8 @@ def slim_validate_args(args):
             args.rollout_num_gpus = args.actor_num_gpus
         else:
             args.actor_num_gpus = args.rollout_num_gpus
-        args.actor_num_gpus_per_replica = args.actor_num_gpus or 1
         args.rollout_colocate = False
         args.critic_colocate = False
-        if args.train_memory_margin_bytes > 0:
-            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
-            args.train_memory_margin_bytes = 0
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
@@ -1303,8 +1182,8 @@ def slim_validate_args(args):
         args.global_batch_size = global_batch_size
 
     if args.n_samples_per_prompt == 1:
-        args.rewards_std_normalization = False
-        logger.info("n_samples_per_prompt is set to 1, rewards_std_normalization will be set to False.")
+        args.group_advantage_std_normalization = False
+        logger.info("n_samples_per_prompt is set to 1, group advantage std normalization will be disabled.")
 
     if args.rollout_group_filter_path and not args.over_sampling_batch_size:
         args.over_sampling_batch_size = args.rollout_batch_size
@@ -1326,10 +1205,6 @@ def slim_validate_args(args):
         assert args.num_rollout is not None, (
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
-
-
-    if args.only_train_params_name_list and args.freeze_params_name_list:
-        raise ValueError("You can only specify ONE of: --only-train-params-name-list, or --freeze-params-name-list.")
 
     if args.loss_type == "custom_loss" and args.custom_loss_function_path is None:
         raise ValueError("--loss-type custom_loss requires --custom-loss-function-path.")

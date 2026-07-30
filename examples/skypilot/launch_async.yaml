@@ -25,12 +25,12 @@ envs:
 setup: | # shell
   set -ex
   uv sync
-  uv run python patch_sglang.py
+  uv run python patch_dependencies.py
 
 run: | # shell
   set -ex
   uv sync
-  uv run python patch_sglang.py
+  uv run python patch_dependencies.py
   # Download model and prepare dataset
   mkdir -p ${HOME}/models
   if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
@@ -163,15 +163,13 @@ run: | # shell
     --sglang-attention-backend fa3 \
     \
     --actor-num-gpus 2 \
-    --actor-num-gpus-per-replica 1 \
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
-    --attn-implementation flash_attention_3 \
-    --gradient-checkpointing \
+    --activation-checkpointing \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu 16384 \
     \
     --advantage-estimator gspo \
-    --disable-rewards-std-normalization \
+    --disable-group-advantage-std-normalization \
     --old-logprob-source rollout \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \
@@ -179,7 +177,6 @@ run: | # shell
     --kl-loss-coef 0.00 \
     --kl-loss-type low_var_kl \
     \
-    --optimizer adam \
     --lr 1e-5 \
     --lr-warmup-iters 10 \
     --lr-decay-style constant \

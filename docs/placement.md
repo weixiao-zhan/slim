@@ -4,21 +4,18 @@ This document describes how slim places the **actor**, **critic**, and **rollout
 
 ## Notation
 
-Each role declars **two levels** of parallel: an overall GPU total and a
-per-replica size. 
+Each role declares an overall GPU total. Actor and critic each form one distributed NeMo world, while rollout also declares a per-replica size.
 
-| role | overall total | gpu per replica | # replicas (derived) |
-|---|---|---|---|
-| actor   | `--actor_num_gpus` (`A`)   | `--actor_num_gpus_per_replica`   | `A / actor_num_gpus_per_replica` |
-| critic  | `--critic_num_gpus` (`C`)  | `--critic_num_gpus_per_replica`  | `C / critic_num_gpus_per_replica` |
-| rollout | `--rollout_num_gpus` (`R`) | `--rollout_num_gpus_per_replica` | `R / rollout_num_gpus_per_replica` |
-
-One **replica** is one copy of the sharded model and data-parallel *across* replicas.
-
-| role | within a replica | across replicas |
+| role | overall total | topology |
 |---|---|---|
-| actor / critic | FSDP shard | data-parallel (DDP all-reduce) i.e. HSDP |
-| rollout | one sglang engine with  TP <br> and optional PP / EP / PD-disaggregation | router-balanced (DP) |
+| actor   | `--actor-num-gpus` (`A`) | FSDP2 with `--context-parallel-size` and `--expert-model-parallel-size` |
+| critic  | `--critic-num-gpus` (`C`) | FSDP2 with `--context-parallel-size` and `--expert-model-parallel-size` |
+| rollout | `--rollout-num-gpus` (`R`) | `--rollout-num-gpus-per-replica`; replica count is `R / rollout_num_gpus_per_replica` |
+
+| role | within its distributed world | data parallelism |
+|---|---|---|
+| actor / critic | FSDP2 with context parallelism and optional expert parallelism | pure FSDP across each complete training world |
+| rollout | one sglang engine with TP <br> and optional PP / EP / PD-disaggregation | router-balanced (DP) |
 
 
 ## Colocate
@@ -62,10 +59,11 @@ When actor and critic are on **disjoint** GPUs they run **concurrently**. Each h
 phase               A      C      
 ─────────────────────────────────
 1. compute          ■      ■      ref/actor-old log-probs (A) ∥ compute_values (C)
-────────────────────┼──────┼──── ◀ barrier: ray.get(values_refs + logprobs_refs)
-2. train            ■      ■      actor.train (actor reads values via Ray ref) ∥ critic.train
+────────────────────┼──────┼──── ◀ critic values ready
+2. targets          ░      ░      AdvantageEstimator publishes Episode shards with training targets
+3. train            ■      ■      actor.train ∥ critic.train
 ────────────────────┼──────┼──── ◀ barrier: ray.get(actor.train); ray.get(critic_train_handle)
-3. actor.update_wts ■      ░      actor pushes weights → rollout engines
+4. actor.update_wts ■      ░      actor pushes weights → rollout engines
 
 legend:
 ■ active resident ░ idle resident · offloaded (CPU)
@@ -82,18 +80,21 @@ OOM.
 phase                A      C 
 ─────────────────────────────────
 1. critic.wake_up()  ·      ■
-2. compute_values    ·      ■        critic forward → per-token values
-3. critic.train      ·      ■        critic fwd/bwd/optim
-4. critic.sleep() ───┼──────┼──── ◀ HANDOFF: must offload C before waking A
-5. actor.wake_up()   ■      ·
-6. compute_log_probs ■      ·        ref/actor-old log-probs (ref swaps in-proc)
-7. actor.train       ■      ·        actor fwd/bwd/optim (reads values via Ray ref)
-8. actor.update_wts  ■      ·        push weights → rollout engines
-9. actor.sleep()     ·      ·
+2. compute_values    ·      ■        critic forward produces value payloads
+3. targets           ·      ░        AdvantageEstimator publishes Episode shards with training targets
+4. critic.train      ·      ■        critic consumes old values and value targets
+5. critic.sleep() ───┼──────┼──── ◀ HANDOFF: critic is offloaded before actor wakeup
+6. actor.wake_up()   ■      ·
+7. compute_log_probs ■      ·        optional ref and actor-old log probabilities
+8. actor.train       ■      ·        actor consumes advantages
+9. actor.update_wts  ■      ·        push weights → rollout engines
+10. actor.sleep()    ·      ·
 
 legend:
 ■ active resident ░ idle resident · offloaded (CPU)
 ```
+
+Actor and critic construct separate physical packs from the Episode shards containing training targets. This keeps packing and placement role-local. Mismatch correction is also actor-local and runs after actor-old and rollout log probabilities are available.
 
 ---
 
@@ -102,6 +103,7 @@ legend:
 On-policy RL syncs model weights from the FSDP actor to the SGLang rollout engines at every training step.
 Slim treats each engine as an opaque unit of `rollout_num_gpus_per_replica` GPUs.
 How the engine internally splits those GPUs (TP/PP/DP/EP) is configured via sglang args and is transparent to the weight update path; the sglang engine discards any param slice it does not need.
+The NeMo state-dict adapter converts each tensor to its Hugging Face name and layout before transport.
 
 ![Weight sync paths](images/WeightSync.png)
 
@@ -122,11 +124,6 @@ The actual tensor data never crosses GPUs; only the small IPC handle metadata is
 The same FSDP all-gather by buckets followed by 
 Only A0 broadcasts to all engine TP workers directly.
 Each TP worker receives the full param and keeps only its slice.
-
-### sync with LoRA
-
-Before weight sync, the adapter is merged into the base weights (`merge_adapter()`), synced as full HF params, then unmerged when wake up for training.
-In colocate mode with CPU offload, the merge happens during `sleep()` before offloading.
 
 ### sync with low precision inference
 

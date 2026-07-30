@@ -38,7 +38,6 @@ def run_contract_test_file() -> None:
             "custom-rollout-log-function-path",
             "custom-eval-rollout-log-function-path",
             "custom-reward-post-process-path",
-            "rollout-data-postprocess-path",
         ],
     )
 
@@ -57,10 +56,6 @@ def reference_reward_post_process(args, episodes):
     """Custom reward post-process: operates on list[Episode] in-place."""
     for ep in episodes:
         ep.reward = ep.reward + 1.0
-
-
-def reference_rollout_data_postprocess(args) -> None:
-    args.rollout_data_postprocess_called = True
 
 
 def _make_episode(reward: float = 1.0, **example_fields) -> Episode:
@@ -106,12 +101,6 @@ def invoke_reward_post_process(fn):
     assert episodes[0].reward != 0.5 or episodes[1].reward != 1.5
 
 
-def invoke_rollout_data_postprocess(fn):
-    args = type("Args", (), {})()
-    assert fn(args) is None
-    assert args.rollout_data_postprocess_called is True
-
-
 HOOK_CASES = [
     HookCase(
         "custom_rollout_log",
@@ -139,15 +128,6 @@ HOOK_CASES = [
         "self.custom_reward_post_process_func(self.args, episodes)",
         ("args", "episodes"),
         invoke_reward_post_process,
-    ),
-    HookCase(
-        "rollout_data_postprocess",
-        "ROLLOUT_DATA_POSTPROCESS_PATH",
-        "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
-        "slim/backends/fsdp_utils/policy.py",
-        "self.rollout_data_postprocess(self.args)",
-        ("args",),
-        invoke_rollout_data_postprocess,
     ),
 ]
 

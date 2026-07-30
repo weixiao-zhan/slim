@@ -2,9 +2,9 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Patch installed SGLang for slim rollout and training.
+"""Patch installed runtime dependencies for slim rollout and training.
 
-Run via: `uv run python patch_sglang.py` (uses the active venv's interpreter).
+Run via: `uv run python patch_dependencies.py` (uses the active venv's interpreter).
 
 Idempotent: each replacement is skipped if its new text is already present.
 """
@@ -148,6 +148,93 @@ def _decode_slim_tensor_transport(value):
     )
 
 
+def patch_automodel_optional_transformer_engine(parallelizer: Path) -> bool:
+    """Keep AutoModel's native CP path usable without TE attention."""
+    import_anchor = "    from transformer_engine.pytorch.attention import DotProductAttention\n"
+    optional_import = """    try:
+        from transformer_engine.pytorch.attention import DotProductAttention
+    except ModuleNotFoundError as error:
+        if not error.name or not error.name.startswith("transformer_engine"):
+            raise
+        DotProductAttention = ()
+"""
+    return patch_file(
+        parallelizer,
+        [(import_anchor, optional_import)],
+        log_reason="AutoModel optional Transformer Engine attention",
+    )
+
+
+def patch_automodel_blockdiag_cp1(batch: Path, exchange: Path) -> None:
+    """Use AutoModel's block-diagonal batch context at every CP degree."""
+    cp1_noop = """    from contextlib import nullcontext
+
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    world = cp_mesh.size()
+    if world <= 1:
+        primary = batch.get("inputs_embeds", batch.get("input_ids"))
+        layout = None
+        if primary is not None:
+            layout = ShardLayout(original_seq_len=primary.shape[1], padded_seq_len=primary.shape[1])
+        return nullcontext, batch, layout
+
+    rank = cp_mesh.get_local_rank()
+"""
+    unified_context = """    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    world = cp_mesh.size()
+    rank = cp_mesh.get_local_rank()
+"""
+    group_world = "    _group_world = torch.distributed.get_world_size(group)\n"
+    singleton_group_world = (
+        "    _group_world = world if world == 1 else torch.distributed.get_world_size(group)\n"
+    )
+    patch_file(
+        batch,
+        [
+            (cp1_noop, unified_context),
+            (group_world, singleton_group_world),
+        ],
+        log_reason="AutoModel block-diagonal CP1 batch context",
+    )
+
+    gather_forward = """        ctx.world = world
+        x = x.contiguous()
+        gathered = [torch.empty_like(x) for _ in range(world)]
+        torch.distributed.all_gather(gathered, x, group=group)
+        return torch.cat(gathered, dim=seq_dim)
+"""
+    singleton_gather_forward = """        ctx.world = world
+        x = x.contiguous()
+        if world == 1:
+            return x
+        gathered = [torch.empty_like(x) for _ in range(world)]
+        torch.distributed.all_gather(gathered, x, group=group)
+        return torch.cat(gathered, dim=seq_dim)
+"""
+    gather_backward = """        chunks = [c.contiguous() for c in grad_out.chunk(ctx.world, dim=ctx.seq_dim)]
+        local = torch.empty_like(chunks[0])
+        torch.distributed.reduce_scatter(local, chunks, op=torch.distributed.ReduceOp.SUM, group=ctx.group)
+        return local, None, None
+"""
+    singleton_gather_backward = """        if ctx.world == 1:
+            return grad_out, None, None
+        chunks = [c.contiguous() for c in grad_out.chunk(ctx.world, dim=ctx.seq_dim)]
+        local = torch.empty_like(chunks[0])
+        torch.distributed.reduce_scatter(local, chunks, op=torch.distributed.ReduceOp.SUM, group=ctx.group)
+        return local, None, None
+"""
+    patch_file(
+        exchange,
+        [
+            (gather_forward, singleton_gather_forward),
+            (gather_backward, singleton_gather_backward),
+        ],
+        log_reason="AutoModel singleton block-diagonal K/V gather",
+    )
+
+
 def relax_ptrace_scope() -> None:
     """Set kernel.yama.ptrace_scope=0 (needed for Torch CUDA IPC weight sync).
 
@@ -172,13 +259,24 @@ def relax_ptrace_scope() -> None:
 
 
 def main() -> int:
+    import nemo_automodel
     import sglang
 
+    automodel_dir = Path(nemo_automodel.__file__).resolve().parent
+    parallelizer = automodel_dir / "components" / "moe" / "parallelizer.py"
+    blockdiag_dir = automodel_dir / "components" / "distributed" / "blockdiag_cp"
+    blockdiag_batch = blockdiag_dir / "batch.py"
+    blockdiag_exchange = blockdiag_dir / "exchange.py"
     sglang_dir = Path(sglang.__file__).resolve().parent
     base_processor = sglang_dir / "srt" / "multimodal" / "processors" / "base_processor.py"
 
+    patch_automodel_optional_transformer_engine(parallelizer)
+    patch_automodel_blockdiag_cp1(blockdiag_batch, blockdiag_exchange)
     patch_sglang_base_processor(base_processor)
     install_triton_configs(sglang_dir)
+    py_compile.compile(str(parallelizer), doraise=True)
+    py_compile.compile(str(blockdiag_batch), doraise=True)
+    py_compile.compile(str(blockdiag_exchange), doraise=True)
     py_compile.compile(str(base_processor), doraise=True)
 
     relax_ptrace_scope()
