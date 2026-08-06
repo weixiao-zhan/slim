@@ -9,8 +9,6 @@
 source "$(dirname "$0")/common.sh"
 
 MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
-maybe_detach "$0" "$@"
-
 # Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. PPO on the simplest fully
 # separate layout: 2 actor + 2 critic + 4 rollout GPUs, no colocation.
 COMMON_ARGS="

@@ -39,7 +39,8 @@ async def custom_generate(state: GenerateState, episode: Episode) -> Episode
 ```
 
 Substitutes only the per-episode generation logic.
-The episode arrives with prompt tokens already set; the function appends generated tokens, sets `loss_mask`, and returns the completed episode.
+The episode arrives holding one trajectory with prompt tokens already set; the function appends generated tokens to `episode.trajectory`, sets its `loss_mask`, and returns the completed episode.
+An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation span, and sets `episode.status` for the attempt as a whole.
 
 Per-episode override: set `episode.generate_function_path` to route specific episodes to a different generate function.
 
@@ -51,6 +52,10 @@ async def custom_rm(args, episode: Episode, **kwargs) -> float
 # Batch mode (--group-rm):
 async def custom_rm(args, episodes: list[Episode], **kwargs) -> list[float]
 ```
+
+The returned scalar lands on `episode.reward` and is broadcast to every span of the attempt.
+A reward function that wants to score spans individually writes `trajectory.reward` on each span instead and returns nothing for the episode; setting both levels is an error.
+Each span carries its own `generated_text`, so span boundaries reach the reward function rather than being flattened into one decode. Join them when the flat view is what you want.
 
 Built-in `--rm-type` options (used when `--custom-rm-path` is not set): `math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `remote_rm`, `random`.
 
@@ -71,7 +76,7 @@ def sample_filter(args, groups: list[RolloutGroup]) -> None
 ```
 
 Operates in-place on kept groups.
-To exclude a sample from training, set its `episode.loss_mask` to all zeros.
+To exclude a span from training, set its `trajectory.loss_mask` to all zeros; zeroing every span of an episode excludes the whole attempt.
 
 ### Data source (`--data-source-path`)
 
@@ -92,9 +97,9 @@ def custom_loss(args, unpacked_batches: list[dict]) -> tuple[torch.Tensor, dict[
 
 Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 (policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
-`unpacked_batches` is the per-sample list from `unpack_sequences`; each dict
-carries the raw `reward`, `cur_log_probs`, `advantages`, `loss_masks`,
-and the old/ref log-probs when available.
+`unpacked_batches` is the per-document list from `unpack_sequences`, one entry per
+trajectory; each dict carries the raw `reward`, `loss_weights`, `cur_log_probs`,
+`advantages`, `loss_masks`, and the old/ref log-probs when available.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
 a dict of scalar tensors logged under `train/`.
@@ -117,22 +122,46 @@ Multi-turn interactions (tool-calling agents, conversational RL) require three p
 - Model-generated tokens: `loss_mask = 1` (train on these)
 - Tool/environment tokens: `loss_mask = 0` (excluded from loss)
 
+When each turn extends one growing context, the attempt stays a single trajectory:
+
 ```python
 async def multi_turn_generate(state, episode):
+    trajectory = episode.trajectory
     for turn in range(max_turns):
         episode = await generate(state, episode)  # appends with loss_mask=1
-        tool_call = parse_tool_call(episode.generated_text)
+        tool_call = parse_tool_call(trajectory.generated_text)
         if tool_call is None:
             break
         tool_tokens = state.tokenizer.encode(execute_tool(tool_call))
-        episode.tokens.extend(tool_tokens)
-        episode.loss_mask.extend([0] * len(tool_tokens))
-        episode.rollout_log_probs.extend([0.0] * len(tool_tokens))
+        trajectory.token_ids.extend(tool_tokens)
+        trajectory.loss_mask.extend([0] * len(tool_tokens))
+        trajectory.rollout_log_probs.extend([0.0] * len(tool_tokens))
     episode.status = Episode.Status.COMPLETED
     return episode
 ```
 
-**3. Custom reward function**: scores the final outcome of the interaction.
+When a turn does not extend the previous context, append a trajectory instead. Sub-agent
+dispatch fans out and context compression replaces context rather than extending it, so each
+generation call becomes its own span:
+
+```python
+async def compressing_generate(state, episode):
+    for turn in range(max_turns):
+        episode = await generate(state, episode)
+        if is_done(episode.trajectories[-1].generated_text):
+            break
+        # A fresh span over the compressed context, not an extension of the old one.
+        compressed = compress(episode.trajectories[-1])
+        episode.trajectories.append(Trajectory(token_ids=compressed))
+    episode.status = Episode.Status.COMPLETED
+    return episode
+```
+
+Trajectories carry no ordering relation. A workload whose reward depends on span order records
+that order in `episode.example`, where its own reward function reads it.
+
+**3. Custom reward function**: scores the final outcome of the interaction, either as one
+`episode.reward` for the attempt or as a `trajectory.reward` per span.
 
 ```bash
 --custom-generate-function-path my_project.agent.multi_turn_generate \

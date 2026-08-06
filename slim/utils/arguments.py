@@ -14,6 +14,7 @@ from slim.backends.sglang_utils.arguments import sglang_parse_args
 from slim.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from slim.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slim.utils.logging_utils import configure_logger
+from slim.utils.trajectory_batch import LOSS_NORMALIZATION_UNITS
 
 logger = logging.getLogger(__name__)
 
@@ -517,7 +518,18 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
-            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
+            parser.add_argument(
+                "--loss-normalization-unit",
+                type=str,
+                default="episode",
+                choices=LOSS_NORMALIZATION_UNITS,
+                help=(
+                    "Unit the loss denominator counts. `episode` weights each attempt equally "
+                    "by giving its trajectories weight 1/k, which is the unit the GRPO baseline "
+                    "centers on. `trajectory` weights each generation call equally. `token` uses "
+                    "a token-sum denominator for the policy term."
+                ),
+            )
             reset_arg(parser, "--lr", type=float, default=1e-6)
 
             parser.add_argument(

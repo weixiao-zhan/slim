@@ -60,8 +60,8 @@ def reference_reward_post_process(args, episodes):
 
 def _make_episode(reward: float = 1.0, **example_fields) -> Episode:
     ep = Episode.from_example(example_fields)
-    ep.tokens = [0, 1]
-    ep.loss_mask = [1]
+    ep.trajectory.token_ids = [0, 1]
+    ep.trajectory.loss_mask = [1]
     ep.reward = reward
     ep.status = Episode.Status.COMPLETED
     return ep

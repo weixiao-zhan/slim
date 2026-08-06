@@ -22,5 +22,5 @@ async def generate_with_random_osl(state, episode: Episode) -> Episode:
 
     ans = await _generate_base(state, episode)
 
-    logger.info(f"generate_with_random_osl {ans.response_length=}")
+    logger.info(f"generate_with_random_osl response_length={ans.trajectory.response_length}")
     return ans

@@ -21,7 +21,7 @@ from slim.utils.async_utils import run
 from slim.utils.eval_config import EvalDatasetConfig
 from slim.utils.http_utils import get, post
 from slim.utils.misc import SingletonMeta, load_function
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 __all__ = ["generate_rollout", "get_model_url"]
 
@@ -107,20 +107,20 @@ class GenerateState(metaclass=SingletonMeta):
             )
 
 
-def decode_text(args: Namespace, episode: Episode) -> str:
-    """Decode the full prompt+response sequence. Multi-turn safe; RM may parse it as needed."""
-    if not len(episode.tokens):
+def decode_text(args: Namespace, trajectory: Trajectory) -> str:
+    """Decode one span's full prompt+response sequence. RM may parse it as needed."""
+    if not len(trajectory.token_ids):
         return ""
-    return GenerateState(args).tokenizer.decode(episode.tokens)
+    return GenerateState(args).tokenizer.decode(trajectory.token_ids)
 
 
-def decode_generated_text(args: Namespace, episode: Episode) -> str:
-    """Decode generated targets from a rollout-stage episode."""
-    if episode.loss_mask is None:
+def decode_generated_text(args: Namespace, trajectory: Trajectory) -> str:
+    """Decode generated targets from a rollout-stage span."""
+    if trajectory.loss_mask is None:
         raise ValueError("loss_mask must be present")
     gen_ids = [
         token
-        for token, active in zip(episode.tokens[1:], episode.loss_mask, strict=True)
+        for token, active in zip(trajectory.token_ids[1:], trajectory.loss_mask, strict=True)
         if active
     ]
     if not gen_ids:
@@ -141,8 +141,9 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
 
 
 async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> None:
-    """Tokenize prompt into episode.tokens if not already set."""
-    if episode.tokens:
+    """Tokenize the prompt into the episode's sole span if not already set."""
+    trajectory = episode.trajectory
+    if trajectory.token_ids:
         return
 
     prompt = episode.example.get("prompt", "")
@@ -173,7 +174,7 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
             return_mm_token_type_ids=False,
         )
         prompt_ids = processor_output["input_ids"][0].tolist()
-        episode.multimodal_inputs = {
+        trajectory.multimodal_inputs = {
             k: v
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
@@ -191,10 +192,10 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
         # Raw string prompt
         prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
-    episode.tokens = prompt_ids
-    edge_len = max(len(episode.tokens) - 1, 0)
-    episode.loss_mask = [0] * edge_len
-    episode.rollout_log_probs = [0.0] * edge_len
+    trajectory.token_ids = prompt_ids
+    edge_len = max(len(prompt_ids) - 1, 0)
+    trajectory.loss_mask = [0] * edge_len
+    trajectory.rollout_log_probs = [0.0] * edge_len
 
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
@@ -205,9 +206,10 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     sampling_params = episode._sampling_params
 
     await _prepare_episode_tokens(state, episode)
-    assert episode.rollout_log_probs is not None
+    trajectory = episode.trajectory
+    assert trajectory.rollout_log_probs is not None
 
-    max_new_tokens = episode.max_tokens - len(episode.tokens)
+    max_new_tokens = episode.max_tokens - len(trajectory.token_ids)
     if max_new_tokens <= 0:
         episode.status = Episode.Status.TRUNCATED
         return episode
@@ -215,7 +217,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     sampling_params["max_new_tokens"] = max_new_tokens
 
     payload = {
-        "input_ids": episode.tokens,
+        "input_ids": trajectory.token_ids,
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
@@ -223,10 +225,10 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         processor_output = {
             "format": "processor_output",
             "input_ids": await asyncio.to_thread(
-                encode_tensor_to_b64_envelope, torch.as_tensor([episode.tokens], dtype=torch.long)
+                encode_tensor_to_b64_envelope, torch.as_tensor([trajectory.token_ids], dtype=torch.long)
             ),
         }
-        for key, value in episode.multimodal_inputs.items():
+        for key, value in trajectory.multimodal_inputs.items():
             processor_output[key] = (
                 await asyncio.to_thread(encode_tensor_to_b64_envelope, value) if hasattr(value, "detach") else value
             )
@@ -248,9 +250,9 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
     new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
 
-    episode.tokens.extend(new_tokens)
-    episode.loss_mask.extend([1] * len(new_tokens))
-    episode.rollout_log_probs.extend(new_log_probs)
+    trajectory.token_ids.extend(new_tokens)
+    trajectory.loss_mask.extend([1] * len(new_tokens))
+    trajectory.rollout_log_probs.extend(new_log_probs)
 
     if state.routing_replay_shape is not None:
         import numpy as np
@@ -265,7 +267,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
                 arr = np.frombuffer(pybase64.b64decode(raw.encode("utf-8")), dtype=np.int32).copy()
                 return arr.reshape(-1, num_layers, top_k)
 
-            episode.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
+            trajectory.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
 
     episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
@@ -297,15 +299,21 @@ async def generate_and_rm(
                 episode = await generate(state, episode)
 
     if episode.status != Episode.Status.ABORTED:
-        episode.text = decode_text(args, episode)
-        if episode.generated_text is None:
-            episode.generated_text = decode_generated_text(args, episode)
+        for trajectory in episode.trajectories:
+            trajectory.text = decode_text(args, trajectory)
+            if trajectory.generated_text is None:
+                trajectory.generated_text = decode_generated_text(args, trajectory)
 
-    if not args.group_rm and episode.status != Episode.Status.ABORTED and episode.reward is None:
+    if not args.group_rm and episode.status != Episode.Status.ABORTED and _needs_reward(episode):
         from .rm_hub import async_rm
 
         episode.reward = await async_rm(args, episode)
     return episode
+
+
+def _needs_reward(episode: Episode) -> bool:
+    """A reward function may score at either level; scoring runs when neither is set."""
+    return episode.reward is None and all(t.reward is None for t in episode.trajectories)
 
 
 async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation: bool = False) -> RolloutGroup:
@@ -387,6 +395,8 @@ async def generate_rollout_async(
             groups = _examples_to_rollout_groups(examples, args)
             for group in groups:
                 group.index = next_group_index
+                for episode in group.episodes:
+                    episode.group_index = next_group_index
                 next_group_index += 1
             state.submit_generate_tasks(groups)
 
@@ -397,7 +407,8 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+                    f"First rollout sample: {[t.text for t in ep.trajectories]}, "
+                    f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
                 )
                 do_print = False
 
@@ -417,7 +428,8 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+        f"Finish rollout: {[t.text for t in ep.trajectories]}, "
+        f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
     )
 
     aborted_examples = await abort(args)
@@ -493,7 +505,10 @@ async def eval_rollout_single_dataset(
     episodes = []
     for i, episode in enumerate(raw_episodes):
         if i == 0:
-            logger.info(f"eval_rollout_single_dataset example data: {[episode.text]} reward={episode.reward}")
+            logger.info(
+                f"eval_rollout_single_dataset example data: {[t.text for t in episode.trajectories]} "
+                f"reward={episode.get_reward_value()}"
+            )
         episodes.append(episode)
 
     return {dataset_cfg.name: episodes}
