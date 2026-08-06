@@ -17,8 +17,6 @@ BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
 FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8"
 FP8_UE8M0_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8-ue8m0"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-maybe_detach "$0" "$@"
-
 # Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. GRPO + CIS, rollout colocated.
 COMMON_ARGS="
     --num-rollout 3

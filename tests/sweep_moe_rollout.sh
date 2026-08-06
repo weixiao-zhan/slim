@@ -14,8 +14,6 @@ source "$(dirname "$0")/common.sh"
 
 MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B"
 DATASET_DIR="$REPO_DIR/datasets/geo3k"
-maybe_detach "$0" "$@"
-
 # Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. 8 actor GPUs, rollout colocated.
 COMMON_ARGS="
     --num-rollout 3

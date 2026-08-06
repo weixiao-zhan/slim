@@ -73,15 +73,17 @@ def test_fused_selective_log_probs_preserves_fp32_values_and_bf16_gradients():
 
 
 @pytest.mark.unit
-def test_global_denominators_count_samples_and_masked_tokens():
+def test_global_denominators_sum_document_weights_and_masked_tokens():
     packs = [
         {
             "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
             "loss_masks": torch.tensor([0, 1, 0, 0, 1, 0]),
+            "loss_weights": [1.0, 1.0],
         },
         {
             "cu_seqlens": torch.tensor([0, 2], dtype=torch.int32),
             "loss_masks": torch.tensor([0, 0]),
+            "loss_weights": [1.0],
         },
     ]
 
@@ -92,15 +94,62 @@ def test_global_denominators_count_samples_and_masked_tokens():
 
 
 @pytest.mark.unit
+def test_global_denominators_count_an_episode_once_across_its_trajectories():
+    packs = [
+        {
+            "cu_seqlens": torch.tensor([0, 3, 6, 9], dtype=torch.int32),
+            "loss_masks": torch.ones(9, dtype=torch.int32),
+            # Two spans of one attempt, then a whole single-span attempt.
+            "loss_weights": [0.5, 0.5, 1.0],
+        },
+    ]
+
+    sequences, _ = count_global_denominators(packs, dp_group=None, device="cpu")
+
+    assert sequences.item() == 2
+
+
+@pytest.mark.unit
+def test_global_denominators_exclude_padding_documents():
+    packs = [
+        {
+            "cu_seqlens": torch.tensor([0, 3, 5], dtype=torch.int32),
+            "loss_masks": torch.tensor([1, 1, 0, 0, 0]),
+            "loss_weights": [1.0, 0.0],
+        },
+    ]
+
+    sequences, tokens = count_global_denominators(packs, dp_group=None, device="cpu")
+
+    assert sequences.item() == 1
+    assert tokens.item() == 2
+
+
+@pytest.mark.unit
 def test_global_denominators_reject_non_source_aligned_masks():
     packs = [
         {
             "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
             "loss_masks": torch.tensor([0, 1, 0, 1]),
+            "loss_weights": [1.0, 1.0],
         },
     ]
 
     with pytest.raises(ValueError, match="packed token count 6"):
+        count_global_denominators(packs, dp_group=None, device="cpu")
+
+
+@pytest.mark.unit
+def test_global_denominators_reject_weights_that_do_not_match_documents():
+    packs = [
+        {
+            "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
+            "loss_masks": torch.ones(6, dtype=torch.int32),
+            "loss_weights": [1.0],
+        },
+    ]
+
+    with pytest.raises(ValueError, match="do not match 2 packed documents"):
         count_global_denominators(packs, dp_group=None, device="cpu")
 
 
@@ -118,10 +167,62 @@ def test_policy_reductions_use_matching_global_denominators():
         num_documents=2,
         global_sequences=torch.tensor(4.0),
         cp_group=None,
+        loss_weights=torch.ones(2),
     )
 
     torch.testing.assert_close(token_loss, torch.tensor(3.75))
     torch.testing.assert_close(sequence_loss, torch.tensor(3.75))
+
+
+@pytest.mark.unit
+def test_sequence_reduction_weights_an_episode_by_its_trajectory_count():
+    # Two spans of one attempt (means 3 and 12) beside a single-span attempt (mean 20).
+    values = torch.tensor([[2.0, 4.0, 10.0, 14.0, 20.0, 20.0]])
+    mask = torch.ones_like(values)
+    document_ids = torch.tensor([[1, 1, 2, 2, 3, 3]])
+
+    per_episode = normalize_sequence_values(
+        values,
+        mask,
+        document_ids,
+        num_documents=3,
+        global_sequences=torch.tensor(2.0),
+        cp_group=None,
+        loss_weights=torch.tensor([0.5, 0.5, 1.0]),
+    )
+    per_trajectory = normalize_sequence_values(
+        values,
+        mask,
+        document_ids,
+        num_documents=3,
+        global_sequences=torch.tensor(3.0),
+        cp_group=None,
+        loss_weights=torch.tensor([1.0, 1.0, 1.0]),
+    )
+
+    # (0.5*3 + 0.5*12 + 20) / 2 weights each attempt once.
+    torch.testing.assert_close(per_episode, torch.tensor(13.75))
+    # (3 + 12 + 20) / 3 weights each span once.
+    torch.testing.assert_close(per_trajectory, torch.tensor(35.0 / 3))
+
+
+@pytest.mark.unit
+def test_padding_documents_do_not_shift_the_sequence_reduction():
+    values = torch.tensor([[2.0, 4.0, 99.0, 99.0]])
+    mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+    document_ids = torch.tensor([[1, 1, 2, 2]])
+
+    reduced = normalize_sequence_values(
+        values,
+        mask,
+        document_ids,
+        num_documents=2,
+        global_sequences=torch.tensor(1.0),
+        cp_group=None,
+        loss_weights=torch.tensor([1.0, 0.0]),
+    )
+
+    torch.testing.assert_close(reduced, torch.tensor(3.0))
 
 
 @pytest.mark.unit
@@ -146,6 +247,7 @@ def test_policy_reducer_selects_sequence_mean_or_token_sum(sum_tokens, expected)
         global_sequences=torch.tensor(4.0),
         global_tokens=torch.tensor(8.0),
         cp_group=None,
+        loss_weights=torch.ones(2),
     )
 
     torch.testing.assert_close(reduced, torch.tensor(expected))
@@ -177,7 +279,7 @@ def test_token_sum_policy_keeps_entropy_and_kl_sequence_normalized(monkeypatch):
         "Args",
         (),
         {
-            "calculate_per_token_loss": True,
+            "loss_normalization_unit": "token",
             "rollout_temperature": 1.0,
             "old_logprob_source": "rollout",
             "advantage_estimator": "grpo",
@@ -224,6 +326,7 @@ def test_token_sum_policy_keeps_entropy_and_kl_sequence_normalized(monkeypatch):
         num_documents=2,
         global_sequences=torch.tensor(2.0),
         global_tokens=torch.tensor(4.0),
+        loss_weights=torch.ones(2),
     )
 
     torch.testing.assert_close(metrics["pg_loss"], torch.tensor(1.0))

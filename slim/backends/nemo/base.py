@@ -38,7 +38,7 @@ from slim.utils.memory_utils import clear_memory
 from slim.utils.processing_utils import load_processor, load_tokenizer
 from slim.utils.profile_utils import TrainProfiler
 from slim.utils.timer import Timer, inverse_timer, timer, with_defer
-from slim.utils.types import Episode
+from slim.utils.trajectory_batch import TrajectoryBatch
 
 from . import checkpoint
 from .data_packing import (
@@ -47,6 +47,7 @@ from .data_packing import (
     unpack_sequences,
     update_packed_targets,
 )
+from .loss import count_global_denominators
 from .lr_scheduler import get_lr_scheduler
 from .models import validate_config
 from .topology import NeMoTopology
@@ -260,27 +261,24 @@ class NeMoTrainer(RayWorker):
             return
         checkpoint.save(self, rollout_id, force_sync=force_sync)
 
-    def _packed_data(self, episodes: list[Episode]) -> tuple[list[dict], list[int]]:
-        packed_batches = []
-        local_batch_size = self.args.global_batch_size // self.dp_size
-        if self.args.global_batch_size % self.dp_size:
-            raise ValueError(
-                f"global_batch_size {self.args.global_batch_size} must be divisible by logical DP {self.dp_size}"
-            )
+    def _packed_data(self, batch: TrajectoryBatch) -> tuple[list[dict], list[int]]:
+        """Pack each optimizer step's trajectories into DP-synchronized microbatches.
 
+        The flattener already gave every rank the same number of trajectories per
+        step with balanced token sums, so the MAX all-reduce below finds a pack
+        count every rank can reach.
+        """
+        packed_batches = []
         step_microbatch_counts = []
-        for start in range(0, len(episodes), local_batch_size):
-            chunk = episodes[start : start + local_batch_size]
+        for start, step_trajectories in batch.steps():
+            lengths = [len(trajectory.token_ids) for trajectory in step_trajectories]
             if self.args.use_dynamic_batch_size:
                 physical_pack_token_budget = self.args.max_tokens_per_gpu * self.cp_size
-                partitions = build_token_budget_partitions(
-                    [len(episode.tokens) for episode in chunk],
-                    physical_pack_token_budget,
-                )
+                partitions = build_token_budget_partitions(lengths, physical_pack_token_budget)
             else:
                 partitions = [
-                    list(range(offset, min(offset + self.args.micro_batch_size, len(chunk))))
-                    for offset in range(0, len(chunk), self.args.micro_batch_size)
+                    list(range(offset, min(offset + self.args.micro_batch_size, len(step_trajectories))))
+                    for offset in range(0, len(step_trajectories), self.args.micro_batch_size)
                 ]
 
             count = torch.tensor(len(partitions), dtype=torch.int, device=torch.cuda.current_device())
@@ -288,21 +286,19 @@ class NeMoTrainer(RayWorker):
             pack_count = int(count.item())
             if self.args.use_dynamic_batch_size:
                 partitions = build_token_budget_partitions(
-                    [len(episode.tokens) for episode in chunk],
+                    lengths,
                     physical_pack_token_budget,
                     num_packs=pack_count,
                 )
             elif len(partitions) != pack_count:
                 raise RuntimeError("fixed microbatch counts differ across data-parallel ranks")
 
-            chunk_batches = pack_sequences(chunk, partitions=partitions)
-            if len(chunk_batches) != pack_count:
-                raise RuntimeError(f"requested {pack_count} synchronized packs but built {len(chunk_batches)}")
-            for batch in chunk_batches:
-                batch["_episode_dp_indices"] = [
-                    index + start for index in batch["_episode_dp_indices"]
-                ]
-            packed_batches.extend(chunk_batches)
+            step_batches = pack_sequences(step_trajectories, partitions=partitions)
+            if len(step_batches) != pack_count:
+                raise RuntimeError(f"requested {pack_count} synchronized packs but built {len(step_batches)}")
+            for pack in step_batches:
+                pack["_document_indices"] = [index + start for index in pack["_document_indices"]]
+            packed_batches.extend(step_batches)
             step_microbatch_counts.append(pack_count)
         return packed_batches, list(accumulate(step_microbatch_counts))
 
@@ -311,12 +307,12 @@ class NeMoTrainer(RayWorker):
             raise RuntimeError("precomputed packed data is already cached")
         self._precomputed_packed_data = (packed_batches, grad_accum)
 
-    def _take_packed_data(self, episodes: list[Episode]) -> tuple[list[dict], list[int]]:
+    def _take_packed_data(self, batch: TrajectoryBatch) -> tuple[list[dict], list[int]]:
         if self._precomputed_packed_data is None:
-            return self._packed_data(episodes)
+            return self._packed_data(batch)
         packed_batches, grad_accum = self._precomputed_packed_data
         self._precomputed_packed_data = None
-        update_packed_targets(packed_batches, episodes)
+        update_packed_targets(packed_batches, batch.trajectories)
         return packed_batches, grad_accum
 
     @staticmethod
@@ -333,8 +329,8 @@ class NeMoTrainer(RayWorker):
             return
         self.wake_up()
         with inverse_timer("train_wait"), timer("train"):
-            episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-            packed_batches, grad_accum = self._take_packed_data(episodes)
+            batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+            packed_batches, grad_accum = self._take_packed_data(batch)
             self._train_core(rollout_id, packed_batches, grad_accum)
 
         train_metric_utils.log_perf_data_raw(
@@ -429,21 +425,29 @@ class NeMoTrainer(RayWorker):
         logging_utils.log(self.args, log_dict)
 
     def _log_packed_metrics(self, packed_batches, metric_keys):
+        """Average each metric over documents, weighted by the loss weights."""
         log_dict = {}
+        weight_sum, _ = count_global_denominators(
+            packed_batches,
+            self.dp_group,
+            torch.cuda.current_device(),
+        )
         for metric_key in metric_keys:
             if metric_key not in packed_batches[0]:
                 continue
             value = torch.zeros((), device=torch.cuda.current_device())
             for packed_batch in packed_batches:
-                for batch in unpack_sequences(packed_batch):
-                    metric = batch.get(metric_key)
+                for document in unpack_sequences(packed_batch):
+                    metric = document.get(metric_key)
                     if isinstance(metric, torch.Tensor):
-                        mask = batch["loss_masks"].to(value.device)
-                        value += (metric.to(value.device) * mask).sum() / mask.sum().clamp_min(1)
+                        mask = document["loss_masks"].to(value.device)
+                        value += (
+                            document["loss_weights"]
+                            * (metric.to(value.device) * mask).sum()
+                            / mask.sum().clamp_min(1)
+                        )
             dist.all_reduce(value, group=self.dp_group)
-            log_dict[f"{self._train_log_prefix}/{metric_key}"] = (
-                value / (self.args.n_samples_per_prompt * self.args.rollout_batch_size)
-            ).item()
+            log_dict[f"{self._train_log_prefix}/{metric_key}"] = (value / weight_sum).item()
         if dist.get_rank() == 0 and log_dict:
             log_dict["train/step"] = self.global_step
             logging_utils.log(self.args, log_dict)

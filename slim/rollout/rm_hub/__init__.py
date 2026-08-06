@@ -33,11 +33,16 @@ def _get_shared_session() -> aiohttp.ClientSession:
     return _shared_session
 
 
+def _joined_generated_text(episode: Episode) -> str:
+    """Join an attempt's spans for reward functions that want the flat view."""
+    return "".join(trajectory.generated_text or "" for trajectory in episode.trajectories)
+
+
 async def remote_rm(args, episode: Episode, max_retries: int = 10):
     payload = {
         "prompt": episode.example.get("prompt", ""),
-        "response": episode.generated_text or "",
-        "text": episode.text or "",
+        "response": _joined_generated_text(episode),
+        "text": "".join(t.text or "" for t in episode.trajectories),
         "label": episode.example.get("label"),
     }
     session = _get_shared_session()
@@ -65,7 +70,7 @@ async def async_rm(args, episode: Episode, **kwargs):
         import json
         metadata = json.loads(metadata)
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
-    response = episode.generated_text or ""
+    response = _joined_generated_text(episode)
     label = episode.example.get("label")
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""

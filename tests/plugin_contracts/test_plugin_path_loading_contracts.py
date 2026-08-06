@@ -68,10 +68,10 @@ def run_contract_test_file() -> None:
 
 def _make_episode(reward: float = 1.0, **example_fields) -> Episode:
     ep = Episode.from_example(example_fields)
-    ep.tokens = [100, 200]
-    ep.loss_mask = [1]
+    ep.trajectory.token_ids = [100, 200]
+    ep.trajectory.loss_mask = [1]
+    ep.trajectory.generated_text = f"response-{example_fields.get('index', 0)}"
     ep.reward = reward
-    ep.generated_text = f"response-{example_fields.get('index', 0)}"
     ep.status = Episode.Status.COMPLETED
     return ep
 

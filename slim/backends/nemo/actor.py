@@ -36,6 +36,7 @@ from .loss import (
     entropy_from_logits,
     normalize_policy_values,
     normalize_sequence_values,
+    pack_loss_weights,
     selective_log_probs,
     sequence_mean_at_tokens,
 )
@@ -163,8 +164,8 @@ class ActorNeMoTrainer(NeMoTrainer):
                 active_model.train()
 
     def compute_log_probs(self, rollout_data_ref: list) -> None:
-        episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-        packed_batches, grad_accum = self._packed_data(episodes)
+        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+        packed_batches, grad_accum = self._packed_data(batch)
         if self.ref_model is not None or self._needs_actor_old_log_probs():
             self.wake_up()
             if self.ref_model is not None:
@@ -208,16 +209,18 @@ class ActorNeMoTrainer(NeMoTrainer):
         num_documents: int,
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
+        loss_weights: torch.Tensor,
     ) -> torch.Tensor:
         return normalize_policy_values(
             values,
             mask,
             document_ids,
             num_documents,
-            sum_tokens=self.args.calculate_per_token_loss,
+            sum_tokens=self.args.loss_normalization_unit == "token",
             global_sequences=global_sequences,
             global_tokens=global_tokens,
             cp_group=self.cp_group,
+            loss_weights=loss_weights,
         )
 
     def _normalize_sequence(
@@ -227,6 +230,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         document_ids: torch.Tensor,
         num_documents: int,
         global_sequences: torch.Tensor,
+        loss_weights: torch.Tensor,
     ) -> torch.Tensor:
         return normalize_sequence_values(
             values,
@@ -235,6 +239,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             num_documents,
             global_sequences,
             self.cp_group,
+            loss_weights,
         )
 
     def _policy_loss(
@@ -245,6 +250,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         num_documents: int,
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
+        loss_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         labels = fields["labels"]
         mask = fields["loss_masks"].to(torch.float32)
@@ -287,6 +293,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             num_documents,
             global_sequences,
             global_tokens,
+            loss_weights,
         )
         pg_clipfrac = self._normalize_policy(
             clip_values,
@@ -295,6 +302,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             num_documents,
             global_sequences,
             global_tokens,
+            loss_weights,
         )
         pg_kl_k3 = self._normalize_policy(
             torch.exp(-policy_log_ratio) + policy_log_ratio - 1,
@@ -303,6 +311,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             num_documents,
             global_sequences,
             global_tokens,
+            loss_weights,
         )
 
         zero = logits.new_zeros((), dtype=torch.float32)
@@ -314,6 +323,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 document_ids,
                 num_documents,
                 global_sequences,
+                loss_weights,
             )
 
         kl_loss = zero
@@ -335,6 +345,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 document_ids,
                 num_documents,
                 global_sequences,
+                loss_weights,
             )
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss + self.args.kl_loss_coef * kl_loss
@@ -355,6 +366,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 document_ids,
                 num_documents,
                 global_sequences,
+                loss_weights,
             ).detach()
             metrics["mismatch/log_prob_abs_diff"] = self._normalize_sequence(
                 mismatch_ratio.abs(),
@@ -362,6 +374,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 document_ids,
                 num_documents,
                 global_sequences,
+                loss_weights,
             ).detach()
         for name, values in fields.items():
             if not name.startswith("mismatch/"):
@@ -372,6 +385,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                 document_ids,
                 num_documents,
                 global_sequences,
+                loss_weights,
             ).detach()
         return loss, metrics
 
@@ -413,6 +427,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        loss_weights = pack_loss_weights(pack, torch.cuda.current_device())
         prepared = prepare_forward(
             self.model,
             self.device_mesh,
@@ -446,6 +461,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                     num_documents=pack["cu_seqlens"].numel() - 1,
                     global_sequences=global_sequences,
                     global_tokens=global_tokens,
+                    loss_weights=loss_weights,
                 )
             (loss * self.backward_group_size).backward()
         return metrics

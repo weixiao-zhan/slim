@@ -64,6 +64,7 @@ driver blocks in `ray.get(pg.ready())` until the previous job's
 
 ```bash
 bash tests/test_grpo_profile.sh
+bash tests/sweep_trajectory.sh
 bash tests/sweep_placement.sh
 bash tests/sweep_dataset.sh
 bash tests/sweep_algo.sh
@@ -112,6 +113,7 @@ Two kinds of tests live here:
 | `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-2B |
 | `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32`, `fp8_ue8m0` | Qwen3.5-2B (+ FP8 forges) |
 | `sweep_moe_rollout.sh` | MoE rollout parallelism (R3 on) | `tp1`, `tp4`, `tp4_ep4` | Qwen3.6-35B-A3B (MoE) |
+| `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 14 combos (see below) | Qwen3.5-2B |
 
 ```bash
 hf download Qwen/Qwen3.5-2B --local-dir models/Qwen3.5-2B
@@ -126,6 +128,24 @@ The non-MoE sweeps use **Qwen3.5-2B**. `sweep_moe_rollout.sh` runs on the
 through the `models/<name>` symlink convention (`models/Qwen3.6-35B-A3B ->
 /opt/dlami/nvme/models/Qwen3.6-35B-A3B`). All sweeps use `flash_attention_3`
 (Hopper); on A100/L40s switch to `flash_attention_2`, on Blackwell/SM120 use `sdpa`.
+
+### `sweep_trajectory.sh`
+
+Sized for a **4-GPU node** with disaggregated placement (2 GPUs train, 2 serve rollout),
+so weight sync goes over NCCL rather than the CUDA IPC path, which needs `CAP_SYS_PTRACE`.
+
+Combos cover the layout's degrees of freedom: `unit_episode`, `unit_trajectory`,
+`unit_token` (the three `--loss-normalization-unit` values); `multi_step` (partition
+across optimizer steps as well as ranks); `cp2` (context parallel halves the logical DP
+size); `grpo_std`, `gspo`, `ppo` (estimators, PPO adding the trajectory-keyed critic value
+round trip); `fixed_mbs` (fixed micro-batching, which requires exactly equal pack counts
+per rank with no dynamic re-split available); `no_balance` (round-robin instead of
+Karmarkar-Karp).
+
+The four `multi_traj_*` combos route through
+`tests/multi_trajectory_generate.py`, whose generate function makes two generation calls
+per attempt so every episode packs as $k = 2$ documents with `loss_weight` $1/2$. This is
+the path the two-level layout exists for; the other combos are all single-span.
 
 ### Standalone tests
 

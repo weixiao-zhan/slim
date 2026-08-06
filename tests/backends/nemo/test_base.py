@@ -13,6 +13,8 @@ from slim.backends.nemo.base import (
     _bind_default_process_group_device,
     _clear_inactive_optimizer_grads,
 )
+from slim.utils.trajectory_batch import TrajectoryBatch
+from slim.utils.types import Trajectory
 
 
 @pytest.mark.unit
@@ -91,7 +93,7 @@ def test_debug_rollout_only_train_does_not_touch_trainer_state():
 @pytest.mark.unit
 def test_train_updates_precomputed_packs_with_train_targets(monkeypatch):
     captured = {}
-    episodes_with_targets = [object()]
+    batch_with_targets = TrajectoryBatch(trajectories=[Trajectory(token_ids=[1, 2], loss_mask=[0])])
 
     class PlaceholderTrainer:
         args = SimpleNamespace(debug_rollout_only=False)
@@ -111,11 +113,11 @@ def test_train_updates_precomputed_packs_with_train_targets(monkeypatch):
             captured["packed_batches"] = packed_batches
             captured["grad_accum"] = grad_accum
 
-    monkeypatch.setattr(base, "process_rollout_data", lambda refs, dp_rank, dp_size: episodes_with_targets)
+    monkeypatch.setattr(base, "process_rollout_data", lambda refs, dp_rank, dp_size: batch_with_targets)
     monkeypatch.setattr(
         base,
         "update_packed_targets",
-        lambda packs, episodes: captured.update(target_packs=packs, target_episodes=episodes),
+        lambda packs, trajectories: captured.update(target_packs=packs, target_trajectories=trajectories),
     )
     monkeypatch.setattr(base.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(base, "inverse_timer", lambda *_args, **_kwargs: contextlib.nullcontext())
@@ -133,5 +135,5 @@ def test_train_updates_precomputed_packs_with_train_targets(monkeypatch):
         "packed_batches": ["pack"],
         "grad_accum": [1],
         "target_packs": ["pack"],
-        "target_episodes": episodes_with_targets,
+        "target_trajectories": batch_with_targets.trajectories,
     }

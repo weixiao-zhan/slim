@@ -88,7 +88,8 @@ def _pack(first_document: list[int]) -> dict:
         "cu_seqlens": cu_seqlens,
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
-        "_episode_dp_indices": [0, 1],
+        "loss_weights": [1.0, 1.0],
+        "_document_indices": [0, 1],
     }
 
 
