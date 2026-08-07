@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from slim.backends.nemo.data_packing import pack_sequences, unpack_sequences
-from slim.backends.nemo.loss import count_global_denominators, normalize_sequence_values
+from slim.backends.nemo.loss import count_global_denominators, reduce_weighted_sequence_mean
 from slim.utils.trajectory_batch import build_dp_batches, group_by_episode
 from slim.utils.types import Episode, Trajectory
 
@@ -134,7 +134,7 @@ def test_a_broadcast_reward_gives_an_attempt_the_same_credit_at_any_span_count()
             ]
         ).unsqueeze(0)
         weights = torch.tensor([t.loss_weight for t in trajectories])
-        return normalize_sequence_values(
+        return reduce_weighted_sequence_mean(
             values,
             mask,
             document_ids,
@@ -195,11 +195,9 @@ def test_critic_value_round_trip_preserves_rank_local_order():
     """
     from types import SimpleNamespace
 
-    from slim.backends.nemo.data_packing import (
-        build_token_budget_partitions,
-        fill_document_terminal_slots,
-    )
+    from slim.backends.nemo.data_packing import fill_document_terminal_slots
     from slim.ray.advantage_estimator import AdvantageEstimator
+    from slim.utils.seqlen_balancing import build_token_budget_partitions
 
     episodes = [_episode(0, [5, 7]), _episode(1, [4]), _episode(2, [6, 9, 5])]
     batches = _build(episodes, dp_size=2, num_steps=1)

@@ -179,11 +179,6 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
     return counts[0].clamp_min(1), counts[1].clamp_min(1)
 
 
-def pack_loss_weights(pack: dict, device) -> torch.Tensor:
-    """Per-document weights $w_d$ for one physical pack."""
-    return torch.tensor(pack["loss_weights"], dtype=torch.float32, device=device)
-
-
 def cp_sum(tensor: torch.Tensor, cp_group, *, differentiable: bool) -> torch.Tensor:
     if (
         cp_group is None
@@ -233,7 +228,7 @@ def sequence_mean_at_tokens(
     return output.unsqueeze(0)
 
 
-def normalize_token_sum(
+def reduce_token_mean(
     values: torch.Tensor,
     mask: torch.Tensor,
     global_tokens: torch.Tensor,
@@ -242,7 +237,7 @@ def normalize_token_sum(
     return (values * mask.to(values.dtype)).sum() / global_tokens
 
 
-def normalize_sequence_values(
+def reduce_weighted_sequence_mean(
     values: torch.Tensor,
     mask: torch.Tensor,
     document_ids: torch.Tensor,
@@ -263,28 +258,3 @@ def normalize_sequence_values(
     denominators = cp_sum(denominators, cp_group, differentiable=False).clamp_min(1)
     means = numerators / denominators * loss_weights.to(device=values.device, dtype=values.dtype)
     return means.sum() / global_sequences
-
-
-def normalize_policy_values(
-    values: torch.Tensor,
-    mask: torch.Tensor,
-    document_ids: torch.Tensor,
-    num_documents: int,
-    *,
-    sum_tokens: bool,
-    global_sequences: torch.Tensor,
-    global_tokens: torch.Tensor,
-    cp_group,
-    loss_weights: torch.Tensor,
-) -> torch.Tensor:
-    if sum_tokens:
-        return normalize_token_sum(values, mask, global_tokens)
-    return normalize_sequence_values(
-        values,
-        mask,
-        document_ids,
-        num_documents,
-        global_sequences,
-        cp_group,
-        loss_weights,
-    )

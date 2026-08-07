@@ -37,12 +37,12 @@ from slim.utils.logging_utils import configure_logger, init_tracking
 from slim.utils.memory_utils import clear_memory
 from slim.utils.processing_utils import load_processor, load_tokenizer
 from slim.utils.profile_utils import TrainProfiler
+from slim.utils.seqlen_balancing import build_token_budget_partitions
 from slim.utils.timer import Timer, inverse_timer, timer, with_defer
 from slim.utils.trajectory_batch import TrajectoryBatch
 
 from . import checkpoint
 from .data_packing import (
-    build_token_budget_partitions,
     pack_sequences,
     unpack_sequences,
     update_packed_targets,

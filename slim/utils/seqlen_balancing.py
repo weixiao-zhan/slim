@@ -1,3 +1,4 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +15,70 @@
 
 import copy
 import heapq
+
+
+def build_token_budget_partitions(
+    lengths: list[int],
+    max_tokens_per_pack: int,
+    *,
+    num_packs: int | None = None,
+) -> list[list[int]]:
+    """Partition sequences without exceeding the physical-pack token budget."""
+    if max_tokens_per_pack < 1:
+        raise ValueError("max_tokens_per_pack must be at least 1")
+    if not lengths:
+        return []
+    if any(length < 1 for length in lengths):
+        raise ValueError("sequence lengths must be at least 1")
+    oversized = [index for index, length in enumerate(lengths) if length > max_tokens_per_pack]
+    if oversized:
+        index = oversized[0]
+        raise ValueError(
+            f"sequence {index} has {lengths[index]} tokens, exceeding the physical-pack budget "
+            f"{max_tokens_per_pack}"
+        )
+
+    partitions: list[list[int]] = []
+    totals: list[int] = []
+    for index in sorted(range(len(lengths)), key=lambda item: (-lengths[item], item)):
+        for partition_index, total in enumerate(totals):
+            if total + lengths[index] <= max_tokens_per_pack:
+                partitions[partition_index].append(index)
+                totals[partition_index] += lengths[index]
+                break
+        else:
+            partitions.append([index])
+            totals.append(lengths[index])
+
+    if num_packs is None:
+        return partitions
+    if num_packs < len(partitions):
+        raise ValueError(
+            f"num_packs {num_packs} is below the minimum budget-safe pack count {len(partitions)}"
+        )
+    if num_packs > len(lengths):
+        raise ValueError(f"num_packs {num_packs} exceeds sequence count {len(lengths)}")
+
+    while len(partitions) < num_packs:
+        splittable = [index for index, partition in enumerate(partitions) if len(partition) > 1]
+        if not splittable:
+            raise RuntimeError(f"cannot split {len(partitions)} packs into {num_packs}")
+        partition_index = max(splittable, key=lambda index: totals[index])
+        partition = partitions[partition_index]
+        total = totals[partition_index]
+        split_position = min(
+            range(len(partition)),
+            key=lambda position: (
+                abs(total - 2 * lengths[partition[position]]),
+                partition[position],
+            ),
+        )
+        sequence_index = partition.pop(split_position)
+        totals[partition_index] -= lengths[sequence_index]
+        partitions.append([sequence_index])
+        totals.append(lengths[sequence_index])
+
+    return partitions
 
 
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
