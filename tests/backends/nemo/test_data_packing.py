@@ -8,7 +8,6 @@ from slim.backends.nemo.data_packing import (
     build_document_ids,
     build_model_batch,
     build_source_labels,
-    build_token_budget_partitions,
     build_training_fields,
     fill_document_terminal_slots,
     pack_sequences,
@@ -170,14 +169,3 @@ def test_pack_carries_per_document_loss_weights_in_partition_order():
 
     assert pack["loss_weights"] == [1.0, 0.5]
     assert [document["loss_weights"] for document in unpack_sequences(pack)] == [1.0, 0.5]
-
-
-@pytest.mark.unit
-def test_token_budget_partitions_remain_safe_when_pack_count_is_synchronized():
-    lengths = [2, 7, 7, 8, 8]
-
-    partitions = build_token_budget_partitions(lengths, 16, num_packs=3)
-
-    assert len(partitions) == 3
-    assert sorted(index for partition in partitions for index in partition) == list(range(len(lengths)))
-    assert all(sum(lengths[index] for index in partition) <= 16 for partition in partitions)

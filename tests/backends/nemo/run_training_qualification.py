@@ -27,7 +27,6 @@ from slim.backends.nemo.actor import ActorNeMoTrainer
 from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.critic import CriticNeMoTrainer
 from slim.backends.nemo.data_packing import (
-    build_token_budget_partitions,
     fill_document_terminal_slots,
     pack_sequences,
 )
@@ -37,6 +36,7 @@ from slim.backends.nemo.lr_scheduler import get_lr_scheduler
 from slim.backends.nemo.models import validate_config
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
+from slim.utils.seqlen_balancing import build_token_budget_partitions
 from slim.utils.trajectory_batch import flatten_episodes
 from slim.utils.types import Episode, Trajectory
 

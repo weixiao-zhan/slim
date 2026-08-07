@@ -7,9 +7,8 @@ import torch
 from slim.backends.nemo.actor import ActorNeMoTrainer
 from slim.backends.nemo.loss import (
     count_global_denominators,
-    normalize_policy_values,
-    normalize_sequence_values,
-    normalize_token_sum,
+    reduce_token_mean,
+    reduce_weighted_sequence_mean,
     selective_log_probs,
     sequence_mean_at_tokens,
 )
@@ -159,8 +158,8 @@ def test_policy_reductions_use_matching_global_denominators():
     mask = torch.ones_like(values)
     document_ids = torch.tensor([[1, 1, 2, 2]])
 
-    token_loss = normalize_token_sum(values, mask, torch.tensor(8.0))
-    sequence_loss = normalize_sequence_values(
+    token_loss = reduce_token_mean(values, mask, torch.tensor(8.0))
+    sequence_loss = reduce_weighted_sequence_mean(
         values,
         mask,
         document_ids,
@@ -181,7 +180,7 @@ def test_sequence_reduction_weights_an_episode_by_its_trajectory_count():
     mask = torch.ones_like(values)
     document_ids = torch.tensor([[1, 1, 2, 2, 3, 3]])
 
-    per_episode = normalize_sequence_values(
+    per_episode = reduce_weighted_sequence_mean(
         values,
         mask,
         document_ids,
@@ -190,7 +189,7 @@ def test_sequence_reduction_weights_an_episode_by_its_trajectory_count():
         cp_group=None,
         loss_weights=torch.tensor([0.5, 0.5, 1.0]),
     )
-    per_trajectory = normalize_sequence_values(
+    per_trajectory = reduce_weighted_sequence_mean(
         values,
         mask,
         document_ids,
@@ -212,7 +211,7 @@ def test_padding_documents_do_not_shift_the_sequence_reduction():
     mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
     document_ids = torch.tensor([[1, 1, 2, 2]])
 
-    reduced = normalize_sequence_values(
+    reduced = reduce_weighted_sequence_mean(
         values,
         mask,
         document_ids,
@@ -223,34 +222,6 @@ def test_padding_documents_do_not_shift_the_sequence_reduction():
     )
 
     torch.testing.assert_close(reduced, torch.tensor(3.0))
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("sum_tokens", "expected"),
-    [
-        (False, 3.75),
-        (True, 3.75),
-    ],
-)
-def test_policy_reducer_selects_sequence_mean_or_token_sum(sum_tokens, expected):
-    values = torch.tensor([[2.0, 4.0, 10.0, 14.0]])
-    mask = torch.ones_like(values)
-    document_ids = torch.tensor([[1, 1, 2, 2]])
-
-    reduced = normalize_policy_values(
-        values,
-        mask,
-        document_ids,
-        num_documents=2,
-        sum_tokens=sum_tokens,
-        global_sequences=torch.tensor(4.0),
-        global_tokens=torch.tensor(8.0),
-        cp_group=None,
-        loss_weights=torch.ones(2),
-    )
-
-    torch.testing.assert_close(reduced, torch.tensor(expected))
 
 
 @pytest.mark.unit
@@ -273,13 +244,24 @@ def test_gspo_sequence_means_preserve_gradient_flow():
 
 
 @pytest.mark.unit
-def test_token_sum_policy_keeps_entropy_and_kl_sequence_normalized(monkeypatch):
+@pytest.mark.parametrize(
+    ("normalization_unit", "expected_pg_loss"),
+    [
+        ("episode", 17.0 / 3.0),
+        ("token", 7.5),
+    ],
+)
+def test_policy_normalization_keeps_entropy_and_kl_sequence_normalized(
+    monkeypatch,
+    normalization_unit,
+    expected_pg_loss,
+):
     trainer = ActorNeMoTrainer.__new__(ActorNeMoTrainer)
     trainer.args = type(
         "Args",
         (),
         {
-            "loss_normalization_unit": "token",
+            "loss_normalization_unit": normalization_unit,
             "rollout_temperature": 1.0,
             "old_logprob_source": "rollout",
             "advantage_estimator": "grpo",
@@ -301,7 +283,10 @@ def test_token_sum_policy_keeps_entropy_and_kl_sequence_normalized(monkeypatch):
     )
     monkeypatch.setattr(
         "slim.backends.nemo.actor.compute_policy_loss",
-        lambda *args, **kwargs: (torch.ones(1, 4), torch.zeros(1, 4)),
+        lambda *args, **kwargs: (
+            torch.tensor([[2.0, 4.0, 10.0, 14.0]]),
+            torch.zeros(1, 4),
+        ),
     )
     monkeypatch.setattr(
         "slim.backends.nemo.actor.entropy_from_logits",
@@ -329,6 +314,6 @@ def test_token_sum_policy_keeps_entropy_and_kl_sequence_normalized(monkeypatch):
         loss_weights=torch.ones(2),
     )
 
-    torch.testing.assert_close(metrics["pg_loss"], torch.tensor(1.0))
+    torch.testing.assert_close(metrics["pg_loss"], torch.tensor(expected_pg_loss))
     torch.testing.assert_close(metrics["entropy_loss"], torch.tensor(6.0))
     torch.testing.assert_close(metrics["kl_loss"], torch.tensor(12.0))

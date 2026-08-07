@@ -20,7 +20,7 @@ from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .packed_cp_forward import prepare_forward
-from .loss import count_global_denominators, normalize_sequence_values, pack_loss_weights
+from .loss import count_global_denominators, reduce_weighted_sequence_mean
 from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
 
@@ -151,7 +151,11 @@ class CriticNeMoTrainer(NeMoTrainer):
         )
         if is_final:
             self._prepare_final_backward()
-        loss_weights = pack_loss_weights(pack, torch.cuda.current_device())
+        loss_weights = torch.tensor(
+            pack["loss_weights"],
+            dtype=torch.float32,
+            device=torch.cuda.current_device(),
+        )
         with self._sync_context(is_final), prepared.context_factory():
             values = self._forward_values(prepared)
             mask = prepared.fields["loss_masks"].to(values.dtype)
@@ -165,7 +169,7 @@ class CriticNeMoTrainer(NeMoTrainer):
             )
             document_ids = prepared.fields["document_ids"]
             num_documents = pack["cu_seqlens"].numel() - 1
-            value_loss = normalize_sequence_values(
+            value_loss = reduce_weighted_sequence_mean(
                 value_values,
                 mask,
                 document_ids,
@@ -174,7 +178,7 @@ class CriticNeMoTrainer(NeMoTrainer):
                 self.cp_group,
                 loss_weights,
             )
-            value_clipfrac = normalize_sequence_values(
+            value_clipfrac = reduce_weighted_sequence_mean(
                 clip_values,
                 mask,
                 document_ids,

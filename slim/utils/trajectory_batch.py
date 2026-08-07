@@ -54,7 +54,7 @@ class TrajectoryBatch:
             yield start, self.trajectories[start : start + size]
 
 
-def _desugar_reward(episode: Episode) -> None:
+def _materialize_trajectory_rewards(episode: Episode) -> None:
     """Broadcast an attempt-level reward onto every span of the attempt.
 
     Broadcast is the only sound distribution: trajectories carry no order
@@ -111,7 +111,7 @@ def flatten_episodes(episodes: list[Episode], *, loss_normalization_unit: str) -
     for episode in episodes:
         if not episode.trajectories:
             raise ValueError(f"episode {episode.episode_index} has no trajectories")
-        _desugar_reward(episode)
+        _materialize_trajectory_rewards(episode)
         weight = 1.0 / len(episode.trajectories) if loss_normalization_unit == "episode" else 1.0
         for trajectory in episode.trajectories:
             trajectory.episode_index = episode.episode_index
