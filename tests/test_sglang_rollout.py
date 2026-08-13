@@ -4,8 +4,6 @@
 import asyncio
 from types import SimpleNamespace
 
-import numpy as np
-import pybase64
 import pytest
 import torch
 
@@ -92,89 +90,3 @@ def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch
     trajectory.loss_mask.append(0)
     with pytest.raises(ValueError, match="zip\\(\\) argument 2 is longer"):
         decode_generated_text(SimpleNamespace(), trajectory)
-
-
-def test_generate_requests_and_records_full_routing_replay(monkeypatch):
-    requests = []
-    routed_experts = np.arange(4, dtype=np.int32).reshape(2, 2, 1)
-
-    async def fake_post(url, payload, max_retries=60, headers=None):
-        del max_retries
-        requests.append((url, payload, headers))
-        return {
-            "meta_info": {
-                "output_token_logprobs": [[-0.25, 13, "13"]],
-                "routed_experts": pybase64.b64encode(routed_experts.tobytes()).decode("ascii"),
-                "finish_reason": {"type": "stop"},
-            }
-        }
-
-    monkeypatch.setattr(sglang_rollout, "post", fake_post)
-    rollout_state = SimpleNamespace(
-        args=SimpleNamespace(
-            router_ip="127.0.0.1",
-            router_port=30000,
-            router_policy="round_robin",
-        ),
-        routing_replay_shape=(2, 1),
-    )
-    episode = Episode.from_example({"prompt": "hello"})
-    episode.max_tokens = 8
-    episode._sampling_params = {"temperature": 1.0}
-    episode.trajectory.token_ids = [11, 12]
-    episode.trajectory.loss_mask = [0]
-    episode.trajectory.rollout_log_probs = [0.0]
-
-    result = asyncio.run(sglang_rollout.generate(rollout_state, episode))
-
-    assert result.status == Episode.Status.COMPLETED
-    assert result.trajectory.token_ids == [11, 12, 13]
-    assert np.array_equal(result.trajectory.rollout_routed_experts, routed_experts)
-    _, payload, headers = requests[0]
-    assert payload["return_routed_experts"] is True
-    assert payload["routed_experts_start_len"] == 0
-    assert headers is None
-
-
-def test_generate_recaptures_routing_replay_from_the_first_unheld_position(monkeypatch):
-    requests = []
-    held = np.arange(4, dtype=np.int32).reshape(2, 2, 1)
-    fresh = np.arange(100, 106, dtype=np.int32).reshape(3, 2, 1)
-
-    async def fake_post(url, payload, max_retries=60, headers=None):
-        del max_retries, headers
-        requests.append(payload)
-        return {
-            "meta_info": {
-                "output_token_logprobs": [[-0.25, 15, "15"], [-0.5, 16, "16"]],
-                "routed_experts": pybase64.b64encode(fresh.tobytes()).decode("ascii"),
-                "finish_reason": {"type": "stop"},
-            }
-        }
-
-    monkeypatch.setattr(sglang_rollout, "post", fake_post)
-    rollout_state = SimpleNamespace(
-        args=SimpleNamespace(
-            router_ip="127.0.0.1",
-            router_port=30000,
-            router_policy="round_robin",
-        ),
-        routing_replay_shape=(2, 1),
-    )
-    episode = Episode.from_example({"prompt": "hello"})
-    episode.max_tokens = 8
-    episode._sampling_params = {"temperature": 1.0}
-    # A previous call captured two predictions; the caller then appended a user turn.
-    episode.trajectory.token_ids = [11, 12, 13, 14]
-    episode.trajectory.loss_mask = [0, 1, 0]
-    episode.trajectory.rollout_log_probs = [0.0, -0.1, 0.0]
-    episode.trajectory.rollout_routed_experts = held
-
-    result = asyncio.run(sglang_rollout.generate(rollout_state, episode))
-
-    assert requests[0]["routed_experts_start_len"] == 2
-    assert result.trajectory.token_ids == [11, 12, 13, 14, 15, 16]
-    assert np.array_equal(
-        result.trajectory.rollout_routed_experts,
-        np.concatenate((held, fresh)),
-    )

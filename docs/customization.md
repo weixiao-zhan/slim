@@ -42,6 +42,8 @@ Substitutes only the per-episode generation logic.
 The episode arrives holding one trajectory with prompt tokens already set; the function appends generated tokens to `episode.trajectory`, sets its `loss_mask`, and returns the completed episode.
 An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation span, and sets `episode.status` for the attempt as a whole.
 
+The function owns the sampling fields of its own requests, but should honor the token budget from `episode.max_tokens` and the `--rollout-temperature` that training scales its logits by.
+
 Per-episode override: set `episode.generate_function_path` to route specific episodes to a different generate function.
 
 ### Reward model (`--custom-rm-path`)

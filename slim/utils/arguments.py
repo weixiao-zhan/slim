@@ -142,19 +142,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="the temperature for the inference engine during rollout.",
             )
             parser.add_argument(
-                "--rollout-sampling-params",
-                type=json.loads,
-                default={},
-                help=(
-                    "Extra SGLang sampling params as a JSON dict, e.g. "
-                    "'{\"top_p\":0.95,\"top_k\":50,\"stop\":[\"<|im_end|>\"]}'. "
-                    "Merged on top of {temperature, no_stop_trim=True, "
-                    "spaces_between_special_tokens=False}. Use this for top_p, "
-                    "top_k, stop, stop_token_ids, skip_special_tokens, "
-                    "min_new_tokens, repetition_penalty, ignore_eos, etc."
-                ),
-            )
-            parser.add_argument(
                 "--max-context-len",
                 type=int,
                 default=None,
@@ -467,7 +454,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=1,
                 help="number of responses for each prompt in generation",
             )
-            parser.add_argument("--eval-temperature", type=float, default=None)
 
             return parser
 
