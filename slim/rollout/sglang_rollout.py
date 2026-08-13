@@ -221,6 +221,15 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+    routed_experts_start_len = 0
+    if state.routing_replay_shape is not None:
+        # Expert capture is indexed by KV-cache slot, so a position reports the routing
+        # of whichever forward pass last wrote its slot. Rows already held end where
+        # this call's fresh prefill begins, which is the first token of the new turn.
+        if trajectory.rollout_routed_experts is not None:
+            routed_experts_start_len = len(trajectory.rollout_routed_experts)
+        payload["return_routed_experts"] = True
+        payload["routed_experts_start_len"] = routed_experts_start_len
     if episode.has_multimodal:
         processor_output = {
             "format": "processor_output",
@@ -258,16 +267,21 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         import numpy as np
         import pybase64
 
-        b64 = meta_info.get("routed_experts")
-        if b64 is not None:
-            num_layers, top_k = state.routing_replay_shape
+        num_layers, top_k = state.routing_replay_shape
+        # The response covers [start_len, seqlen - 1), one row per prediction.
+        prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
-            def _decode_routed_experts(raw: str):
-                # pybase64 decode + numpy copy both release the GIL.
-                arr = np.frombuffer(pybase64.b64decode(raw.encode("utf-8")), dtype=np.int32).copy()
-                return arr.reshape(-1, num_layers, top_k)
+        def _decode_routed_experts(raw: str):
+            # pybase64 decode + numpy copy both release the GIL.
+            arr = np.frombuffer(pybase64.b64decode(raw.encode("ascii")), dtype=np.int32).copy()
+            return arr.reshape(prediction_count, num_layers, top_k)
 
-            trajectory.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
+        fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
+        trajectory.rollout_routed_experts = (
+            fresh
+            if trajectory.rollout_routed_experts is None
+            else np.concatenate((trajectory.rollout_routed_experts, fresh))
+        )
 
     episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
