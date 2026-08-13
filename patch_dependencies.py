@@ -90,62 +90,165 @@ def install_triton_configs(sglang_dir: Path) -> None:
 
 def patch_sglang_base_processor(base_processor: Path) -> bool:
     """Decode JSON tensor envelopes before SGLang consumes processor output."""
-    constants_anchor = (
-        "_IPC_POOL_HANDLE_CACHE = envs.SGLANG_USE_IPC_POOL_HANDLE_CACHE.get()\n"
-    )
-    transport_helper = '''
-
-def _decode_slim_tensor_transport(value):
-    """Restore tensors encoded for JSON transport by slim."""
-    if isinstance(value, dict) and value.get("__tensor__") is True:
-        import base64
-
-        dtype_name = value.get("dtype")
-        dtype = getattr(torch, str(dtype_name), None)
-        if not isinstance(dtype, torch.dtype):
-            raise ValueError(f"Unsupported tensor transport dtype: {dtype_name!r}")
-
-        shape = value.get("shape")
-        if not isinstance(shape, list) or not all(
-            isinstance(size, int) and size >= 0 for size in shape
-        ):
-            raise ValueError(f"Invalid tensor transport shape: {shape!r}")
-
-        raw = base64.b64decode(value.get("data", ""), validate=True)
-        tensor = torch.frombuffer(bytearray(raw), dtype=dtype).clone()
-        expected_elements = 1
-        for size in shape:
-            expected_elements *= size
-        if tensor.numel() != expected_elements:
-            raise ValueError(
-                "Tensor transport size mismatch: "
-                f"decoded={tensor.numel()}, expected={expected_elements}"
-            )
-        return tensor.reshape(shape)
-    if isinstance(value, dict):
-        return {
-            key: _decode_slim_tensor_transport(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_decode_slim_tensor_transport(item) for item in value]
-    return value
-'''
+    import_anchor = "from sglang.srt.server_args import get_global_server_args\n"
+    slim_import = "from slim.utils.processing_utils import decode_tensor_envelopes\n"
     data_anchor = "        all_loaded_data = base_output.organize_results()\n"
     decoded_data = (
         "        all_loaded_data = [\n"
-        "            (modality, _decode_slim_tensor_transport(item))\n"
+        "            (modality, decode_tensor_envelopes(item))\n"
         "            for modality, item in base_output.organize_results()\n"
         "        ]\n"
     )
     return patch_file(
         base_processor,
         [
-            (constants_anchor, constants_anchor + transport_helper),
+            (import_anchor, import_anchor + slim_import),
             (data_anchor, decoded_data),
         ],
         log_reason="base_processor.py processor-output tensor transport",
     )
+
+
+def patch_sglang_return_processor_outputs(sglang_dir: Path) -> tuple[Path, ...]:
+    """Add opt-in multimodal processor outputs to SGLang's per-request meta_info.
+
+    ``meta_info`` is where SGLang already reports ``routed_experts``, and it reaches
+    the OpenAI chat response per choice through ``return_meta_info``. Publishing the
+    processor tensors there gives both endpoints one key path and leaves the response
+    schema untouched.
+    """
+    protocol = sglang_dir / "srt" / "entrypoints" / "openai" / "protocol.py"
+    io_struct = sglang_dir / "srt" / "managers" / "io_struct.py"
+    tokenizer_manager = sglang_dir / "srt" / "managers" / "tokenizer_manager.py"
+    serving_chat = sglang_dir / "srt" / "entrypoints" / "openai" / "serving_chat.py"
+
+    patch_file(
+        protocol,
+        [
+            (
+                """    return_prompt_token_ids: bool = False
+    return_meta_info: bool = False
+""",
+                """    return_prompt_token_ids: bool = False
+    return_processor_outputs: bool = False
+    return_meta_info: bool = False
+""",
+            ),
+        ],
+        log_reason="SGLang OpenAI processor-output request flag",
+    )
+
+    patch_file(
+        io_struct,
+        [
+            (
+                """    # Whether to return prompt token IDs without computing logprobs
+    return_prompt_token_ids: bool = False
+
+    # Propagates trace context via Engine.generate/async_generate
+""",
+                """    # Whether to return prompt token IDs without computing logprobs
+    return_prompt_token_ids: bool = False
+    # Whether to return multimodal processor tensors
+    return_processor_outputs: bool = False
+
+    # Propagates trace context via Engine.generate/async_generate
+""",
+            ),
+            (
+                """            return_prompt_token_ids=self.return_prompt_token_ids,
+            external_trace_header=self.external_trace_header,
+""",
+                """            return_prompt_token_ids=self.return_prompt_token_ids,
+            return_processor_outputs=self.return_processor_outputs,
+            external_trace_header=self.external_trace_header,
+""",
+            ),
+        ],
+        log_reason="SGLang internal processor-output request flag",
+    )
+
+    import_anchor = "from sglang.utils import TypeBasedDispatcher, get_exception_traceback\n"
+    slim_import = "from slim.utils.processing_utils import encode_processor_outputs\n"
+    patch_file(
+        tokenizer_manager,
+        [
+            (import_anchor, import_anchor + slim_import),
+            (
+                """    # For return_prompt_token_ids: stores prompt token IDs captured after tokenization
+    prompt_token_ids: Optional[List[int]] = None
+""",
+                """    # For return_prompt_token_ids: stores prompt token IDs captured after tokenization
+    prompt_token_ids: Optional[List[int]] = None
+    processor_outputs: Optional[Dict[str, Any]] = None
+""",
+            ),
+            (
+                """        self._validate_one_request(obj, input_ids)
+        return self._create_tokenized_object(
+            obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
+        )
+""",
+                """        self._validate_one_request(obj, input_ids)
+        if isinstance(obj, GenerateReqInput) and obj.return_processor_outputs:
+            state = self.rid_to_state[obj.rid]
+            state.processor_outputs = encode_processor_outputs(mm_inputs)
+        return self._create_tokenized_object(
+            obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
+        )
+""",
+            ),
+            (
+                """            if getattr(recv_obj, "dp_ranks", None):
+""",
+                """            if (
+                state.processor_outputs is not None
+                and recv_obj.finished_reasons[i] is not None
+            ):
+                meta_info["processor_outputs"] = state.processor_outputs
+            if getattr(recv_obj, "dp_ranks", None):
+""",
+            ),
+        ],
+        log_reason="SGLang processor-output capture and transport",
+    )
+
+    patch_file(
+        serving_chat,
+        [
+            (
+                """            if request.return_meta_info:
+                raise ValueError(
+                    "return_meta_info is not supported with streaming. "
+                    "Please set stream=false when using return_meta_info=true."
+                )
+""",
+                """            if request.return_meta_info:
+                raise ValueError(
+                    "return_meta_info is not supported with streaming. "
+                    "Please set stream=false when using return_meta_info=true."
+                )
+            if request.return_processor_outputs:
+                raise ValueError(
+                    "return_processor_outputs is not supported with streaming. "
+                    "Please set stream=false when using return_processor_outputs=true."
+                )
+""",
+            ),
+            (
+                """            return_prompt_token_ids=request.return_prompt_token_ids,
+        )
+""",
+                """            return_prompt_token_ids=request.return_prompt_token_ids,
+            return_processor_outputs=request.return_processor_outputs,
+        )
+""",
+            ),
+        ],
+        log_reason="SGLang OpenAI processor-output request forwarding",
+    )
+
+    return protocol, io_struct, tokenizer_manager, serving_chat
 
 
 def patch_automodel_optional_transformer_engine(parallelizer: Path) -> bool:
@@ -273,11 +376,14 @@ def main() -> int:
     patch_automodel_optional_transformer_engine(parallelizer)
     patch_automodel_blockdiag_cp1(blockdiag_batch, blockdiag_exchange)
     patch_sglang_base_processor(base_processor)
+    sglang_openai_files = patch_sglang_return_processor_outputs(sglang_dir)
     install_triton_configs(sglang_dir)
     py_compile.compile(str(parallelizer), doraise=True)
     py_compile.compile(str(blockdiag_batch), doraise=True)
     py_compile.compile(str(blockdiag_exchange), doraise=True)
     py_compile.compile(str(base_processor), doraise=True)
+    for path in sglang_openai_files:
+        py_compile.compile(str(path), doraise=True)
 
     relax_ptrace_scope()
     return 0

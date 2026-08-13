@@ -115,8 +115,11 @@ causing routing-replay mismatch. The tradeoff is payload size (processor output 
 much larger than compressed PNG/JPEG), so they are packed as base64 binary envelopes rather
 than serialized as JSON arrays.
 
-The tensors are stored in `trajectory.multimodal_inputs` and sent to sglang inside the
-`image_data` field with `"format": "processor_output"`.
+The tensors are stored in `trajectory.multimodal_inputs`. When slim owns tokenization it sends them
+to sglang inside the `image_data` field with `"format": "processor_output"`; when the engine owns
+tokenization it returns them the same way. See
+[Tokenization Ownership](sglang-config.md#tokenization-ownership) for the field names on each
+endpoint.
 
 ### Routing Replay
 
