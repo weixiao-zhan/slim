@@ -25,11 +25,11 @@ def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
 
 @dataclass
 class Trajectory:
-    """One contiguous generation span by the policy.
+    """One contiguous generation by the policy.
 
     Lifecycle:
       1. Created empty, then filled by one or more generation calls that append
-         to the same span; sequence fields are Python lists.
+         to the same trajectory; sequence fields are Python lists.
       2. ``finalize_source_token_alignment()`` converts sequence fields to
          tensors and appends their terminal source-token slot.
       3. Flattened out of its episode, then packed and trained as one document.
@@ -53,7 +53,7 @@ class Trajectory:
     #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
 
     reward: float | None = None
-    text: str | None = None                            # decode of all tokens in this span
+    text: str | None = None                            # decode of all tokens in this trajectory
     generated_text: str | None = None                  # decode of targets selected by active prediction slots
 
     # Training targets, set after advantage estimation.
@@ -180,9 +180,9 @@ class Trajectory:
 class Episode:
     """One complete problem-solving attempt, from prompt to final answer.
 
-    An episode holds one or more :class:`Trajectory` objects. Each trajectory is
-    one contiguous generation span by the policy; trajectories carry no ordering
-    or dependency relation between them. The append-only rollout produces a
+    An episode holds one or more :class:`Trajectory` objects. Each is one
+    contiguous generation by the policy; they carry no ordering or dependency
+    relation between them. The append-only rollout produces a
     single trajectory, while interleaved thinking, sub-agent dispatch, and
     context compression produce several.
     """
@@ -217,11 +217,11 @@ class Episode:
 
     @classmethod
     def from_example(cls, example: dict) -> "Episode":
-        return cls(example=dict(example), trajectories=[Trajectory()])
+        return cls(example=dict(example))
 
     @property
     def trajectory(self) -> Trajectory:
-        """The sole generation span of an append-only attempt."""
+        """The sole trajectory of an append-only attempt."""
         if len(self.trajectories) != 1:
             raise ValueError(
                 f"episode has {len(self.trajectories)} trajectories; read `trajectories` instead"

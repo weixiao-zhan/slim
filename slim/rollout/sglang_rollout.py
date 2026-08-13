@@ -100,14 +100,14 @@ class GenerateState(metaclass=SingletonMeta):
 
 
 def decode_text(args: Namespace, trajectory: Trajectory) -> str:
-    """Decode one span's full prompt+response sequence. RM may parse it as needed."""
+    """Decode one trajectory's full prompt+response sequence. RM may parse it as needed."""
     if not len(trajectory.token_ids):
         return ""
     return GenerateState(args).tokenizer.decode(trajectory.token_ids)
 
 
 def decode_generated_text(args: Namespace, trajectory: Trajectory) -> str:
-    """Decode generated targets from a rollout-stage span."""
+    """Decode generated targets from a rollout-stage trajectory."""
     if trajectory.loss_mask is None:
         raise ValueError("loss_mask must be present")
     gen_ids = [
@@ -132,17 +132,11 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> None:
-    """Tokenize the prompt into the episode's sole span if not already set."""
-    trajectory = episode.trajectory
-    if trajectory.token_ids:
-        return
-
+async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Episode) -> Trajectory:
+    """The trajectory that opens an append-only attempt, holding the tokenized prompt."""
     prompt = episode.example.get("prompt", "")
     tools = episode.example.get("tools")
-
-    if episode.has_multimodal and state.processor is None:
-        raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
+    multimodal_inputs = None
 
     if episode.has_multimodal:
         prompt_text = (
@@ -166,7 +160,7 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
             return_mm_token_type_ids=False,
         )
         prompt_ids = processor_output["input_ids"][0].tolist()
-        trajectory.multimodal_inputs = {
+        multimodal_inputs = {
             k: v
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
@@ -184,10 +178,13 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
         # Raw string prompt
         prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
-    trajectory.token_ids = prompt_ids
     edge_len = max(len(prompt_ids) - 1, 0)
-    trajectory.loss_mask = [0] * edge_len
-    trajectory.rollout_log_probs = [0.0] * edge_len
+    return Trajectory(
+        token_ids=prompt_ids,
+        loss_mask=[0] * edge_len,
+        rollout_log_probs=[0.0] * edge_len,
+        multimodal_inputs=multimodal_inputs,
+    )
 
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
@@ -196,9 +193,8 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
-    await _prepare_episode_tokens(state, episode)
-    trajectory = episode.trajectory
-    assert trajectory.rollout_log_probs is not None
+    trajectory = await _build_trajectory_with_first_prompt(state, episode)
+    episode.trajectories.append(trajectory)
 
     max_new_tokens = episode.max_tokens - len(trajectory.token_ids)
     if max_new_tokens <= 0:
@@ -317,7 +313,7 @@ async def generate_and_rm(
     if not args.group_rm and episode.status != Episode.Status.ABORTED and _needs_reward(episode):
         from .rm_hub import async_rm
 
-        episode.reward = await async_rm(args, episode)
+        await async_rm(args, episode)
     return episode
 
 
@@ -343,9 +339,7 @@ async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation
     if not state.aborted and args.group_rm:
         from .rm_hub import batched_async_rm
 
-        rewards = await batched_async_rm(args, group.episodes)
-        for episode, reward in zip(group.episodes, rewards, strict=False):
-            episode.reward = reward
+        await batched_async_rm(args, group.episodes)
 
     group.completed = all(ep.status != Episode.Status.ABORTED for ep in group.episodes)
     return group

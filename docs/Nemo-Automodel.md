@@ -169,7 +169,7 @@ L_{\mathrm{sequence}} = \frac{1}{\sum_d w_d}\sum_d w_d
 {\max(1,\sum_t m_{d,t})}
 $$
 
-A document is one trajectory. `--loss-normalization-unit` sets $w_d$: `episode` writes $1/k$ for an attempt with $k$ trajectories so $\sum_d w_d$ counts attempts, and `trajectory` writes $1$ so it counts spans. Padding documents carry $w_d = 0$ and drop out of both the numerator and the denominator.
+A document is one trajectory. `--loss-normalization-unit` sets $w_d$: `episode` writes $1/k$ for an attempt with $k$ trajectories so $\sum_d w_d$ counts attempts, and `trajectory` writes $1$ so it counts total numbers of trajectories. Padding documents carry $w_d = 0$ and drop out of both the numerator and the denominator.
 
 GSPO computes differentiable per-document CP reductions before expanding each sequence statistic back to its local tokens.
 

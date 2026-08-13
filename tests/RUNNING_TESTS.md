@@ -113,7 +113,7 @@ Two kinds of tests live here:
 | `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-2B |
 | `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32`, `fp8_ue8m0` | Qwen3.5-2B (+ FP8 forges) |
 | `sweep_moe_rollout.sh` | MoE rollout parallelism (R3 on) | `tp1`, `tp4`, `tp4_ep4` | Qwen3.6-35B-A3B (MoE) |
-| `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 14 combos (see below) | Qwen3.5-2B |
+| `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 10 combos (see below) | Qwen3.5-2B |
 
 ```bash
 hf download Qwen/Qwen3.5-2B --local-dir models/Qwen3.5-2B
@@ -141,11 +141,6 @@ size); `grpo_std`, `gspo`, `ppo` (estimators, PPO adding the trajectory-keyed cr
 round trip); `fixed_mbs` (fixed micro-batching, which requires exactly equal pack counts
 per rank with no dynamic re-split available); `no_balance` (round-robin instead of
 Karmarkar-Karp).
-
-The four `multi_traj_*` combos route through
-`tests/multi_trajectory_generate.py`, whose generate function makes two generation calls
-per attempt so every episode packs as $k = 2$ documents with `loss_weight` $1/2$. This is
-the path the two-level layout exists for; the other combos are all single-span.
 
 ### Standalone tests
 

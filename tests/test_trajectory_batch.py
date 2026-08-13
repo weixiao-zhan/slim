@@ -17,11 +17,11 @@ from slim.utils.types import Episode, Trajectory
 NUM_GPUS = 0
 
 
-def _episode(index: int, span_lengths: list[int], reward: float = 1.0, group_index: int = 0) -> Episode:
+def _episode(index: int, trajectory_lengths: list[int], reward: float = 1.0, group_index: int = 0) -> Episode:
     episode = Episode(
         trajectories=[
             Trajectory(token_ids=list(range(length)), loss_mask=[1] * (length - 1))
-            for length in span_lengths
+            for length in trajectory_lengths
         ],
         reward=reward,
         episode_index=index,
@@ -69,7 +69,7 @@ def test_every_rank_holds_the_same_document_count_per_step(dp_size, num_steps, b
     step_sizes = {len(step) for batch in batches for _, step in batch.steps()}
     assert len(step_sizes) == 1
 
-    # Every real span survives the split exactly once, and padding is bounded.
+    # Every real trajectory survives the split exactly once, and padding is bounded.
     real = [t for batch in batches for t in batch.trajectories if t.episode_index is not None]
     assert len(real) == sum(len(episode.trajectories) for episode in episodes)
     assert len({id(t) for t in real}) == len(real)
@@ -94,8 +94,8 @@ def test_regrouping_recovers_every_attempt_after_the_split():
     batches = _build(episodes, dp_size=2, num_steps=1)
     regrouped = group_by_episode([t for batch in batches for t in batch.trajectories])
 
-    assert [len(spans) for spans in regrouped] == [3, 1, 2]
-    assert all(len({t.episode_index for t in spans}) == 1 for spans in regrouped)
+    assert [len(trajectories) for trajectories in regrouped] == [3, 1, 2]
+    assert all(len({t.episode_index for t in trajectories}) == 1 for trajectories in regrouped)
 
 
 @pytest.mark.unit
@@ -116,8 +116,8 @@ def test_episode_normalization_makes_the_loss_denominator_count_attempts():
 
 
 @pytest.mark.unit
-def test_a_broadcast_reward_gives_an_attempt_the_same_credit_at_any_span_count():
-    """Under `episode`, reward R over k spans still contributes total credit R."""
+def test_a_broadcast_reward_gives_an_attempt_the_same_credit_at_any_trajectory_count():
+    """Under `episode`, reward R over k trajectories still contributes total credit R."""
     single = _build([_episode(0, [4])], dp_size=1, num_steps=1)[0].trajectories
     split = _build([_episode(0, [4, 4, 4, 4])], dp_size=1, num_steps=1)[0].trajectories
 
@@ -162,12 +162,12 @@ def test_padding_documents_pack_and_reduce_inertly():
 
     assert len(trajectories) == 4
     assert weight_sum.item() == pytest.approx(3.0)
-    # Three real spans of four tokens each contribute three unmasked predictions apiece.
+    # Three real trajectories of four tokens each contribute three unmasked predictions apiece.
     assert token_count.item() == 9
 
 
 @pytest.mark.unit
-def test_group_statistics_survive_spans_landing_on_different_ranks():
+def test_group_statistics_survive_trajectories_landing_on_different_ranks():
     episodes = [
         _episode(0, [3, 4], reward=0.0, group_index=0),
         _episode(1, [5], reward=1.0, group_index=0),
@@ -178,11 +178,11 @@ def test_group_statistics_survive_spans_landing_on_different_ranks():
     batches = _build(episodes, dp_size=2, num_steps=1)
     regrouped = group_by_episode([t for batch in batches for t in batch.trajectories])
 
-    for spans in regrouped:
-        assert len({t.group_index for t in spans}) == 1
+    for trajectories in regrouped:
+        assert len({t.group_index for t in trajectories}) == 1
     by_group: dict[int, set[int]] = {}
-    for spans in regrouped:
-        by_group.setdefault(spans[0].group_index, set()).add(spans[0].episode_index)
+    for trajectories in regrouped:
+        by_group.setdefault(trajectories[0].group_index, set()).add(trajectories[0].episode_index)
     assert by_group == {0: {0, 1}, 1: {2, 3}}
 
 
@@ -190,7 +190,7 @@ def test_group_statistics_survive_spans_landing_on_different_ranks():
 def test_critic_value_round_trip_preserves_rank_local_order():
     """`compute_values` reconstructs positionally, so the two sides must agree.
 
-    Each span is given a distinctive constant, so any shift in the mapping between
+    Each trajectory is given a distinctive constant, so any shift in the mapping between
     a pack's `_document_indices` and the rank-local list surfaces as a mismatch.
     """
     from types import SimpleNamespace
@@ -243,50 +243,7 @@ def test_critic_value_round_trip_preserves_rank_local_order():
 
 
 @pytest.mark.unit
-def test_multi_trajectory_generate_produces_two_flattenable_spans(monkeypatch):
-    """The agentic generate function must leave every span edge-aligned."""
-    import asyncio
-
-    import tests.multi_trajectory_generate as multi_trajectory
-
-    async def fake_span(state, episode):
-        trajectory = episode.trajectory
-        generated = list(range(900, 910))
-        trajectory.token_ids.extend(generated)
-        trajectory.loss_mask.extend([1] * len(generated))
-        trajectory.rollout_log_probs.extend([-0.1] * len(generated))
-        episode.status = Episode.Status.COMPLETED
-        return episode
-
-    monkeypatch.setattr(multi_trajectory, "generate_span", fake_span)
-
-    episode = Episode.from_example({"prompt": "p"})
-    episode.trajectory.token_ids = list(range(200))
-    episode.trajectory.loss_mask = [0] * 199
-    episode.trajectory.rollout_log_probs = [0.0] * 199
-    episode.max_tokens = 4096
-
-    episode = asyncio.run(multi_trajectory.generate(None, episode))
-
-    first, second = episode.trajectories
-    # The second span starts from a compressed view of the first, not an extension.
-    assert second.token_ids[:64] == first.token_ids[-64:]
-    for trajectory in episode.trajectories:
-        assert len(trajectory.loss_mask) == len(trajectory.token_ids) - 1
-        assert len(trajectory.rollout_log_probs) == len(trajectory.token_ids) - 1
-
-    episode.reward = 1.0
-    episode.episode_index = 0
-    episode.group_index = 0
-    episode.finalize_source_token_alignment()
-    batch = _build([episode], dp_size=1, num_steps=1)[0]
-
-    assert [t.loss_weight for t in batch.trajectories] == [0.5, 0.5]
-    assert [t.reward for t in batch.trajectories] == [1.0, 1.0]
-
-
-@pytest.mark.unit
-def test_flatten_rejects_an_episode_with_no_spans():
+def test_flatten_rejects_an_episode_with_no_trajectories():
     episode = Episode(trajectories=[], reward=1.0, episode_index=0)
 
     with pytest.raises(ValueError, match="has no trajectories"):

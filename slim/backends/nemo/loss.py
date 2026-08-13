@@ -150,9 +150,9 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
 
     The sequence-level denominator is $\sum_d w_d$ rather than a document count,
     so it agrees with whichever unit the advantage baseline uses. Under
-    `--loss-normalization-unit episode` an attempt's spans each weigh $1/k$ and the
-    sum counts attempts; under `trajectory` every span weighs $1$ and it counts
-    spans. Padding documents weigh $0$ and drop out of both.
+    `--loss-normalization-unit episode` an attempt's trajectories each weigh $1/k$ and the
+    sum counts attempts; under `trajectory` each weighs $1$ and the sum counts
+    trajectories. Padding documents weigh $0$ and drop out of both.
     """
     weight_sum = 0.0
     token_count = 0

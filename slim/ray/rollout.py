@@ -56,7 +56,7 @@ def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Ep
     episodes = []
     for record in records:
         record = dict(record)
-        record["trajectories"] = [Trajectory(**span) for span in record["trajectories"]]
+        record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
         episodes.append(Episode(**record))
     logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
     return episodes
@@ -1103,12 +1103,12 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 
 
 def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
-    """Mean over spans of each span's mean rollout log-prob across response tokens.
+    """Mean over trajectories of each one's mean rollout log-prob across response tokens.
 
     This belongs to rollout logging because these log-probs are emitted by the
     rollout engine before actor-side training diagnostics are computed.
     """
-    per_span_means = []
+    per_trajectory_means = []
     for trajectory in (t for ep in episodes for t in ep.trajectories):
         if trajectory.rollout_log_probs is None:
             continue
@@ -1118,10 +1118,10 @@ def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
         else:
             mask = torch.as_tensor(trajectory.loss_mask, dtype=torch.float32)
         denom = mask.sum().clamp_min(1)
-        per_span_means.append(((log_probs * mask).sum() / denom).item())
-    if not per_span_means:
+        per_trajectory_means.append(((log_probs * mask).sum() / denom).item())
+    if not per_trajectory_means:
         return None
-    return sum(per_span_means) / len(per_span_means)
+    return sum(per_trajectory_means) / len(per_trajectory_means)
 
 
 def _compute_episode_metrics(args, episodes: list[Episode]):

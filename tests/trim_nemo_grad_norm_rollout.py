@@ -27,13 +27,13 @@ def _slice_predictions(value, prediction_count: int):
     return value[:prediction_count]
 
 
-def _trim_span(span: dict, max_response_tokens: int) -> tuple[dict, int]:
-    """Bound one span's response, returning the trimmed span and its token count."""
-    trajectory = Trajectory(**span)
+def _trim_trajectory(traj: dict, max_response_tokens: int) -> tuple[dict, int]:
+    """Bound one trajectory's response, returning the trimmed trajectory and its token count."""
+    trajectory = Trajectory(**traj)
     mask = torch.as_tensor(trajectory.loss_mask)
     generated_positions = torch.nonzero(mask, as_tuple=False).flatten()
     if generated_positions.numel() == 0:
-        return span, len(trajectory.token_ids)
+        return traj, len(trajectory.token_ids)
 
     first_generated_position = int(generated_positions[0].item())
     prediction_count = min(
@@ -41,7 +41,7 @@ def _trim_span(span: dict, max_response_tokens: int) -> tuple[dict, int]:
         first_generated_position + max_response_tokens,
     )
     token_count = prediction_count + 1
-    trimmed = dict(span)
+    trimmed = dict(traj)
     trimmed["token_ids"] = trajectory.token_ids[:token_count]
     trimmed["loss_mask"] = _slice_predictions(trajectory.loss_mask, prediction_count)
     trimmed["rollout_log_probs"] = _slice_predictions(
@@ -61,18 +61,18 @@ def _trim_span(span: dict, max_response_tokens: int) -> tuple[dict, int]:
 
 
 def trim_record(record: dict, max_response_tokens: int) -> tuple[dict, int]:
-    """Bound every span of one attempt."""
-    spans = []
+    """Bound every trajectory of one attempt."""
+    trajectories = []
     token_counts = []
-    for span in record["trajectories"]:
-        trimmed, token_count = _trim_span(span, max_response_tokens)
-        spans.append(trimmed)
+    for traj in record["trajectories"]:
+        trimmed, token_count = _trim_trajectory(traj, max_response_tokens)
+        trajectories.append(trimmed)
         token_counts.append(token_count)
 
     trimmed_record = dict(record)
-    trimmed_record["trajectories"] = spans
+    trimmed_record["trajectories"] = trajectories
     trimmed_record["max_tokens"] = max(token_counts, default=0)
-    if any(len(span["token_ids"]) < len(original["token_ids"]) for span, original in zip(spans, record["trajectories"], strict=True)):
+    if any(len(traj["token_ids"]) < len(original["token_ids"]) for traj, original in zip(trajectories, record["trajectories"], strict=True)):
         trimmed_record["status"] = Episode.Status.TRUNCATED
     return trimmed_record, sum(token_counts)
 
@@ -87,7 +87,7 @@ def main() -> None:
         raise ValueError(f"{args.input} does not contain an episodes list")
 
     original_tokens = sum(
-        len(span["token_ids"]) for record in records for span in record["trajectories"]
+        len(traj["token_ids"]) for record in records for traj in record["trajectories"]
     )
     trimmed_records = []
     token_counts = []

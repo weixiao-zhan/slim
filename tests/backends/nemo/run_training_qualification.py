@@ -246,7 +246,7 @@ def _training_pack(
 
 
 def _load_rollout_trajectories(path: Path, samples_per_prompt: int = 8) -> list[Trajectory]:
-    """Rebuild the saved rollout and give every span its group-centered advantage."""
+    """Rebuild the saved rollout and give every trajectory its group-centered advantage."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     records = payload.get("episodes") if isinstance(payload, dict) else None
     if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
@@ -257,7 +257,7 @@ def _load_rollout_trajectories(path: Path, samples_per_prompt: int = 8) -> list[
     episodes = []
     for record in records:
         record = dict(record)
-        record["trajectories"] = [Trajectory(**span) for span in record["trajectories"]]
+        record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
         episode = Episode(**record)
         episode.finalize_source_token_alignment()
         episodes.append(episode)

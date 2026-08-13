@@ -74,16 +74,19 @@ class FakeGenerateState:
 
 
 async def custom_generate(state, episode: Episode):
-    episode.trajectory.token_ids = [11, 12, 13]
-    episode.trajectory.generated_text = "generated"
+    episode.trajectories.append(Trajectory(token_ids=[11, 12, 13], generated_text="generated"))
     episode.reward = 0.25
     episode.status = Episode.Status.COMPLETED
     return episode
 
 
 async def custom_generate_with_evaluation(state, episode: Episode, evaluation: bool = False):
-    episode.trajectory.token_ids = [21, 22]
-    episode.trajectory.generated_text = "eval-generated" if evaluation else "train-generated"
+    episode.trajectories.append(
+        Trajectory(
+            token_ids=[21, 22],
+            generated_text="eval-generated" if evaluation else "train-generated",
+        )
+    )
     episode.reward = 0.5 if evaluation else 0.75
     episode.status = Episode.Status.COMPLETED
     episode.example["evaluation"] = evaluation
@@ -91,10 +94,9 @@ async def custom_generate_with_evaluation(state, episode: Episode, evaluation: b
 
 
 async def custom_generate_multi_trajectory(state, episode: Episode):
-    """Agentic attempt: a second span appended for a sub-agent dispatch."""
-    episode.trajectories[0].token_ids = [31, 32]
-    episode.trajectories[0].generated_text = "main-span"
-    episode.trajectories.append(Trajectory(token_ids=[33, 34], generated_text="sub-agent-span"))
+    """Agentic attempt: a second trajectory appended for a sub-agent dispatch."""
+    episode.trajectories.append(Trajectory(token_ids=[31, 32], generated_text="main-trajectory"))
+    episode.trajectories.append(Trajectory(token_ids=[33, 34], generated_text="sub-agent-trajectory"))
     episode.reward = 0.5
     episode.status = Episode.Status.COMPLETED
     return episode
@@ -141,8 +143,7 @@ def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state,
     sglang_rollout = patch_generate_state
 
     async def official_default_generate(state, episode: Episode):
-        episode.trajectory.token_ids = [31, 32]
-        episode.trajectory.generated_text = "default-generate"
+        episode.trajectories.append(Trajectory(token_ids=[31, 32], generated_text="default-generate"))
         episode.reward = 1.0
         episode.status = Episode.Status.COMPLETED
         return episode
@@ -174,7 +175,7 @@ def test_generate_and_rm_decodes_every_trajectory(patch_generate_state):
     result = asyncio.run(generate_and_rm(args, Episode.from_example({"prompt": "prompt"}), evaluation=False))
     assert_episode_contract(result)
     assert [t.text for t in result.trajectories] == ["31 32", "33 34"]
-    assert [t.generated_text for t in result.trajectories] == ["main-span", "sub-agent-span"]
+    assert [t.generated_text for t in result.trajectories] == ["main-trajectory", "sub-agent-trajectory"]
 
 
 def test_custom_generate_function_path_supports_user_override(patch_generate_state):

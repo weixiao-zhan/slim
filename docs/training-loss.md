@@ -26,7 +26,7 @@ The two design axes are:
 `--advantage-estimator` controls how per-token advantages $A_{i,t}$ are derived from rewards.
 The driver invokes `AdvantageEstimator.compute_training_targets()` after rollout. It regroups the flattened trajectories by `episode_index` so baselines see an attempt as a unit, then writes targets through `Trajectory.set_train_targets()`.
 
-Reward lives on the trajectory. `Episode.reward` is shorthand for the common case where one scalar scores the whole attempt, and it is broadcast to every span at the flatten. Broadcast is the only sound distribution: with no order relation among spans there is no distinguished one to receive the reward, and crediting an arbitrary span would zero the learning signal for the rest of the attempt.
+Reward lives on the trajectory. The reward model can score each `Trajectory.reward`, or score `Episode.reward`, which is short-hand for broadcasting to every trajectory.
 
 ### `ppo_gae`
 
@@ -40,7 +40,7 @@ $$A_{i,t} = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{i,t+l}$$
 The reward is placed at the last response token of each trajectory; all others have $R_{i,t} = 0$.
 Masked prompt, observation, and terminal source positions do not advance the GAE recurrence and receive zero advantage.
 
-The recurrence runs per trajectory. A trajectory is contiguous, so the recurrence within one is sound; it does not cross span boundaries, since bootstrapping $V$ from one span into another would require knowing which span follows which. Each span computes its own return from the reward it received.
+The recurrence runs per trajectory, which is contiguous, so the recurrence within one is sound; it does not cross trajectory boundaries, since bootstrapping $V$ from one into another would require knowing which follows which. Each computes its own return from the reward it received.
 
 ### `grpo` (default)
 
@@ -53,7 +53,7 @@ For group $g$ with episodes $e \in g$, let $R_e$ be the mean of episode $e$'s tr
 $$A_{\tau} = \frac{R_\tau - \text{mean}_{e \in g}(R_e)}{\text{std}_{e \in g}(R_e)}$$
 
 The baseline and scale come from episode-level statistics, so an episode that made 20 generation calls does not dominate the group mean of one that made a single call.
-The numerator is the trajectory's own reward, so within-episode differentiation survives when rewards are genuinely per-span.
+The numerator is the trajectory's own reward, so within-episode differentiation survives when rewards are genuinely per-trajectory.
 For single-trajectory episodes this reduces to the per-sequence form.
 
 `--disable-group-advantage-std-normalization` keeps the mean-centering step but omits division by the group standard deviation.
@@ -162,11 +162,11 @@ $$L = \frac{1}{\sum_d w_d} \sum_{d} w_d \cdot \frac{\sum_t v_{d,t} m_{d,t}}{\sum
 
 Under `episode`, $\sum_d w_d$ counts attempts and the loss is a mean over episodes of the mean over each episode's trajectories. Under `trajectory` it is the document mean. The two coincide for single-trajectory episodes.
 
-`episode` is the default because group centering zeroes the mean advantage per *episode*, so the denominator must use the same unit. Otherwise an episode with $k$ trajectories carries $k$ times the gradient weight of a single-trajectory episode and the advantage mean over the gradient is not zero. It is also the setting under which a broadcast episode reward stays credit-neutral: reward $R$ spread over $k$ spans each weighing $1/k$ gives the attempt total credit $R$.
+`episode` is the default because group centering zeroes the mean advantage per *episode*, so the denominator must use the same unit. Otherwise an episode with $k$ trajectories carries $k$ times the gradient weight of a single-trajectory episode and the advantage mean over the gradient is not zero. It is also the setting under which a broadcast episode reward stays credit-neutral: reward $R$ spread over $k$ trajectories each weighing $1/k$ gives the attempt total credit $R$.
 
 Choosing `trajectory` weights a 50-call attempt 50 times as heavily as a single-call one, which is deliberate only when the generation call is genuinely the unit of interest. Under `token`, per-token losses are summed rather than averaged within each document, weighting longer responses more.
 
-`Trajectory.loss_weight` carries $w_d$: the flattener writes $1/k_e$ under `episode`, $1.0$ under `trajectory`, and $0.0$ for padding spans. The loss applies $w_d$ and divides by $\sum_d w_d$ with no mode switch, and `count_global_denominators` reduces that one sum over the DP group.
+`Trajectory.loss_weight` carries $w_d$: the flattener writes $1/k_e$ under `episode`, $1.0$ under `trajectory`, and $0.0$ for padding trajectories. The loss applies $w_d$ and divides by $\sum_d w_d$ with no mode switch, and `count_global_denominators` reduces that one sum over the DP group.
 
 ## CLI Reference
 

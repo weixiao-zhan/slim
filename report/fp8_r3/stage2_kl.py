@@ -98,7 +98,7 @@ def records_to_trajectories(d, limit=None):
                 traj.rollout_routed_experts = torch.from_numpy(arr).to(torch.int32)
         if rec.get("has_mm"):
             # Restore the processor-output tensors (pixel_values, image_grid_thw, ...) onto the
-            # span so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
+            # trajectory so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
             mm = C.load_mm_inputs(d, rec["sample_idx"])
             if mm is not None:
                 traj.multimodal_inputs = mm
@@ -171,7 +171,7 @@ def main():
     trajectories_meta = records_to_trajectories(src_dir, limit=args_cli.limit)
     trajectories = [traj for (_, _, traj) in trajectories_meta]
 
-    # One optimizer step covers every span so _packed_data packs them together.
+    # One optimizer step covers every trajectory so _packed_data packs them together.
     from slim.utils.trajectory_batch import TrajectoryBatch
 
     batch = TrajectoryBatch(trajectories=trajectories)

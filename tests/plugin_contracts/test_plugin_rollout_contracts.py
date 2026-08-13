@@ -39,22 +39,23 @@ def run_contract_test_file() -> None:
 
 def make_episode(index: int, reward: float = 1.0) -> Episode:
     ep = Episode.from_example({"index": index})
-    ep.trajectory.token_ids = [1000 + index, 2000 + index]
-    ep.trajectory.generated_text = f"response-{index}"
+    ep.trajectories.append(
+        Trajectory(token_ids=[1000 + index, 2000 + index], generated_text=f"response-{index}")
+    )
     ep.reward = reward
     return ep
 
 
-def make_multi_trajectory_episode(index: int, num_spans: int = 2) -> Episode:
-    """Agentic attempt: several generation spans, each scored on its own."""
+def make_multi_trajectory_episode(index: int, num_trajectories: int = 2) -> Episode:
+    """Agentic attempt: several trajectories, each scored on its own."""
     ep = Episode.from_example({"index": index})
     ep.trajectories = [
         Trajectory(
-            token_ids=[1000 + index, 2000 + index + span],
-            generated_text=f"response-{index}-span-{span}",
-            reward=float(span),
+            token_ids=[1000 + index, 2000 + index + nth],
+            generated_text=f"response-{index}-trajectory-{nth}",
+            reward=float(nth),
         )
-        for span in range(num_spans)
+        for nth in range(num_trajectories)
     ]
     return ep
 
@@ -88,8 +89,12 @@ def valid_rollout_function(args, rollout_id, data_source, evaluation=False):
     for group_index, example in enumerate(examples):
         for sample_index in range(2):
             ep = Episode.from_example({"index": group_index})
-            ep.trajectory.token_ids = [group_index, sample_index, rollout_id]
-            ep.trajectory.generated_text = f"group-{group_index}-sample-{sample_index}"
+            ep.trajectories.append(
+                Trajectory(
+                    token_ids=[group_index, sample_index, rollout_id],
+                    generated_text=f"group-{group_index}-sample-{sample_index}",
+                )
+            )
             ep.reward = float(group_index + sample_index)
             episodes.append(ep)
     return RolloutFnTrainOutput(episodes=episodes, metrics={"source": "contract"})
@@ -183,7 +188,7 @@ def test_misaligned_rollout_plugin_is_rejected():
 
 
 def test_multi_trajectory_episode_satisfies_contract():
-    ep = make_multi_trajectory_episode(0, num_spans=3)
+    ep = make_multi_trajectory_episode(0, num_trajectories=3)
     assert_episode_contract(ep)
     assert ep.get_reward_value() == 1.0
     with pytest.raises(ValueError, match="3 trajectories"):

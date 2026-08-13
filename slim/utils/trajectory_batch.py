@@ -13,11 +13,11 @@ from slim.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from slim.utils.types import Episode, Trajectory
 
 # Per-document loss weight $w_d$ for each normalization unit. `episode` spreads one
-# unit of weight over an attempt's spans so every attempt counts once; `trajectory`
-# weights every span equally; `token` denominates the policy term in tokens instead.
+# unit of weight over an attempt's trajectories so every attempt counts once; `trajectory`
+# weights every trajectory equally; `token` denominates the policy term in tokens instead.
 LOSS_NORMALIZATION_UNITS = ("episode", "trajectory", "token")
 
-# Optional sequence fields a padding document must mirror when the real spans carry them.
+# Optional sequence fields a padding document must mirror when the real trajectories carry them.
 _OPTIONAL_FIELD_DTYPES = {
     "rollout_log_probs": torch.float32,
     "rollout_routed_experts": torch.int32,
@@ -55,21 +55,21 @@ class TrajectoryBatch:
 
 
 def _materialize_trajectory_rewards(episode: Episode) -> None:
-    """Broadcast an attempt-level reward onto every span of the attempt.
+    """Broadcast an attempt-level reward onto every trajectory of the attempt.
 
     Broadcast is the only sound distribution: trajectories carry no order
-    relation, so there is no distinguished span to receive the reward. Under
-    `--loss-normalization-unit episode` each span weighs $1/k$, so an attempt
+    relation, so there is no distinguished trajectory to receive the reward. Under
+    `--loss-normalization-unit episode` each trajectory weighs $1/k$, so an attempt
     scored $R$ still contributes total credit $R$.
     """
-    span_rewards = [trajectory.reward for trajectory in episode.trajectories]
+    trajectory_rewards = [trajectory.reward for trajectory in episode.trajectories]
     if episode.reward is None:
-        if any(reward is None for reward in span_rewards):
+        if any(reward is None for reward in trajectory_rewards):
             raise ValueError(
                 f"episode {episode.episode_index} needs a reward on the episode or on every trajectory"
             )
         return
-    if any(reward is not None for reward in span_rewards):
+    if any(reward is not None for reward in trajectory_rewards):
         raise ValueError(
             f"episode {episode.episode_index} sets both episode and trajectory rewards; "
             "reward level is exclusive"
@@ -88,7 +88,7 @@ def _padding_trajectory(pad_token_id: int, optional_shapes: dict[str, tuple[int,
 
     `pack_sequences` requires each optional sequence field to be present for every
     document of a pack or for none, so padding mirrors whichever fields the real
-    spans carry.
+    trajectories carry.
     """
     trajectory = Trajectory(
         token_ids=[pad_token_id, pad_token_id],
@@ -103,7 +103,7 @@ def _padding_trajectory(pad_token_id: int, optional_shapes: dict[str, tuple[int,
 
 
 def flatten_episodes(episodes: list[Episode], *, loss_normalization_unit: str) -> list[Trajectory]:
-    """Desugar rewards and stamp every span with its attempt's identity and weight."""
+    """Desugar rewards and stamp every trajectory with its attempt's identity and weight."""
     if loss_normalization_unit not in LOSS_NORMALIZATION_UNITS:
         raise ValueError(f"unknown loss normalization unit {loss_normalization_unit!r}")
 
@@ -122,7 +122,7 @@ def flatten_episodes(episodes: list[Episode], *, loss_normalization_unit: str) -
 
 
 def _optional_field_shapes(trajectories: list[Trajectory]) -> dict[str, tuple[int, ...]]:
-    """Collect the trailing shape of each optional sequence field the spans carry."""
+    """Collect the trailing shape of each optional sequence field the trajectories carry."""
     shapes = {}
     for name in _OPTIONAL_FIELD_DTYPES:
         present = {
@@ -152,7 +152,7 @@ def build_dp_batches(
     The optimizer step count is denominated in episodes, so the LR decay horizon
     does not move with how many generation calls a rollout made. The unit of work
     is the trajectory: each is its own packed document and cannot be concatenated
-    with its siblings, so distributing spans rather than attempts is what gives
+    with its siblings, so distributing trajectories rather than attempts is what gives
     every rank an equal document count.
     """
     trajectories = flatten_episodes(episodes, loss_normalization_unit=loss_normalization_unit)
@@ -187,7 +187,7 @@ def _partition(lengths: list[int], count: int, balance_data: bool) -> list[list[
 
 
 def group_by_episode(trajectories: list[Trajectory]) -> list[list[Trajectory]]:
-    """Regroup flattened spans by the attempt they belong to, in rollout order.
+    """Regroup flattened trajectories by the attempt they belong to, in rollout order.
 
     Padding trajectories carry no `episode_index` and form no group.
     """
