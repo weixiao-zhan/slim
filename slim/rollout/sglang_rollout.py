@@ -55,15 +55,7 @@ class GenerateState(metaclass=SingletonMeta):
         concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
         self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
-        self.sampling_params: dict[str, Any] = {
-            "temperature": args.rollout_temperature,
-            "no_stop_trim": True,
-            "spaces_between_special_tokens": False,
-            **args.rollout_sampling_params,
-        }
-        if getattr(args, "sglang_enable_deterministic_inference", False):
-            sampling_seed_base = args.rollout_seed
-            self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
+        self.deterministic_inference = getattr(args, "sglang_enable_deterministic_inference", False)
 
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
@@ -203,7 +195,6 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     from slim.utils.processing_utils import encode_tensor_to_b64_envelope
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
-    sampling_params = episode._sampling_params
 
     await _prepare_episode_tokens(state, episode)
     trajectory = episode.trajectory
@@ -214,7 +205,12 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         episode.status = Episode.Status.TRUNCATED
         return episode
 
-    sampling_params["max_new_tokens"] = max_new_tokens
+    sampling_params = {
+        "temperature": args.rollout_temperature,
+        "max_new_tokens": max_new_tokens,
+    }
+    if episode.sampling_seed is not None:
+        sampling_params["sampling_seed"] = episode.sampling_seed
 
     payload = {
         "input_ids": trajectory.token_ids,
@@ -335,16 +331,12 @@ async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation
     if state.aborted:
         return group
 
-    for episode in group.episodes:
-        if episode.session_id is None:
-            episode.session_id = str(uuid.uuid4())
-
     tasks = []
     for idx, episode in enumerate(group.episodes):
-        current_sampling_params = state.sampling_params.copy()
-        if getattr(args, "sglang_enable_deterministic_inference", False):
-            current_sampling_params["sampling_seed"] = state.group_sampling_seeds[idx]
-        episode._sampling_params = current_sampling_params
+        if episode.session_id is None:
+            episode.session_id = str(uuid.uuid4())
+        if state.deterministic_inference:
+            episode.sampling_seed = args.rollout_seed + idx
         tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=evaluation)))
 
     group.episodes = await asyncio.gather(*tasks)
@@ -489,18 +481,11 @@ async def eval_rollout_single_dataset(
     global EVAL_PROMPT_DATASET
     from slim.utils.data import load_hf_dataset
 
+    state = GenerateState(args)
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
         EVAL_PROMPT_DATASET[cache_key] = load_hf_dataset(dataset_cfg.path)
     dataset = EVAL_PROMPT_DATASET[cache_key]
-
-    base_sampling_params = {
-        "temperature": dataset_cfg.temperature,
-        "no_stop_trim": True,
-        "spaces_between_special_tokens": False,
-        **args.rollout_sampling_params,
-        **dataset_cfg.sampling_params,
-    }
 
     tasks = []
     for raw_row in dataset:
@@ -509,10 +494,8 @@ async def eval_rollout_single_dataset(
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             episode.max_tokens = dataset_cfg.max_context_len
-            sampling_params = base_sampling_params.copy()
-            if getattr(args, "sglang_enable_deterministic_inference", False):
-                sampling_params["sampling_seed"] = args.rollout_seed + j
-            episode._sampling_params = sampling_params
+            if state.deterministic_inference:
+                episode.sampling_seed = args.rollout_seed + j
             tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=True)))
 
     raw_episodes = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")

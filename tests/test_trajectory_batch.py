@@ -265,7 +265,6 @@ def test_multi_trajectory_generate_produces_two_flattenable_spans(monkeypatch):
     episode.trajectory.loss_mask = [0] * 199
     episode.trajectory.rollout_log_probs = [0.0] * 199
     episode.max_tokens = 4096
-    episode._sampling_params = {"temperature": 1.0}
 
     episode = asyncio.run(multi_trajectory.generate(None, episode))
 

@@ -13,7 +13,7 @@ Use this skill when:
 
 - User asks to add evaluation datasets for periodic eval
 - User asks to migrate from `--eval-prompt-data` to structured `--eval-config`
-- User asks for per-dataset eval overrides (sampling params, keys, rm_type, metadata)
+- User asks for per-dataset eval overrides (sample count, context length, rm_type, metadata)
 
 ## Step-by-Step Guide
 
@@ -39,14 +39,11 @@ Example:
 eval:
   defaults:
     eval_n_samples_per_prompt: 1
-    temperature: 0.7
-    top_p: 1.0
   datasets:
     - name: aime
       path: /path/to/aime.jsonl
       rm_type: math
-      input_key: prompt
-      label_key: answer
+      max_context_len: 8192
       metadata_overrides:
         split: test
 ```
@@ -59,11 +56,13 @@ eval:
 2. `eval.defaults`
 3. CLI args fallback (for example eval_* or rollout_* fields)
 
-Common overridable fields include:
+Overridable fields are the `EvalDatasetConfig` fields:
 
-- Runtime: `eval_n_samples_per_prompt`, `temperature`, `top_p`, `top_k`, `max_response_len`
-- Sample keys: `input_key`, `label_key`, `tool_key`, `metadata_key`
-- Extra: `rm_type`, `custom_generate_function_path`, `metadata_overrides`
+- Runtime: `eval_n_samples_per_prompt`, `max_context_len`
+- Extra: `rm_type`, `custom_generate_function_path`, `app_service`, `metadata_overrides`
+
+Sampling is not per-dataset: eval samples at `--rollout-temperature`, and a dataset needing
+anything else points `custom_generate_function_path` at a generate function that sets it.
 
 ### Step 4: Wire Eval Function if Needed
 

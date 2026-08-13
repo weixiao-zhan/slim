@@ -48,7 +48,7 @@ async def generate(state, episode: Episode) -> Episode:
         trajectories=[episode.trajectories[-1]],
         max_tokens=len(prompt) + _SPAN_MAX_NEW_TOKENS,
         session_id=episode.session_id,
-        _sampling_params=dict(episode._sampling_params),
+        sampling_seed=episode.sampling_seed,
     )
     tail = await generate_span(state, tail)
     episode.trajectories[-1] = tail.trajectory

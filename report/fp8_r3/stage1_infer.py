@@ -27,7 +27,6 @@ def build_args(model_dir: str, rm_type: str, max_context_len: int, concurrency: 
         custom_rm_path=None,
         max_context_len=max_context_len,
         rollout_temperature=1.0,
-        rollout_sampling_params={},
         apply_chat_template_kwargs={"enable_thinking": False},
         use_rollout_routing_replay=r3,
         rollout_concurrency_per_replica=concurrency,
@@ -174,12 +173,7 @@ def main():
         # --max-new-tokens cap is given. Per-request because prompts differ in length.
         budget = max(1, args_cli.max_context_len - prompt_len)
         cap = budget if args_cli.max_new_tokens is None else min(args_cli.max_new_tokens, budget)
-        return {
-            "temperature": args.rollout_temperature,
-            "no_stop_trim": True,
-            "spaces_between_special_tokens": False,
-            "max_new_tokens": cap,
-        }
+        return {"temperature": args.rollout_temperature, "max_new_tokens": cap}
 
     # Expand to S samples per prompt; track origin so accuracy aggregates per prompt if desired.
     jobs = []  # (example_idx, example, prompt_ids, mm_inputs)

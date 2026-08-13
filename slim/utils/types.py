@@ -203,7 +203,7 @@ class Episode:
     session_id: str | None = None
     max_tokens: int = 0
     non_generation_time: float = 0.0
-    _sampling_params: dict[str, Any] | None = None     # transient rollout params; cleared during finalization
+    sampling_seed: int | None = None                   # per-sample seed under deterministic inference
 
     # Status tracking
     class Status:
@@ -239,7 +239,6 @@ class Episode:
     def finalize_source_token_alignment(self) -> None:
         for trajectory in self.trajectories:
             trajectory.finalize_source_token_alignment()
-        self._sampling_params = None
 
     # --- Shared helpers ---
 

@@ -225,7 +225,7 @@ Request:
 |-------|---------|
 | `input_ids` | prompt token ids |
 | `image_data[0]` = `{"format": "processor_output", ...}` | processor tensors |
-| `sampling_params` | `temperature`, `max_new_tokens` |
+| `sampling_params` | `temperature`, `max_new_tokens` from what is left of `episode.max_tokens`, and `sampling_seed` (`episode.sampling_seed`) under `--sglang-enable-deterministic-inference` |
 | `return_logprob: true` | gates `meta_info.output_token_logprobs` |
 | `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; set the start to the number of tokens already recorded, so only record and append the latest user turn + model turn. Note the capture is keyed by KV-cache slot and earlier tokens' should not be re-read |
 

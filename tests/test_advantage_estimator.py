@@ -106,13 +106,11 @@ def test_episode_finalization_covers_every_span():
             Trajectory(token_ids=[1, 2, 3], loss_mask=[0, 1]),
             Trajectory(token_ids=[4, 5], loss_mask=[1]),
         ],
-        _sampling_params={"temperature": 1.0},
     )
 
     episode.finalize_source_token_alignment()
 
     assert [t.loss_mask.tolist() for t in episode.trajectories] == [[0, 1, 0], [1, 0]]
-    assert episode._sampling_params is None
 
 
 @pytest.mark.unit

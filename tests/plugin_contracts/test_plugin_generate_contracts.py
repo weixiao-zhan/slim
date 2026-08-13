@@ -48,9 +48,6 @@ def make_args(**overrides):
     class Args:
         group_rm = False
         custom_generate_function_path = None
-        sglang_enable_deterministic_inference = False
-        rollout_seed = 7
-        n_samples_per_prompt = 2
 
     args = Args()
     for key, value in overrides.items():
@@ -70,17 +67,10 @@ class FakeGenerateState:
         self.semaphore = types.SimpleNamespace(__aenter__=None)
         self.pendings = set()
         self.aborted = False
-        self.group_sampling_seeds = [args.rollout_seed + i for i in range(args.n_samples_per_prompt)]
 
     @contextmanager
     def dp_rank_context(self):
         yield 0
-
-
-def _make_episode(**example_fields) -> Episode:
-    ep = Episode.from_example(example_fields)
-    ep._sampling_params = {"temperature": 0.3}
-    return ep
 
 
 async def custom_generate(state, episode: Episode):
@@ -162,7 +152,7 @@ def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state,
     result = asyncio.run(
         generate_and_rm(
             make_args(custom_generate_function_path=None),
-            _make_episode(prompt="prompt"),
+            Episode.from_example({"prompt": "prompt"}),
             evaluation=False,
         )
     )
@@ -172,7 +162,7 @@ def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state,
 
 def test_generate_and_rm_prefers_per_episode_generate_function(patch_generate_state):
     args = make_args(custom_generate_function_path=REFERENCE_CUSTOM_GENERATE_PATH)
-    ep = _make_episode(prompt="prompt")
+    ep = Episode.from_example({"prompt": "prompt"})
     ep.generate_function_path = REFERENCE_CUSTOM_GENERATE_WITH_EVAL_PATH
     result = asyncio.run(generate_and_rm(args, ep, evaluation=True))
     assert_episode_contract(result)
@@ -181,7 +171,7 @@ def test_generate_and_rm_prefers_per_episode_generate_function(patch_generate_st
 
 def test_generate_and_rm_decodes_every_trajectory(patch_generate_state):
     args = make_args(custom_generate_function_path=REFERENCE_CUSTOM_GENERATE_MULTI_TRAJECTORY_PATH)
-    result = asyncio.run(generate_and_rm(args, _make_episode(prompt="prompt"), evaluation=False))
+    result = asyncio.run(generate_and_rm(args, Episode.from_example({"prompt": "prompt"}), evaluation=False))
     assert_episode_contract(result)
     assert [t.text for t in result.trajectories] == ["31 32", "33 34"]
     assert [t.generated_text for t in result.trajectories] == ["main-span", "sub-agent-span"]
@@ -196,7 +186,7 @@ def test_custom_generate_function_path_supports_user_override(patch_generate_sta
     result = asyncio.run(
         generate_and_rm(
             make_args(custom_generate_function_path=custom_generate_path),
-            _make_episode(prompt="prompt"),
+            Episode.from_example({"prompt": "prompt"}),
             evaluation=False,
         )
     )

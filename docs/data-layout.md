@@ -23,7 +23,7 @@ trajectory.
 | `session_id` | `str \| None` | UUID for consistent-hashing router affinity |
 | `max_tokens` | `int` | Maximum context length for this episode |
 | `non_generation_time` | `float` | Wall-clock time spent outside token generation |
-| `_sampling_params` | `dict \| None` | Transient rollout request params; cleared during source-token finalization |
+| `sampling_seed` | `int \| None` | Per-sample sampling seed, set only under deterministic inference |
 | `status` | `str` | One of `PENDING`, `COMPLETED`, `TRUNCATED`, `ABORTED`, `FAILED` |
 
 `status` is a property of the attempt. It answers episode-level questions: whether the
@@ -92,8 +92,7 @@ During generation, `loss_mask`, `rollout_log_probs`, and `rollout_routed_experts
 temporary Python or NumPy values with length `len(token_ids) - 1`.
 `trajectory.finalize_source_token_alignment()` appends one neutral terminal slot and
 converts the sequence fields to CPU tensors with length `len(token_ids)`.
-`episode.finalize_source_token_alignment()` does this for every span and clears
-`_sampling_params`.
+`episode.finalize_source_token_alignment()` does this for every span.
 
 After finalization, entry `i` describes the prediction of `token_ids[i+1]` given
 `token_ids[:i+1]`. The final source position has no prediction target, so its mask and
