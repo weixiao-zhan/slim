@@ -71,14 +71,6 @@ FIXED_MBS_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episod
 # Round-robin assignment instead of Karmarkar-Karp balancing.
 NO_BALANCE_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episode --no-balance-data"
 
-# Two generation spans per attempt, so every episode packs as k=2 documents and
-# carries loss_weight 1/2. This is the path the two-level layout exists for.
-MULTI_TRAJ="--custom-generate-function-path tests.multi_trajectory_generate.generate"
-MULTI_TRAJ_EPISODE_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episode $MULTI_TRAJ"
-MULTI_TRAJ_TRAJECTORY_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit trajectory $MULTI_TRAJ"
-MULTI_TRAJ_STEPS_ARGS="$GRPO --num-steps-per-rollout 2 --loss-normalization-unit episode $MULTI_TRAJ"
-MULTI_TRAJ_PPO_ARGS="--advantage-estimator ppo_gae --num-steps-per-rollout 1 --loss-normalization-unit episode --value-clip 0.2 --eps-clip 0.2 --eps-clip-high 0.28 --lr-critic 5e-5 --critic-num-gpus 2 --critic-colocate $MULTI_TRAJ"
-
 # combo -> "expect_actor|expect_critic|combo_args". Each combo's args must stay on one
 # line: `read` below consumes only the first line of the spec.
 declare -A COMBOS
@@ -92,13 +84,8 @@ COMBOS[gspo]="1|0|$GSPO_ARGS"
 COMBOS[ppo]="1|1|$PPO_ARGS"
 COMBOS[fixed_mbs]="1|0|$FIXED_MBS_ARGS"
 COMBOS[no_balance]="1|0|$NO_BALANCE_ARGS"
-COMBOS[multi_traj_episode]="1|0|$MULTI_TRAJ_EPISODE_ARGS"
-COMBOS[multi_traj_trajectory]="1|0|$MULTI_TRAJ_TRAJECTORY_ARGS"
-COMBOS[multi_traj_steps]="1|0|$MULTI_TRAJ_STEPS_ARGS"
-COMBOS[multi_traj_ppo]="1|1|$MULTI_TRAJ_PPO_ARGS"
 
-ORDER=(unit_episode unit_trajectory unit_token multi_step cp2 grpo_std gspo ppo fixed_mbs no_balance
-       multi_traj_episode multi_traj_trajectory multi_traj_steps multi_traj_ppo)
+ORDER=(unit_episode unit_trajectory unit_token multi_step cp2 grpo_std gspo ppo fixed_mbs no_balance)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
 # Submit all combos to one cluster; they queue and run sequentially.

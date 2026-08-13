@@ -39,8 +39,8 @@ async def custom_generate(state: GenerateState, episode: Episode) -> Episode
 ```
 
 Substitutes only the per-episode generation logic.
-The episode arrives holding one trajectory with prompt tokens already set; the function appends generated tokens to `episode.trajectory`, sets its `loss_mask`, and returns the completed episode.
-An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation span, and sets `episode.status` for the attempt as a whole.
+The episode arrives with no trajectory; the function appends every `Trajectory` it generates, each with its own `token_ids`, `loss_mask`, and `rollout_log_probs`, and returns the episode.
+An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation, and sets `episode.status` for the attempt as a whole.
 
 The function owns the sampling fields of its own requests, but should honor the token budget from `episode.max_tokens` and the `--rollout-temperature` that training scales its logits by.
 
@@ -49,17 +49,14 @@ Per-episode override: set `episode.generate_function_path` to route specific epi
 ### Reward model (`--custom-rm-path`)
 
 ```python
-async def custom_rm(args, episode: Episode, **kwargs) -> float
+async def custom_rm(args, episode: Episode, **kwargs) -> None
 
 # Batch mode (--group-rm):
-async def custom_rm(args, episodes: list[Episode], **kwargs) -> list[float]
+async def custom_rm(args, episodes: list[Episode], **kwargs) -> None
 ```
 
-The returned scalar lands on `episode.reward` and is broadcast to every span of the attempt.
-A reward function that wants to score spans individually writes `trajectory.reward` on each span instead and returns nothing for the episode; setting both levels is an error.
-Each span carries its own `generated_text`, so span boundaries reach the reward function rather than being flattened into one decode. Join them when the flat view is what you want.
-
-Built-in `--rm-type` options (used when `--custom-rm-path` is not set): `math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `remote_rm`, `random`.
+A reward function can set one scalar per episode on `episode.reward`, which is auto broadcast to every trajectory, or set `trajectory.reward` on each of `episode.trajectories`, and returns nothing; setting both levels is an error.
+The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
 
 ### Group filter (`--rollout-group-filter-path`)
 
@@ -78,7 +75,7 @@ def sample_filter(args, groups: list[RolloutGroup]) -> None
 ```
 
 Operates in-place on kept groups.
-To exclude a span from training, set its `trajectory.loss_mask` to all zeros; zeroing every span of an episode excludes the whole attempt.
+To exclude a trajectory from training, set its `trajectory.loss_mask` to all zeros; zeroing every trajectory of an episode excludes the whole attempt.
 
 ### Data source (`--data-source-path`)
 
@@ -120,53 +117,19 @@ Multi-turn interactions (tool-calling agents, conversational RL) require three p
 
 **1. Data**: the `prompt` field stores the initial conversation. Custom fields (tools, environment state, ground truth) are accessed via `episode.example`.
 
-**2. Custom generate function**: a loop that alternates between model generation and tool execution, controlling `loss_mask`:
-- Model-generated tokens: `loss_mask = 1` (train on these)
-- Tool/environment tokens: `loss_mask = 0` (excluded from loss)
+**2. Custom generate function**: there are two common approches: append-only vs per-API-trajectories.
 
-When each turn extends one growing context, the attempt stays a single trajectory:
+Append-only keeps one growing context as a single trajectory, and slim owns tokenization: the generate function calls `/generate` with token ids, then extends `token_ids`, `loss_mask`, and `rollout_log_probs` accordingly.
 
-```python
-async def multi_turn_generate(state, episode):
-    trajectory = episode.trajectory
-    for turn in range(max_turns):
-        episode = await generate(state, episode)  # appends with loss_mask=1
-        tool_call = parse_tool_call(trajectory.generated_text)
-        if tool_call is None:
-            break
-        tool_tokens = state.tokenizer.encode(execute_tool(tool_call))
-        trajectory.token_ids.extend(tool_tokens)
-        trajectory.loss_mask.extend([0] * len(tool_tokens))
-        trajectory.rollout_log_probs.extend([0.0] * len(tool_tokens))
-    episode.status = Episode.Status.COMPLETED
-    return episode
-```
+One trajectory per API call let the engine handles tokenization, which lets an agent framework can talk to rollout engine via `/v1/chat/completions`. 
+Slim has patched sglang engine and router to return extra fields to recoard each API call as a seperate `Trajectory`. Interleaved thinking, sub-agent dispatch, and context compression fit here.
 
-When a turn does not extend the previous context, append a trajectory instead. Sub-agent
-dispatch fans out and context compression replaces context rather than extending it, so each
-generation call becomes its own span:
+See [Endpoints and Tokenization Ownership](sglang-config.md#endpoints-and-tokenization-ownership) for the request and response fields.
 
-```python
-async def compressing_generate(state, episode):
-    for turn in range(max_turns):
-        episode = await generate(state, episode)
-        if is_done(episode.trajectories[-1].generated_text):
-            break
-        # A fresh span over the compressed context, not an extension of the old one.
-        compressed = compress(episode.trajectories[-1])
-        episode.trajectories.append(Trajectory(token_ids=compressed))
-    episode.status = Episode.Status.COMPLETED
-    return episode
-```
-
-Trajectories carry no ordering relation. A workload whose reward depends on span order records
-that order in `episode.example`, where its own reward function reads it.
-
-**3. Custom reward function**: scores the final outcome of the interaction, either as one
-`episode.reward` for the attempt or as a `trajectory.reward` per span.
+**3. Custom reward function**: scores the `episode.reward` based on final outcome or scores all `trajectory.reward`.
 
 ```bash
---custom-generate-function-path my_project.agent.multi_turn_generate \
+--custom-generate-function-path my_project.agent.generate \
 --custom-rm-path my_project.rewards.multi_turn_rm
 ```
 

@@ -98,7 +98,7 @@ def test_global_denominators_count_an_episode_once_across_its_trajectories():
         {
             "cu_seqlens": torch.tensor([0, 3, 6, 9], dtype=torch.int32),
             "loss_masks": torch.ones(9, dtype=torch.int32),
-            # Two spans of one attempt, then a whole single-span attempt.
+            # Two trajectories of one attempt, then a whole single-trajectory attempt.
             "loss_weights": [0.5, 0.5, 1.0],
         },
     ]
@@ -175,7 +175,7 @@ def test_policy_reductions_use_matching_global_denominators():
 
 @pytest.mark.unit
 def test_sequence_reduction_weights_an_episode_by_its_trajectory_count():
-    # Two spans of one attempt (means 3 and 12) beside a single-span attempt (mean 20).
+    # Two trajectories of one attempt (means 3 and 12) beside a single-trajectory attempt (mean 20).
     values = torch.tensor([[2.0, 4.0, 10.0, 14.0, 20.0, 20.0]])
     mask = torch.ones_like(values)
     document_ids = torch.tensor([[1, 1, 2, 2, 3, 3]])
@@ -201,7 +201,7 @@ def test_sequence_reduction_weights_an_episode_by_its_trajectory_count():
 
     # (0.5*3 + 0.5*12 + 20) / 2 weights each attempt once.
     torch.testing.assert_close(per_episode, torch.tensor(13.75))
-    # (3 + 12 + 20) / 3 weights each span once.
+    # (3 + 12 + 20) / 3 weights each trajectory once.
     torch.testing.assert_close(per_trajectory, torch.tensor(35.0 / 3))
 
 

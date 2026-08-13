@@ -68,22 +68,22 @@ class AdvantageEstimator:
                 _padding_targets(trajectory, values=self.args.advantage_estimator == "ppo_gae")
 
     def _compute_group_targets(self, episodes: list[list[Trajectory]]) -> None:
-        """Center each span's reward on its prompt group's episode-level statistics.
+        """Center each trajectory's reward on its prompt group's episode-level statistics.
 
         The baseline and scale are episode-level, so an attempt that made 20
         generation calls does not outvote one that made a single call. The
-        numerator stays the span's own reward, so within-attempt differentiation
-        survives when rewards are genuinely per-span.
+        numerator stays the trajectory's own reward, so within-attempt differentiation
+        survives when rewards are genuinely per-trajectory.
         """
         episode_rewards = torch.tensor(
-            [sum(t.reward for t in spans) / len(spans) for spans in episodes],
+            [sum(t.reward for t in trajectories) / len(trajectories) for trajectories in episodes],
             dtype=torch.float32,
         )
         offsets = torch.zeros_like(episode_rewards)
         scales = torch.ones_like(episode_rewards)
 
         if self.args.group_advantage_normalization:
-            group_indices = [spans[0].group_index for spans in episodes]
+            group_indices = [trajectories[0].group_index for trajectories in episodes]
             if any(index is None for index in group_indices):
                 raise ValueError("group advantage normalization requires a group_index on every episode")
             groups, inverse, counts = torch.tensor(group_indices, dtype=torch.long).unique(
@@ -97,8 +97,8 @@ class AdvantageEstimator:
                 squares = torch.zeros(groups.numel()).scatter_add_(0, inverse, (episode_rewards - offsets) ** 2)
                 scales = (squares / (counts - 1).clamp_min(1))[inverse].sqrt() + 1e-6
 
-        for spans, offset, scale in zip(episodes, offsets.tolist(), scales.tolist(), strict=True):
-            for trajectory in spans:
+        for trajectories, offset, scale in zip(episodes, offsets.tolist(), scales.tolist(), strict=True):
+            for trajectory in trajectories:
                 advantage = (trajectory.reward - offset) / scale
                 targets = torch.full((len(trajectory.token_ids),), advantage, dtype=torch.float32)
                 targets[-1] = 0
@@ -144,11 +144,11 @@ class AdvantageEstimator:
         episodes: list[list[Trajectory]],
         values_by_trajectory: dict[int, object],
     ) -> None:
-        """Deposit each span's reward at its last active position and run GAE per span.
+        """Deposit each trajectory's reward at its last active position and run GAE per trajectory.
 
         A trajectory is contiguous, so the recurrence within one is sound. It does
-        not cross span boundaries: bootstrapping $V$ from one span into another
-        would need to know which span follows which.
+        not cross trajectory boundaries: bootstrapping $V$ from one into another
+        would need to know which follows which.
         """
         trajectories = list(chain.from_iterable(episodes))
         max_tokens = max(len(trajectory.token_ids) for trajectory in trajectories)

@@ -42,7 +42,7 @@ from slim.rollout.filter_hub.base_types import DynamicFilterOutput, call_dynamic
 from slim.rollout.rm_hub import async_rm, batched_async_rm
 from slim.rollout.sglang_rollout import generate_rollout as default_generate_rollout
 from slim.utils.misc import load_function
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 
 def run_contract_test_file() -> None:
@@ -68,9 +68,13 @@ def run_contract_test_file() -> None:
 
 def _make_episode(reward: float = 1.0, **example_fields) -> Episode:
     ep = Episode.from_example(example_fields)
-    ep.trajectory.token_ids = [100, 200]
-    ep.trajectory.loss_mask = [1]
-    ep.trajectory.generated_text = f"response-{example_fields.get('index', 0)}"
+    ep.trajectories.append(
+        Trajectory(
+            token_ids=[100, 200],
+            loss_mask=[1],
+            generated_text=f"response-{example_fields.get('index', 0)}",
+        )
+    )
     ep.reward = reward
     ep.status = Episode.Status.COMPLETED
     return ep
@@ -140,12 +144,13 @@ def reference_rollout_all_samples_process(args, all_groups: list[list[Episode]],
     args.processed_group_count = len(all_groups)
 
 
-async def reference_single_rm(args, episode: Episode, **kwargs):
-    return float(episode.example.get("index", 0)) + 0.1
+async def reference_single_rm(args, episode: Episode, **kwargs) -> None:
+    episode.reward = float(episode.example.get("index", 0)) + 0.1
 
 
-async def reference_batched_rm(args, episodes: list[Episode], **kwargs):
-    return [float(ep.example.get("index", 0)) + 0.2 for ep in episodes]
+async def reference_batched_rm(args, episodes: list[Episode], **kwargs) -> None:
+    for ep in episodes:
+        ep.reward = float(ep.example.get("index", 0)) + 0.2
 
 
 def valid_eval_function(args, rollout_id, data_source, evaluation=False):
@@ -318,18 +323,20 @@ def test_path_loading_path_aligns_with_expected_format(case: SyncCase):
 def _make_empty_episode() -> Episode:
     """Episode with no generated tokens — avoids needing a real tokenizer for decode."""
     ep = Episode.from_example({})
+    ep.trajectories.append(Trajectory())
     ep.reward = 0.0
     ep.status = Episode.Status.COMPLETED
     return ep
 
 
 def test_custom_rm_default_behavior_is_stable():
-    reward = asyncio.run(async_rm(make_args(rm_type="random"), _make_empty_episode()))
-    rewards = asyncio.run(
-        batched_async_rm(make_args(group_rm=True, rm_type="random"), [_make_empty_episode(), _make_empty_episode()])
-    )
-    assert isinstance(reward, (int, float))
-    assert isinstance(rewards, list) and len(rewards) == 2
+    episode = _make_empty_episode()
+    asyncio.run(async_rm(make_args(rm_type="random"), episode))
+    assert isinstance(episode.reward, (int, float))
+
+    group = [_make_empty_episode(), _make_empty_episode()]
+    asyncio.run(batched_async_rm(make_args(group_rm=True, rm_type="random"), group))
+    assert all(isinstance(ep.reward, (int, float)) for ep in group)
 
 
 def test_custom_rm_path_aligns_with_expected_format():
@@ -337,28 +344,30 @@ def test_custom_rm_path_aligns_with_expected_format():
     if get_contract_path("GROUP_RM") == "1":
         fn = load_function(path or "plugin_contracts.test_plugin_path_loading_contracts.reference_batched_rm")
         assert tuple(inspect.signature(fn).parameters)[:2] == ("args", "episodes")
-        rewards = asyncio.run(
+        group = [_make_episode(reward=0.0, index=0), _make_episode(reward=0.0, index=1)]
+        asyncio.run(
             batched_async_rm(
                 make_args(
                     group_rm=True,
                     custom_rm_path=path or "plugin_contracts.test_plugin_path_loading_contracts.reference_batched_rm",
                 ),
-                [_make_episode(reward=0.0, index=0), _make_episode(reward=0.0, index=1)],
+                group,
             )
         )
-        assert isinstance(rewards, list) and len(rewards) == 2
+        assert all(isinstance(ep.reward, (int, float)) for ep in group)
     else:
         fn = load_function(path or "plugin_contracts.test_plugin_path_loading_contracts.reference_single_rm")
         assert tuple(inspect.signature(fn).parameters)[:2] == ("args", "episode")
-        reward = asyncio.run(
+        episode = _make_episode(reward=0.0, index=3)
+        asyncio.run(
             async_rm(
                 make_args(
                     custom_rm_path=path or "plugin_contracts.test_plugin_path_loading_contracts.reference_single_rm"
                 ),
-                _make_episode(reward=0.0, index=3),
+                episode,
             )
         )
-        assert isinstance(reward, (int, float))
+        assert isinstance(episode.reward, (int, float))
 
 
 if __name__ == "__main__":

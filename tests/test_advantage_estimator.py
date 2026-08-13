@@ -42,9 +42,9 @@ def _trajectory(reward=None, *, loss_mask=None, episode_index=0, group_index=0, 
     return trajectory
 
 
-def _episode(index: int, reward: float, *, group_index: int = 0, span_count: int = 1) -> Episode:
+def _episode(index: int, reward: float, *, group_index: int = 0, trajectory_count: int = 1) -> Episode:
     episode = Episode(
-        trajectories=[Trajectory(token_ids=[1, 2, 3], loss_mask=[0, 1]) for _ in range(span_count)],
+        trajectories=[Trajectory(token_ids=[1, 2, 3], loss_mask=[0, 1]) for _ in range(trajectory_count)],
         reward=reward,
         episode_index=index,
         group_index=group_index,
@@ -100,7 +100,7 @@ def test_trajectory_finalizes_source_token_alignment_and_validates_training_targ
 
 
 @pytest.mark.unit
-def test_episode_finalization_covers_every_span():
+def test_episode_finalization_covers_every_trajectory():
     episode = Episode(
         trajectories=[
             Trajectory(token_ids=[1, 2, 3], loss_mask=[0, 1]),
@@ -136,9 +136,9 @@ def test_grpo_normalizes_rewards_by_group_across_dp_ranks():
 
 
 @pytest.mark.unit
-def test_grpo_baseline_weights_each_episode_once_regardless_of_span_count():
+def test_grpo_baseline_weights_each_episode_once_regardless_of_trajectory_count():
     # One attempt made three calls scoring 0, the other made one call scoring 4.
-    # The group mean is 2 (the mean of the attempts), not 1 (the mean of the spans).
+    # The group mean is 2 (the mean of the attempts), not 1 (the mean of the trajectories).
     trajectories = [
         _trajectory(0.0, episode_index=0, group_index=0, loss_weight=1 / 3),
         _trajectory(0.0, episode_index=0, group_index=0, loss_weight=1 / 3),
@@ -161,7 +161,7 @@ def test_grpo_keeps_within_episode_reward_differences():
 
     AdvantageEstimator(_args("grpo")).compute_partition_training_targets([_batch(trajectories)])
 
-    # Both attempts mean 2, so the group baseline is 2 and each span keeps its own offset.
+    # Both attempts mean 2, so the group baseline is 2 and each trajectory keeps its own offset.
     assert [trajectory.advantages[0].item() for trajectory in trajectories] == [-1.0, 1.0, 0.0]
 
 
@@ -243,22 +243,22 @@ def test_ppo_gae_selects_cp_zero_values_by_dp_rank():
 
 @pytest.mark.unit
 def test_ppo_gae_does_not_bootstrap_across_trajectory_boundaries():
-    # Two spans of one attempt. Each computes its own return from its own reward,
-    # so the first span's advantage does not see the second span's value.
-    spans = [
+    # Two trajectories of one attempt. Each computes its own return from its own reward,
+    # so the first trajectory's advantage does not see the second trajectory's value.
+    trajectories = [
         _trajectory(5.0, episode_index=0, loss_weight=0.5),
         _trajectory(0.0, episode_index=0, loss_weight=0.5),
     ]
     payloads = [{"dp_rank": 0, "cp_rank": 0, "values": [torch.zeros(3), torch.zeros(3)]}]
 
-    AdvantageEstimator(_args("ppo_gae")).compute_partition_training_targets([_batch(spans)], payloads)
+    AdvantageEstimator(_args("ppo_gae")).compute_partition_training_targets([_batch(trajectories)], payloads)
 
-    assert spans[0].advantages.tolist() == [5.0, 5.0, 0.0]
-    assert spans[1].advantages.tolist() == [0.0, 0.0, 0.0]
+    assert trajectories[0].advantages.tolist() == [5.0, 5.0, 0.0]
+    assert trajectories[1].advantages.tolist() == [0.0, 0.0, 0.0]
 
 
 @pytest.mark.unit
-def test_custom_reward_post_process_sees_episodes_as_groups_of_spans(monkeypatch):
+def test_custom_reward_post_process_sees_episodes_as_groups_of_trajectories(monkeypatch):
     trajectories = [
         _trajectory(1.0, episode_index=0, group_index=0, loss_weight=0.5),
         _trajectory(1.0, episode_index=0, group_index=0, loss_weight=0.5),
@@ -267,9 +267,9 @@ def test_custom_reward_post_process_sees_episodes_as_groups_of_spans(monkeypatch
     seen = {}
 
     def post_process(args, episodes):
-        seen["span_counts"] = [len(spans) for spans in episodes]
-        for spans in episodes:
-            for index, trajectory in enumerate(spans):
+        seen["trajectory_counts"] = [len(trajectories) for trajectories in episodes]
+        for trajectories in episodes:
+            for index, trajectory in enumerate(trajectories):
                 trajectory.reward = float(index)
 
     monkeypatch.setattr(
@@ -282,13 +282,13 @@ def test_custom_reward_post_process_sees_episodes_as_groups_of_spans(monkeypatch
 
     estimator.compute_partition_training_targets([_batch(trajectories)])
 
-    assert seen["span_counts"] == [2, 1]
+    assert seen["trajectory_counts"] == [2, 1]
     assert [trajectory.advantages[0].item() for trajectory in trajectories] == [0.0, 1.0, 0.0]
 
 
 @pytest.mark.unit
-def test_episode_reward_broadcasts_to_every_span():
-    episode = _episode(0, 1.5, span_count=3)
+def test_episode_reward_broadcasts_to_every_trajectory():
+    episode = _episode(0, 1.5, trajectory_count=3)
 
     trajectories = build_dp_batches(
         [episode],
@@ -342,7 +342,7 @@ def test_missing_reward_at_both_levels_is_rejected():
     [("episode", 0.25), ("trajectory", 1.0), ("token", 1.0)],
 )
 def test_loss_weight_follows_the_normalization_unit(unit, expected):
-    episode = _episode(0, 1.0, span_count=4)
+    episode = _episode(0, 1.0, trajectory_count=4)
 
     trajectories = build_dp_batches(
         [episode],
@@ -358,8 +358,8 @@ def test_loss_weight_follows_the_normalization_unit(unit, expected):
 
 @pytest.mark.unit
 def test_dp_split_gives_every_rank_the_same_document_count_per_step():
-    # Lopsided span counts: 4 spans, then three single-span attempts.
-    episodes = [_episode(0, 1.0, span_count=4)] + [_episode(index, 1.0) for index in range(1, 4)]
+    # Lopsided trajectory counts: 4 trajectories, then three single-trajectory attempts.
+    episodes = [_episode(0, 1.0, trajectory_count=4)] + [_episode(index, 1.0) for index in range(1, 4)]
 
     batches = build_dp_batches(
         episodes,

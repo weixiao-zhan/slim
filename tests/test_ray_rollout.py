@@ -74,7 +74,7 @@ def test_log_rollout_data_reports_reward(monkeypatch):
 
 
 @pytest.mark.unit
-def test_compute_episode_metrics_counts_tokens_and_spans():
+def test_compute_episode_metrics_counts_tokens_and_trajectories():
     episodes = [
         Episode(
             trajectories=[Trajectory(token_ids=[1, 2], generated_text="a")],

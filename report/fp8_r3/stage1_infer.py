@@ -126,7 +126,7 @@ def main():
 
     # slim's GenerateState gives us the same tokenizer/processor/routing-shape the real rollout uses.
     from slim.rollout.sglang_rollout import GenerateState
-    from slim.utils.types import Episode
+    from slim.utils.types import Episode, Trajectory
 
     GenerateState._instances = {}  # singleton reset between configs in one process
     state = GenerateState(args)
@@ -221,15 +221,14 @@ def main():
             truncated = finish_type == "length"
 
             # Build prediction fields, then finalize them to Slim's source-token layout.
-            ep = Episode.from_example(ex)
-            traj = ep.trajectory
-            traj.token_ids = list(pids)
             P = len(pids)
-            traj.loss_mask = [0] * max(P - 1, 0)
-            traj.rollout_log_probs = [0.0] * max(P - 1, 0)
-            traj.token_ids.extend(new_tokens)
-            traj.loss_mask.extend([1] * len(new_tokens))
-            traj.rollout_log_probs.extend(new_lps)
+            traj = Trajectory(
+                token_ids=list(pids) + new_tokens,
+                loss_mask=[0] * max(P - 1, 0) + [1] * len(new_tokens),
+                rollout_log_probs=[0.0] * max(P - 1, 0) + new_lps,
+            )
+            ep = Episode.from_example(ex)
+            ep.trajectories.append(traj)
 
             routed = None
             if routing_shape is not None:
