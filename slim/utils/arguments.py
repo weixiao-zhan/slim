@@ -1030,8 +1030,7 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     elif args.eval_prompt_data:
         values = list(args.eval_prompt_data)
         if len(values) == 1:
-            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
-            values = ["aime", values[0]]
+            values = ["eval", values[0]]
         if len(values) % 2 != 0:
             raise ValueError("eval prompt data must be provided as name/path pairs.")
         datasets_config = [{"name": values[i], "path": values[i + 1]} for i in range(0, len(values), 2)]

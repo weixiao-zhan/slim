@@ -248,6 +248,10 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     output = await post(url, payload, headers=headers)
 
     meta_info = output["meta_info"]
+    episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
+    if episode.status == Episode.Status.ABORTED:
+        return episode
+
     new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
     new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
 
@@ -275,7 +279,6 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
             else np.concatenate((trajectory.rollout_routed_experts, fresh))
         )
 
-    episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
 
 

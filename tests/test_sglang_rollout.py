@@ -90,3 +90,29 @@ def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch
     trajectory.loss_mask.append(0)
     with pytest.raises(ValueError, match="zip\\(\\) argument 2 is longer"):
         decode_generated_text(SimpleNamespace(), trajectory)
+
+
+def test_generate_handles_aborted_routing_replay_response(monkeypatch):
+    async def build_trajectory(_state, _episode):
+        return Trajectory(token_ids=[10, 11], loss_mask=[0], rollout_log_probs=[0.0])
+
+    async def post(_url, _payload, headers=None):
+        del headers
+        return {"meta_info": {"finish_reason": {"type": "abort"}}}
+
+    monkeypatch.setattr(sglang_rollout, "_build_trajectory_with_first_prompt", build_trajectory)
+    monkeypatch.setattr(sglang_rollout, "post", post)
+
+    args = SimpleNamespace(
+        rollout_temperature=1,
+        router_policy="cache_aware",
+        router_ip="127.0.0.1",
+        router_port=30000,
+    )
+    rollout_state = SimpleNamespace(args=args, routing_replay_shape=(40, 8))
+    episode = Episode.from_example({"prompt": "prompt"})
+    episode.max_tokens = 16
+
+    result = asyncio.run(sglang_rollout.generate(rollout_state, episode))
+
+    assert result.status == Episode.Status.ABORTED

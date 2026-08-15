@@ -17,6 +17,18 @@ fi
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 
+K() {
+    echo $((1024 * $1))
+}
+
+# Keep only rollout groups with nonzero reward variance and cap the in-flight pool.
+group_advantage_filter_args() {
+    local over_sampling_batch_size="$1"
+    printf '%s' \
+        "--rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+--over-sampling-batch-size $over_sampling_batch_size"
+}
+
 # Install tuned SGLang kernel configs and configure CUDA IPC support.
 (cd "$REPO_DIR" && uv run python patch_dependencies.py)
 
