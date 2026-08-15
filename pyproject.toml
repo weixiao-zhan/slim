@@ -47,6 +47,11 @@ dev = [
     "ruff",
     "viztracer",
 ]
+strands = [
+    "strands-agents[openai]==1.50.2",
+    "strands-agents-tools==0.8.5",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
