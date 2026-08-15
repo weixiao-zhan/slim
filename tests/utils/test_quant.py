@@ -61,6 +61,16 @@ def test_block_fp8_handles_non_128_multiple_via_padding():
     assert q.shape == (130, 100) and s.shape == (2, 1)
 
 
+def test_block_fp8_grouped_experts_matches_individual_weights():
+    weight = torch.randn(3, 256, 384, dtype=torch.bfloat16)
+    grouped_weight, grouped_scale = block_fp8(weight, [128, 128])
+
+    for expert_id in range(weight.shape[0]):
+        expert_weight, expert_scale = block_fp8(weight[expert_id], [128, 128])
+        assert torch.equal(grouped_weight[expert_id].view(torch.uint8), expert_weight.view(torch.uint8))
+        assert torch.equal(grouped_scale[expert_id], expert_scale)
+
+
 def test_block_fp8_ue8m0_scales_are_powers_of_two():
     """ue8m0 scales are float32 powers of two; weights stay e4m3, same shape as fp32 path."""
     w = torch.randn(256, 384, dtype=torch.bfloat16)
@@ -111,6 +121,47 @@ def test_keep_predicate_generalizes_across_layers():
         "model.language_model.layers.5.mlp.gate_proj",
     ]:
         assert not is_kept(name)
+
+
+def test_keep_predicate_matches_language_model_container():
+    qz = QuantizerFP8([128, 128], ["model.embed_tokens"])
+    weight = torch.randn(256, 128, dtype=torch.bfloat16)
+
+    assert qz.quantize("model.language_model.embed_tokens.weight", weight) == (
+        ("model.language_model.embed_tokens.weight", weight),
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "scale_names", "scale_shape"),
+    [
+        (
+            "model.language_model.layers.0.mlp.experts.gate_up_proj",
+            [
+                f"model.language_model.layers.0.mlp.experts.{expert_id}.{projection}.weight_scale_inv"
+                for expert_id in range(4)
+                for projection in ("gate_proj", "up_proj")
+            ],
+            (4, 16),
+        ),
+        (
+            "model.language_model.layers.0.mlp.experts.down_proj",
+            [
+                f"model.language_model.layers.0.mlp.experts.{expert_id}.down_proj.weight_scale_inv"
+                for expert_id in range(4)
+            ],
+            (16, 4),
+        ),
+    ],
+)
+def test_quantize_grouped_experts(name, scale_names, scale_shape):
+    shape = (4, 1024, 2048) if name.endswith("gate_up_proj") else (4, 2048, 512)
+    qz = QuantizerFP8([128, 128], [])
+    output = qz.quantize(name, torch.randn(*shape, dtype=torch.bfloat16))
+
+    assert [tensor_name for tensor_name, _ in output] == [name, *scale_names]
+    assert output[0][1].dtype == torch.float8_e4m3fn
+    assert all(tensor.shape == scale_shape for _, tensor in output[1:])
 
 
 def test_quantize_keeps_listed_and_non_2d():
