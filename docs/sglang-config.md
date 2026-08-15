@@ -206,6 +206,93 @@ Each model gets its own sglang-router instance for load balancing.
 
 For multi-turn conversations, use `consistent_hashing` with `episode.session_id` to pin all turns of a session to the same engine (preserving KV cache).
 
+## Endpoints and Tokenization Ownership
+
+To avoid retokenization drift and ensure token-in-token-out, there should be one tokenization source of truth. Slim supports either slim's custome generate function or SGLang owns the process:
+
+| SGLang Endpoint | Tokenization Owner | Use |
+|----------|-------|-----|
+| `/generate` | slim | Default rollout. slim tokenizes with `AutoTokenizer`/`AutoProcessor` and sends token ids plus processor tensors. |
+| `/v1/chat/completions` | SGLang engine | Agent frameworks that speak OpenAI. The engine applies the chat template and returns the ids it ran. |
+
+See [Data Layout](data-layout.md) for how the recorded fields are consumed by training. We patched sglang-router to pass additional fields though the rust router.
+
+### `/generate` 
+
+Request:
+
+| Field | Content |
+|-------|---------|
+| `input_ids` | prompt token ids |
+| `image_data[0]` = `{"format": "processor_output", ...}` | processor tensors |
+| `sampling_params` | `temperature`, `max_new_tokens` from what is left of `episode.max_tokens`, and `sampling_seed` (`episode.sampling_seed`) under `--sglang-enable-deterministic-inference` |
+| `return_logprob: true` | gates `meta_info.output_token_logprobs` |
+| `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; set the start to the number of tokens already recorded, so only record and append the latest user turn + model turn. Note the capture is keyed by KV-cache slot and earlier tokens' should not be re-read |
+
+Response:
+
+| Field | Location |
+|-------|----------|
+| output token ids and logprobs | `meta_info.output_token_logprobs[i]` = `[logprob, token_id, text]` |
+| expert indices | `meta_info.routed_experts`, base64 int32, one row per prediction over `[routed_experts_start_len, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
+
+### `/v1/chat/completions` fields
+
+In this setup, seperate API calls does not necessarily share prefix, thus should each be considered as seperate `trajectories`.
+
+Request:
+
+| Field | Content |
+|-------|---------|
+| `model`, `messages`, `tools`, `tool_choice`, `temperature`, `top_p`, `stop`, `seed`, `max_completion_tokens` | OpenAI convention, supplied by the agent framework. |
+| `chat_template_kwargs` | `--apply-chat-template-kwargs`, e.g. `enable_thinking`, `preserve_thinking`; |
+| `stream: false` | every field below is unavailable when streaming |
+| `logprobs: true` | gates `choices[i].meta_info.output_token_logprobs` |
+| `return_prompt_token_ids: true` | gates `choices[i].prompt_token_ids` |
+| `return_meta_info: true` | gates `choices[i].meta_info`, and so every field in it |
+| `return_processor_outputs: true` | gates `choices[i].meta_info.processor_outputs` |
+| `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; always `0`, since one call is one whole trajectory |
+
+Response:
+
+| Field | Location |
+|-------|----------|
+| generated message, finish reason | `choices[i].message` (`.content`, `.tool_calls`) and `choices[i].finish_reason`, OpenAI convention, consumed by the agent framework |
+| input token ids | `choices[i].prompt_token_ids` |
+| output token ids and logprobs | `choices[i].meta_info.output_token_logprobs[j]` = `[logprob, token_id, text]` |
+| processor tensors | `choices[i].meta_info.processor_outputs` |
+| expert indices | `choices[i].meta_info.routed_experts`, base64 int32, one row per prediction over `[0, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
+
+Prompt positions carry no logprobs; `logprob_start_len` is fixed at `-1` and is not a request field.
+
+### Tensor envelope
+
+Processor tensors travel as JSON in both directions, so each one is a base64 envelope of its raw
+bytes:
+
+```json
+{"__tensor__": true, "dtype": "float32", "shape": [256, 1536], "data": "<base64>"}
+```
+
+Field names match what `AutoProcessor` returns (`pixel_values`, `pixel_values_videos`,
+`input_features`, `image_grid_thw`, ...). `slim/utils/processing_utils.py` owns the codec for both
+directions; `patch_dependencies.py` wires SGLang's call sites to it rather than restating it.
+
+### Router passthrough
+
+The gateway deserializes each request into a typed struct and re-serializes it to the selected
+worker, so any field the struct omits never reaches the engine. Responses are proxied as raw bytes.
+slim installs a forked `sglang-router` wheel that declares `return_prompt_token_ids`,
+`return_processor_outputs`, `return_routed_experts`, and `routed_experts_start_len` on both
+endpoints, and additionally `return_meta_info` and `return_cached_tokens_details` on
+`/v1/chat/completions`.
+
+`return_processor_outputs` is slim's addition to SGLang, applied by `patch_dependencies.py`. Every
+other field is native to SGLang.
+
+`ChatCompletionRequest.input_ids` is deliberately absent from the fork: precomputed ids on the
+OpenAI endpoint would put tokenization back in slim's hands there.
+
 ## External Engines
 
 For pre-deployed SGLang engines managed externally:

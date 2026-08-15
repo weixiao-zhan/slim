@@ -30,7 +30,7 @@ REFERENCE_ROLLOUT_FUNCTION_PATH = "plugin_contracts.test_plugin_rollout_contract
 from slim.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slim.rollout.sglang_rollout import generate_rollout as default_generate_rollout
 from slim.utils.misc import load_function
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 
 def run_contract_test_file() -> None:
@@ -38,11 +38,25 @@ def run_contract_test_file() -> None:
 
 
 def make_episode(index: int, reward: float = 1.0) -> Episode:
-    tokens = [1000 + index, 2000 + index]
     ep = Episode.from_example({"index": index})
-    ep.tokens = tokens
+    ep.trajectories.append(
+        Trajectory(token_ids=[1000 + index, 2000 + index], generated_text=f"response-{index}")
+    )
     ep.reward = reward
-    ep.generated_text = f"response-{index}"
+    return ep
+
+
+def make_multi_trajectory_episode(index: int, num_trajectories: int = 2) -> Episode:
+    """Agentic attempt: several trajectories, each scored on its own."""
+    ep = Episode.from_example({"index": index})
+    ep.trajectories = [
+        Trajectory(
+            token_ids=[1000 + index, 2000 + index + nth],
+            generated_text=f"response-{index}-trajectory-{nth}",
+            reward=float(nth),
+        )
+        for nth in range(num_trajectories)
+    ]
     return ep
 
 
@@ -75,8 +89,12 @@ def valid_rollout_function(args, rollout_id, data_source, evaluation=False):
     for group_index, example in enumerate(examples):
         for sample_index in range(2):
             ep = Episode.from_example({"index": group_index})
-            ep.tokens = [group_index, sample_index, rollout_id]
-            ep.generated_text = f"group-{group_index}-sample-{sample_index}"
+            ep.trajectories.append(
+                Trajectory(
+                    token_ids=[group_index, sample_index, rollout_id],
+                    generated_text=f"group-{group_index}-sample-{sample_index}",
+                )
+            )
             ep.reward = float(group_index + sample_index)
             episodes.append(ep)
     return RolloutFnTrainOutput(episodes=episodes, metrics={"source": "contract"})
@@ -84,16 +102,19 @@ def valid_rollout_function(args, rollout_id, data_source, evaluation=False):
 
 def invalid_rollout_function(args, rollout_id, data_source, evaluation=False):
     ep = make_episode(0)
-    ep.tokens = []
+    ep.trajectory.token_ids = []
     return RolloutFnTrainOutput(episodes=[ep])
 
 
 def assert_episode_contract(ep: Episode) -> None:
     assert isinstance(ep, Episode)
-    assert isinstance(ep.tokens, list)
-    assert all(isinstance(token, int) for token in ep.tokens)
-    assert isinstance(ep.generated_text, str)
-    assert ep.reward is not None
+    assert ep.trajectories
+    for trajectory in ep.trajectories:
+        assert isinstance(trajectory.token_ids, list)
+        assert all(isinstance(token, int) for token in trajectory.token_ids)
+        assert isinstance(trajectory.generated_text, str)
+    assert ep.reward is not None or all(trajectory.reward is not None for trajectory in ep.trajectories)
+    assert isinstance(ep.get_reward_value(), (int, float))
 
 
 def assert_train_rollout_contract(output: RolloutFnTrainOutput, n_samples_per_prompt: int) -> None:
@@ -164,6 +185,14 @@ def test_local_rollout_plugin_aligns_with_default_input_output_format():
 def test_misaligned_rollout_plugin_is_rejected():
     with pytest.raises(AssertionError):
         assert_rollout_function_matches_default_contract(invalid_rollout_function)
+
+
+def test_multi_trajectory_episode_satisfies_contract():
+    ep = make_multi_trajectory_episode(0, num_trajectories=3)
+    assert_episode_contract(ep)
+    assert ep.get_reward_value() == 1.0
+    with pytest.raises(ValueError, match="3 trajectories"):
+        _ = ep.trajectory
 
 
 if __name__ == "__main__":

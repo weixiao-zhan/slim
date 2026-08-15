@@ -28,7 +28,7 @@ install_stubs()
 NUM_GPUS = 0
 
 from slim.utils.misc import load_function
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 
 def run_contract_test_file() -> None:
@@ -60,8 +60,7 @@ def reference_reward_post_process(args, episodes):
 
 def _make_episode(reward: float = 1.0, **example_fields) -> Episode:
     ep = Episode.from_example(example_fields)
-    ep.tokens = [0, 1]
-    ep.loss_mask = [1]
+    ep.trajectories.append(Trajectory(token_ids=[0, 1], loss_mask=[1]))
     ep.reward = reward
     ep.status = Episode.Status.COMPLETED
     return ep

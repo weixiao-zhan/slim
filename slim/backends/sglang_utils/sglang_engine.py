@@ -51,31 +51,6 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
     )
 
 
-def _launch_server_with_force_return_routed_experts(server_args):
-    """Spawn-target that force-enables GenerateReqInput.return_routed_experts.
-
-    The sglang_router (Rust) discards unknown JSON fields, including
-    return_routed_experts, before forwarding to the worker. Forcing the
-    flag on inside the worker process bypasses that and ensures the
-    server returns captured expert ids in meta_info.
-    """
-    if getattr(server_args, "encoder_only", False):
-        from sglang.srt.disaggregation.encode_server import launch_server
-    else:
-        from sglang.srt.entrypoints.http_server import launch_server
-
-    from sglang.srt.managers.io_struct import GenerateReqInput
-
-    original_normalize = GenerateReqInput.normalize_batch_and_arguments
-
-    def patched_normalize(self):
-        self.return_routed_experts = True
-        return original_normalize(self)
-
-    GenerateReqInput.normalize_batch_and_arguments = patched_normalize
-    return launch_server(server_args)
-
-
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     if getattr(server_args, "encoder_only", False):
         from sglang.srt.disaggregation.encode_server import launch_server
@@ -87,19 +62,7 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
     # Avoiss cuda:0 context leak before set_device (e.g. DeepGEMM/FP8 JIT warmup)
     os.environ.setdefault("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
     server_args.host = server_args.host.strip("[]")
-    # When the routing-replay capturer is enabled server-side, force the
-    # per-request return_routed_experts flag to True. This is necessary
-    # because the sglang_router (Rust) strips unknown fields from the
-    # JSON payload, so slim-side `payload["return_routed_experts"]=True`
-    # never reaches the tokenizer-manager. Patching server-side is
-    # equivalent: for routing-replay rollouts every request needs the
-    # capture anyway, and other rollouts simply do not enable the flag.
-    target = (
-        _launch_server_with_force_return_routed_experts
-        if getattr(server_args, "enable_return_routed_experts", False)
-        else launch_server
-    )
-    p = multiprocessing.Process(target=target, args=(server_args,))
+    p = multiprocessing.Process(target=launch_server, args=(server_args,))
     p.start()
 
     if server_args.node_rank == 0:

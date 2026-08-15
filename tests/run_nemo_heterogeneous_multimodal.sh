@@ -3,15 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Qwen3.5 MoE actor steps with modality-skewed DP ranks across the CP/EP matrix.
-set -euo pipefail
+source "$(dirname "$0")/common.sh"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MODEL_DIR="${NEMO_HETEROGENEOUS_MODEL_DIR:-$REPO_DIR/models/Qwen3.5-35B-A3B}"
 RESULT_DIR="${NEMO_HETEROGENEOUS_RESULT_DIR:-/tmp/slim-nemo-heterogeneous-multimodal}"
 ROLLOUT_SOURCE="${NEMO_HETEROGENEOUS_ROLLOUT_SOURCE:-/tmp/slim-nemo-grad-norm-matrix/rollout.pt}"
 ROLLOUT_DATA="$RESULT_DIR/rollout.pt"
-NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 
 if [[ "$NUM_GPUS" -ne 8 ]]; then
     echo "heterogeneous multimodal qualification requires exactly 8 GPUs, found $NUM_GPUS" >&2
@@ -36,13 +33,15 @@ run_case() {
         --standalone \
         --nproc-per-node 8 \
         tests/backends/nemo/run_training_qualification.py \
-        --checkpoint "$MODEL_DIR" \
+        --rollout-data "$ROLLOUT_DATA" \
+        \
         --role actor \
         --context-parallel-size "$cp_size" \
         --expert-parallel-size "$ep_size" \
         --heterogeneous-multimodal \
-        --rollout-data "$ROLLOUT_DATA" \
-        --max-tokens-per-gpu 2048 \
+        --max-tokens-per-gpu "$(K 2)" \
+        \
+        --checkpoint "$MODEL_DIR" \
         --output "$RESULT_DIR/$case_name.json" \
         "$@" \
         2>&1 | tee "$RESULT_DIR/$case_name.log"

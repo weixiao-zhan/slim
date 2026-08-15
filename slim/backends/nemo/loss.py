@@ -146,13 +146,25 @@ def entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
 
 
 def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reduce sequence and loss-token counts over logical DP ranks."""
-    sequence_count = 0
+    r"""Reduce the document weight sum and loss-token count over logical DP ranks.
+
+    The sequence-level denominator is $\sum_d w_d$ rather than a document count,
+    so it agrees with whichever unit the advantage baseline uses. Under
+    `--loss-normalization-unit episode` an attempt's trajectories each weigh $1/k$ and the
+    sum counts attempts; under `trajectory` each weighs $1$ and the sum counts
+    trajectories. Padding documents weigh $0$ and drop out of both.
+    """
+    weight_sum = 0.0
     token_count = 0
     for pack in packs:
         boundaries = pack["cu_seqlens"].tolist()
         masks = pack["loss_masks"]
-        sequence_count += len(boundaries) - 1
+        weights = pack["loss_weights"]
+        if len(weights) != len(boundaries) - 1:
+            raise ValueError(
+                f"{len(weights)} loss weights do not match {len(boundaries) - 1} packed documents"
+            )
+        weight_sum += sum(weights)
         expected_length = boundaries[-1]
         if masks.ndim != 1 or masks.shape[0] != expected_length:
             raise ValueError(
@@ -161,7 +173,7 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
             )
         token_count += int(masks.sum())
 
-    counts = torch.tensor([sequence_count, token_count], dtype=torch.float64, device=device)
+    counts = torch.tensor([weight_sum, token_count], dtype=torch.float64, device=device)
     if torch.distributed.is_initialized() and torch.distributed.get_world_size(group=dp_group) > 1:
         torch.distributed.all_reduce(counts, group=dp_group)
     return counts[0].clamp_min(1), counts[1].clamp_min(1)
@@ -216,7 +228,7 @@ def sequence_mean_at_tokens(
     return output.unsqueeze(0)
 
 
-def normalize_token_sum(
+def reduce_token_mean(
     values: torch.Tensor,
     mask: torch.Tensor,
     global_tokens: torch.Tensor,
@@ -225,37 +237,24 @@ def normalize_token_sum(
     return (values * mask.to(values.dtype)).sum() / global_tokens
 
 
-def normalize_sequence_values(
+def reduce_weighted_sequence_mean(
     values: torch.Tensor,
     mask: torch.Tensor,
     document_ids: torch.Tensor,
     num_documents: int,
     global_sequences: torch.Tensor,
     cp_group,
+    loss_weights: torch.Tensor,
 ) -> torch.Tensor:
+    r"""Weight each document mean by $w_d$ and divide by the global $\sum_d w_d$.
+
+    $$L = \frac{1}{\sum_d w_d} \sum_d w_d \cdot
+           \frac{\sum_t v_{d,t} m_{d,t}}{\sum_t m_{d,t}}$$
+
+    $\sum_d w_d$ is what `count_global_denominators` reduces, so the weights are not
+    optional: omitting them would denominate in attempts while numerating in documents.
+    """
     numerators, denominators = _document_sums(values, mask, document_ids, num_documents)
     denominators = cp_sum(denominators, cp_group, differentiable=False).clamp_min(1)
-    return (numerators / denominators).sum() / global_sequences
-
-
-def normalize_policy_values(
-    values: torch.Tensor,
-    mask: torch.Tensor,
-    document_ids: torch.Tensor,
-    num_documents: int,
-    *,
-    sum_tokens: bool,
-    global_sequences: torch.Tensor,
-    global_tokens: torch.Tensor,
-    cp_group,
-) -> torch.Tensor:
-    if sum_tokens:
-        return normalize_token_sum(values, mask, global_tokens)
-    return normalize_sequence_values(
-        values,
-        mask,
-        document_ids,
-        num_documents,
-        global_sequences,
-        cp_group,
-    )
+    means = numerators / denominators * loss_weights.to(device=values.device, dtype=values.dtype)
+    return means.sum() / global_sequences

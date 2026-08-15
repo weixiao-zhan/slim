@@ -39,20 +39,24 @@ async def custom_generate(state: GenerateState, episode: Episode) -> Episode
 ```
 
 Substitutes only the per-episode generation logic.
-The episode arrives with prompt tokens already set; the function appends generated tokens, sets `loss_mask`, and returns the completed episode.
+The episode arrives with no trajectory; the function appends every `Trajectory` it generates, each with its own `token_ids`, `loss_mask`, and `rollout_log_probs`, and returns the episode.
+An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation, and sets `episode.status` for the attempt as a whole.
+
+The function owns the sampling fields of its own requests, but should honor the token budget from `episode.max_tokens` and the `--rollout-temperature` that training scales its logits by.
 
 Per-episode override: set `episode.generate_function_path` to route specific episodes to a different generate function.
 
 ### Reward model (`--custom-rm-path`)
 
 ```python
-async def custom_rm(args, episode: Episode, **kwargs) -> float
+async def custom_rm(args, episode: Episode, **kwargs) -> None
 
 # Batch mode (--group-rm):
-async def custom_rm(args, episodes: list[Episode], **kwargs) -> list[float]
+async def custom_rm(args, episodes: list[Episode], **kwargs) -> None
 ```
 
-Built-in `--rm-type` options (used when `--custom-rm-path` is not set): `math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `remote_rm`, `random`.
+A reward function can set one scalar per episode on `episode.reward`, which is auto broadcast to every trajectory, or set `trajectory.reward` on each of `episode.trajectories`, and returns nothing; setting both levels is an error.
+The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
 
 ### Group filter (`--rollout-group-filter-path`)
 
@@ -71,7 +75,7 @@ def sample_filter(args, groups: list[RolloutGroup]) -> None
 ```
 
 Operates in-place on kept groups.
-To exclude a sample from training, set its `episode.loss_mask` to all zeros.
+To exclude a trajectory from training, set its `trajectory.loss_mask` to all zeros; zeroing every trajectory of an episode excludes the whole attempt.
 
 ### Data source (`--data-source-path`)
 
@@ -92,9 +96,9 @@ def custom_loss(args, unpacked_batches: list[dict]) -> tuple[torch.Tensor, dict[
 
 Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 (policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
-`unpacked_batches` is the per-sample list from `unpack_sequences`; each dict
-carries the raw `reward`, `cur_log_probs`, `advantages`, `loss_masks`,
-and the old/ref log-probs when available.
+`unpacked_batches` is the per-document list from `unpack_sequences`, one entry per
+trajectory; each dict carries the raw `reward`, `loss_weights`, `cur_log_probs`,
+`advantages`, `loss_masks`, and the old/ref log-probs when available.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
 a dict of scalar tensors logged under `train/`.
@@ -113,29 +117,19 @@ Multi-turn interactions (tool-calling agents, conversational RL) require three p
 
 **1. Data**: the `prompt` field stores the initial conversation. Custom fields (tools, environment state, ground truth) are accessed via `episode.example`.
 
-**2. Custom generate function**: a loop that alternates between model generation and tool execution, controlling `loss_mask`:
-- Model-generated tokens: `loss_mask = 1` (train on these)
-- Tool/environment tokens: `loss_mask = 0` (excluded from loss)
+**2. Custom generate function**: there are two common approches: append-only vs per-API-trajectories.
 
-```python
-async def multi_turn_generate(state, episode):
-    for turn in range(max_turns):
-        episode = await generate(state, episode)  # appends with loss_mask=1
-        tool_call = parse_tool_call(episode.generated_text)
-        if tool_call is None:
-            break
-        tool_tokens = state.tokenizer.encode(execute_tool(tool_call))
-        episode.tokens.extend(tool_tokens)
-        episode.loss_mask.extend([0] * len(tool_tokens))
-        episode.rollout_log_probs.extend([0.0] * len(tool_tokens))
-    episode.status = Episode.Status.COMPLETED
-    return episode
-```
+Append-only keeps one growing context as a single trajectory, and slim owns tokenization: the generate function calls `/generate` with token ids, then extends `token_ids`, `loss_mask`, and `rollout_log_probs` accordingly.
 
-**3. Custom reward function**: scores the final outcome of the interaction.
+One trajectory per API call let the engine handles tokenization, which lets an agent framework can talk to rollout engine via `/v1/chat/completions`. 
+Slim has patched sglang engine and router to return extra fields to recoard each API call as a seperate `Trajectory`. Interleaved thinking, sub-agent dispatch, and context compression fit here.
+
+See [Endpoints and Tokenization Ownership](sglang-config.md#endpoints-and-tokenization-ownership) for the request and response fields.
+
+**3. Custom reward function**: scores the `episode.reward` based on final outcome or scores all `trajectory.reward`.
 
 ```bash
---custom-generate-function-path my_project.agent.multi_turn_generate \
+--custom-generate-function-path my_project.agent.generate \
 --custom-rm-path my_project.rewards.multi_turn_rm
 ```
 

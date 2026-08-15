@@ -20,20 +20,14 @@ hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 
 ### FP8 checkpoints (prerequisite for `sweep_fp8.sh`)
 
-`sweep_fp8.sh` needs two pre-forged FP8 copies of the base model alongside the bf16 one:
+`sweep_fp8.sh` needs a pre-forged FP8 copy of the base model alongside the bf16 one:
 
 ```bash
 # fp32 block scales
 uv run python tools/convert_hf_to_fp8.py \
-    --model-dir models/Qwen3.5-2B \
-    --save-dir models/Qwen3.5-2B-FP8 \
+    --model-dir models/Qwen3.5-4B \
+    --save-dir models/Qwen3.5-4B-FP8 \
     --ref-config tools/fp8_recipes/qwen35_official.json
-
-# ue8m0 (power-of-two) block scales
-uv run python tools/convert_hf_to_fp8.py \
-    --model-dir models/Qwen3.5-2B \
-    --save-dir models/Qwen3.5-2B-FP8-ue8m0 \
-    --ref-config tools/fp8_recipes/qwen35_ue8m0.json
 ```
 
 ## Datasets
@@ -64,13 +58,14 @@ driver blocks in `ray.get(pg.ready())` until the previous job's
 
 ```bash
 bash tests/test_grpo_profile.sh
+bash tests/sweep_trajectory.sh
 bash tests/sweep_placement.sh
 bash tests/sweep_dataset.sh
 bash tests/sweep_algo.sh
 bash tests/sweep_surrogate.sh
 bash tests/sweep_fp8.sh
-bash tests/sweep_moe_rollout.sh
 bash tests/run_nemo_mixed_cp_ep.sh
+bash tests/run_nemo_grad_norm_matrix.sh
 ```
 
 Watch progress and grade externally via ray's own log management:
@@ -89,43 +84,54 @@ uv run python tests/sanity_check.py out.log <expect_actor> <expect_critic>
 SM120 need following treatment:
 
 - **Training attention:** packed Qwen3.5 uses AutoModel's FlashAttention 2 varlen CP kernel when available and falls back to PyTorch SDPA.
-- **Rollout gemm:** SGL default to DeepGEMM when runing fp8 on backwell, which expects ue8m0 scales. To use fp32 block scales: use `--sglang-fp8-gemm-backend triton` in (`sweep_fp8.sh`)
+- **Rollout GEMM:** SGLang defaults to DeepGEMM for FP8 on Blackwell, which expects UE8M0 scales. The Hopper sweep uses the official FP32 block-scale checkpoint. To run that checkpoint on Blackwell, add `--sglang-fp8-gemm-backend triton`.
 
 ## Available Tests
 
 Two kinds of tests live here:
 
 - **Sweeps** (`sweep_*.sh`) — each submits a matrix of combos along one axis on a
-  single 8-GPU node. All combos share one `COMMON_ARGS` block sized to **3 rollout
-  steps × 8 prompts × 4 samples**, `max-context-len 8192`, `max-tokens-per-gpu
-  8192`. Run all combos with no args, or a subset by passing combo names.
+  single 8-GPU node. Run all combos with no args, or a subset by passing combo names.
 - **Standalone tests** — single runs that exercise an orthogonal axis (precision,
   profiling) not covered by a sweep.
+
+GRPO and GSPO tests use the built-in nonzero reward standard-deviation group filter. The rollout loop oversamples and refills until it has the configured `rollout-batch-size` of accepted groups, so every retained group has nonzero reward variance and contributes group-relative learning signal. PPO tests do not use this filter.
 
 ### Sweeps
 
 | Sweep | Axis | Combos | Model |
 |-------|------|--------|-------|
-| `sweep_placement.sh` | (rollout-colocate, critic-colocate) placement | 6 PPO combos | Qwen3.5-2B |
-| `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-2B |
-| `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-2B |
-| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-2B |
-| `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32`, `fp8_ue8m0` | Qwen3.5-2B (+ FP8 forges) |
-| `sweep_moe_rollout.sh` | MoE rollout parallelism (R3 on) | `tp1`, `tp4`, `tp4_ep4` | Qwen3.6-35B-A3B (MoE) |
+| `sweep_placement.sh` | rollout and critic colocation placement | 4 PPO combos | Qwen3.5-4B |
+| `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-4B |
+| `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-4B |
+| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-4B |
+| `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32` | Qwen3.5-4B (+ FP8 forge) |
+| `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 10 combos (see below) | Qwen3.5-4B |
 
 ```bash
-hf download Qwen/Qwen3.5-2B --local-dir models/Qwen3.5-2B
+hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 uv run python tests/prepare_mixed.py
 bash tests/sweep_placement.sh                       # all combos
-bash tests/sweep_placement.sh colocate_critic       # a single combo
+bash tests/sweep_placement.sh colocate_critic_async # a single combo
 bash tests/sweep_surrogate.sh cis                   # just the CIS combo
 ```
 
-The non-MoE sweeps use **Qwen3.5-2B**. `sweep_moe_rollout.sh` runs on the
-**Qwen3.6-35B-A3B** MoE checkpoint, which lives on the NVMe disk and is referenced
-through the `models/<name>` symlink convention (`models/Qwen3.6-35B-A3B ->
-/opt/dlami/nvme/models/Qwen3.6-35B-A3B`). All sweeps use `flash_attention_3`
-(Hopper); on A100/L40s switch to `flash_attention_2`, on Blackwell/SM120 use `sdpa`.
+The sweeps use **Qwen3.5-4B**. Their SGLang rollout engines use
+`flash_attention_3` on Hopper. On A100/L40s switch the rollout backend to
+`flash_attention_2`; on Blackwell/SM120 use `sdpa`.
+
+### `sweep_trajectory.sh`
+
+Sized for a **4-GPU node** with disaggregated placement (2 GPUs train, 2 serve rollout),
+so weight sync goes over NCCL rather than the CUDA IPC path, which needs `CAP_SYS_PTRACE`.
+
+Combos cover the layout's degrees of freedom: `unit_episode`, `unit_trajectory`,
+`unit_token` (the three `--loss-normalization-unit` values); `multi_step` (partition
+across optimizer steps as well as ranks); `cp2` (context parallel halves the logical DP
+size); `grpo_std`, `gspo`, `ppo` (estimators, PPO adding the trajectory-keyed critic value
+round trip); `fixed_mbs` (fixed micro-batching, which requires exactly equal pack counts
+per rank with no dynamic re-split available); `no_balance` (round-robin instead of
+Karmarkar-Karp).
 
 ### Standalone tests
 
@@ -134,7 +140,8 @@ Tests default to the **mixed** (math+vision) dataset unless noted.
 | Test | Algorithm | Notes |
 |------|-----------|-------|
 | `test_grpo_profile.sh` | GRPO + CIS | torch profiler harness |
-| `run_nemo_mixed_cp_ep.sh` | GRPO | Qwen3.5 MoE, mixed math and Geometry3K, SGLang TP2, NeMo CP2 and EP8 |
+| `run_nemo_mixed_cp_ep.sh` | GRPO | Qwen3.6-35B-A3B, TP2 rollout, CP2 and EP8 training |
+| `run_nemo_grad_norm_matrix.sh` | GRPO | Qwen3.6-35B-A3B, CP1/CP2 and EP1/EP8 comparison |
 
 ## Environment Variables
 

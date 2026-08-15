@@ -76,33 +76,34 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
     return args
 
 
-def records_to_episodes(d, limit=None):
-    """Rebuild finalized Slim Episodes from source-token-aligned stage-1 records."""
+def records_to_trajectories(d, limit=None):
+    """Rebuild finalized Slim Trajectories from source-token-aligned stage-1 records."""
     import torch
 
-    from slim.utils.types import Episode
+    from slim.utils.types import Trajectory
 
-    episodes = []
+    trajectories = []
     for rec in C.iter_records(d):
-        if limit is not None and len(episodes) >= limit:
+        if limit is not None and len(trajectories) >= limit:
             break
-        ep = Episode(example={"label": rec.get("label")})
-        ep.reward = float(rec.get("reward", 0.0))  # pack_sequences needs a real number
-        ep.tokens = torch.as_tensor(rec["tokens"], dtype=torch.long)
-        ep.loss_mask = torch.as_tensor(rec["loss_mask"], dtype=torch.int)
-        ep.rollout_log_probs = torch.as_tensor(rec["rollout_log_probs"], dtype=torch.float32)
+        traj = Trajectory()
+        traj.reward = float(rec.get("reward", 0.0))  # pack_sequences needs a real number
+        traj.loss_weight = 1.0
+        traj.token_ids = torch.as_tensor(rec["tokens"], dtype=torch.long)
+        traj.loss_mask = torch.as_tensor(rec["loss_mask"], dtype=torch.int)
+        traj.rollout_log_probs = torch.as_tensor(rec["rollout_log_probs"], dtype=torch.float32)
         if rec.get("has_experts"):
             arr = C.load_experts(d, rec["sample_idx"])
             if arr is not None:
-                ep.rollout_routed_experts = torch.from_numpy(arr).to(torch.int32)
+                traj.rollout_routed_experts = torch.from_numpy(arr).to(torch.int32)
         if rec.get("has_mm"):
             # Restore the processor-output tensors (pixel_values, image_grid_thw, ...) onto the
-            # episode so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
+            # trajectory so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
             mm = C.load_mm_inputs(d, rec["sample_idx"])
             if mm is not None:
-                ep.multimodal_inputs = mm
-        episodes.append((rec["sample_idx"], rec["num_prompt_tokens"], ep))
-    return episodes
+                traj.multimodal_inputs = mm
+        trajectories.append((rec["sample_idx"], rec["num_prompt_tokens"], traj))
+    return trajectories
 
 
 def main():
@@ -167,13 +168,15 @@ def main():
     # routing-replay sets a per-layer guard (`_routing_replay_layer_idx`) that makes dynamo recompile
     # once per MoE layer, collapsing GPU util to ~0-2%. Eager SDPA is the simple, correct choice.
 
-    episodes_meta = records_to_episodes(src_dir, limit=args_cli.limit)
-    episodes = [ep for (_, _, ep) in episodes_meta]
+    trajectories_meta = records_to_trajectories(src_dir, limit=args_cli.limit)
+    trajectories = [traj for (_, _, traj) in trajectories_meta]
 
-    # global_batch_size must cover all episodes in one "rollout" so _packed_data packs them together.
-    actor.args.global_batch_size = len(episodes)
+    # One optimizer step covers every trajectory so _packed_data packs them together.
+    from slim.utils.trajectory_batch import TrajectoryBatch
 
-    packed_batches, _ = actor._packed_data(episodes)
+    batch = TrajectoryBatch(trajectories=trajectories)
+
+    packed_batches, _ = actor._packed_data(batch)
     actor._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
 
     # --- per-token AND sequence-level K3 KL over generated predictions ---

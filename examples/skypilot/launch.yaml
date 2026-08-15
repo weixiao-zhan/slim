@@ -20,7 +20,7 @@ resources:
     us-west-2: ami-002d8d829a188f605
 
 envs:
-  MODEL_NAME: Qwen3.5-2B
+  MODEL_NAME: Qwen3.5-4B
 
 setup: | # shell
   set -ex
@@ -141,7 +141,7 @@ run: | # shell
     --num-rollout 200 \
     --rollout-batch-size 32 \
     --n-samples-per-prompt 16 \
-    --max-context-len 8192 \
+    --max-context-len 16384 \
     --rollout-temperature 1 \
     --apply-chat-template-kwargs '{"enable_thinking":false}' \
     --num-steps-per-rollout 1 \
@@ -168,7 +168,7 @@ run: | # shell
     --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
     --activation-checkpointing \
     --use-dynamic-batch-size \
-    --max-tokens-per-gpu 12288 \
+    --max-tokens-per-gpu 16384 \
     \
     --advantage-estimator gspo \
     --disable-group-advantage-std-normalization \
@@ -191,5 +191,3 @@ run: | # shell
     --save ${OUTPUT_DIR} \
     \
     ${WANDB_ARGS[@]}
-
-    # --save-interval 20 \

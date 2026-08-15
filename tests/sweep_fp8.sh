@@ -2,32 +2,21 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# FP8 sweep: GRPO + CIS on the mixed (math+vision) dataset, comparing the rollout-weight
-# precision against a bf16 baseline on a single 8-GPU node with Qwen3.5-2B:
-#   bf16       -> bf16 rollout weights (base case)
-#   fp8_fp32   -> block-FP8 rollout weights, fp32 block scales
-#   fp8_ue8m0  -> block-FP8 rollout weights, ue8m0 (power-of-two) block scales
-# Rollout colocates on all 8 GPUs. The fp8_* combos require pre-forged FP8 checkpoints
-# (see tests/RUNNING_TESTS.md).
-#
-# Usage:  bash tests/sweep_fp8.sh [combo_name ...]
+# Compare BF16 and block-FP8 rollout weights.
 source "$(dirname "$0")/common.sh"
 
-BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
-FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8"
-FP8_UE8M0_MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B-FP8-ue8m0"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
-maybe_detach "$0" "$@"
-
-# Sizes: 8 prompts x 4 samples = 32 episodes; 3 rollout steps. GRPO + CIS, rollout colocated.
 COMMON_ARGS="
-    --num-rollout 3
+    --num-rollout 4
     --rollout-batch-size 8
     --n-samples-per-prompt 4
     --num-steps-per-rollout 1
-    --max-context-len 8192
+    --max-context-len $(K 16)
     --rollout-temperature 1
     --rollout-shuffle
+    $(group_advantage_filter_args 32)
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
@@ -41,7 +30,7 @@ COMMON_ARGS="
     --actor-num-gpus $NUM_GPUS
     --activation-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 8192
+    --max-tokens-per-gpu $(K 16)
 
     --advantage-estimator grpo
     --disable-group-advantage-std-normalization
@@ -54,18 +43,14 @@ COMMON_ARGS="
     --lr-decay-style constant
 "
 
-# combo -> "expect_actor|expect_critic|combo_args".  fp8 runs use the forged FP8 weights as
-# the rollout/hf checkpoint and load the bf16 master weights for training.
+# combo -> "expect_actor|expect_critic|combo_args"
 declare -A COMBOS
 COMBOS[bf16]="1|0|--hf-checkpoint $BF16_MODEL_DIR"
 COMBOS[fp8_fp32]="1|0|--hf-checkpoint $FP8_MODEL_DIR --load $BF16_MODEL_DIR"
-COMBOS[fp8_ue8m0]="1|0|--hf-checkpoint $FP8_UE8M0_MODEL_DIR --load $BF16_MODEL_DIR"
 
-ORDER=(bf16 fp8_fp32 fp8_ue8m0)
+ORDER=(bf16 fp8_fp32)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
-# Submit all combos to one cluster; they queue and run sequentially.
-# See tests/RUNNING_TESTS.md for watching/grading via ray job logs.
 start_ray
 
 for name in "${ORDER[@]}"; do

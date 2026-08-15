@@ -30,6 +30,9 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "datasets" / "mixed"
 
 N_EVAL = 100
 
+COLUMNS = ["prompt", "label", "images"]
+
+
 def transform_dapo(row):
     """Pure-text math problem in VLM format."""
     row["prompt"] = [
@@ -77,26 +80,23 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- Text-only math: DAPO-Math-17k (hold out N_EVAL for eval) ----
-    dapo_all = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train").shuffle(seed=42)
-    cols_to_drop = [c for c in dapo_all.column_names if c not in ("prompt", "label", "images")]
-    dapo_test = (
-        dapo_all.select(range(N_EVAL))
-        .map(transform_dapo, remove_columns=cols_to_drop)
+    dapo = (
+        load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
+        .shuffle(seed=42)
+        .map(transform_dapo)
+        .select_columns(COLUMNS)
         .cast_column("images", Sequence(Image()))
     )
-    dapo_train = (
-        dapo_all.select(range(N_EVAL, len(dapo_all)))
-        .map(transform_dapo, remove_columns=cols_to_drop)
-        .cast_column("images", Sequence(Image()))
-    )
+    dapo_test, dapo_train = dapo.select(range(N_EVAL)), dapo.select(range(N_EVAL, len(dapo)))
     print(f"DAPO-Math-17k (en): {len(dapo_train)} train, {len(dapo_test)} test")
 
     # ---- Vision geometry: Geometry3K (cap test split at N_EVAL) ----
-    geo3k = load_dataset("hiyouga/geometry3k")
-    geo3k_train = geo3k["train"].map(transform_geo3k).select_columns(["prompt", "label", "images"])
-    geo3k_test = (
-        geo3k["test"].select(range(N_EVAL)).map(transform_geo3k).select_columns(["prompt", "label", "images"])
+    geo3k = (
+        load_dataset("hiyouga/geometry3k")
+        .map(transform_geo3k)
+        .select_columns(COLUMNS)
     )
+    geo3k_train, geo3k_test = geo3k["train"], geo3k["test"].select(range(N_EVAL))
     print(f"Geometry3K: {len(geo3k_train)} train, {len(geo3k_test)} test")
 
     # Train set — mixed, same schema so concat works

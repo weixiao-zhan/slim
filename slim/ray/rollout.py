@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+import functools
+import itertools
 import logging
 import multiprocessing
 import os
 import random
 import time
 from pathlib import Path
+from collections import Counter
 from typing import Any
 
 import ray
@@ -30,10 +33,10 @@ from slim.utils.metric_utils import (
     compute_statistics,
     dict_add_prefix,
 )
-from slim.utils.misc import group_by, load_function
+from slim.utils.misc import load_function
 from slim.utils.profile_utils import profile_rollout
-from slim.utils.seqlen_balancing import get_seqlen_balanced_partitions
-from slim.utils.types import Episode
+from slim.utils.trajectory_batch import build_dp_batches
+from slim.utils.types import Episode, Trajectory
 
 from ..utils.metric_utils import has_repetition
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -50,7 +53,11 @@ def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Ep
     records = payload.get("episodes") if isinstance(payload, dict) else None
     if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
         raise ValueError(f"debug rollout data at {path} must contain an episodes list")
-    episodes = [Episode(**record) for record in records]
+    episodes = []
+    for record in records:
+        record = dict(record)
+        record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
+        episodes.append(Episode(**record))
     logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
     return episodes
 
@@ -393,6 +400,7 @@ class RolloutManager:
         init_tracking(args, primary=False, metrics_endpoints=build_sglang_metrics_endpoints(args, self.servers))
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
+        self._dynamic_global_batch_size = None
 
         self._health_monitors = []
         if not self.args.debug_train_only and self.args.rollout_fault_tolerance:
@@ -505,7 +513,7 @@ class RolloutManager:
         for index, episode in enumerate(episodes):
             episode.episode_index = index
             episode.finalize_source_token_alignment()
-        return self._split_episodes_by_dp(episodes, self.train_parallel_config["dp_size"])
+        return self._split_trajectories_by_dp(episodes)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -587,15 +595,36 @@ class RolloutManager:
                 global_batch_size = self._dynamic_global_batch_size
 
             if len(episodes) % global_batch_size != 0:
-                trim_len = (len(episodes) // global_batch_size) * global_batch_size
-                if trim_len == 0:
-                    raise ValueError(f"Not enough episodes {len(episodes)} for global_batch_size {global_batch_size}")
-                origin_len = len(episodes)
-                episodes = episodes[:trim_len]
-                logger.info(f"trim number of episodes from {origin_len} to {trim_len}")
+                episodes = self._trim_whole_groups(episodes, global_batch_size)
             logger.info(f"Final collected {len(episodes)} episodes from rollout to train")
 
         return episodes, metrics
+
+    @staticmethod
+    def _trim_whole_groups(episodes: list[Episode], global_batch_size: int) -> list[Episode]:
+        """Drop whole prompt groups so the GRPO baseline keeps complete groups."""
+        groups = [
+            list(group)
+            for _, group in itertools.groupby(episodes, key=lambda episode: episode.group_index)
+        ]
+
+        target = (len(episodes) // global_batch_size) * global_batch_size
+        kept: list[Episode] = []
+        for group in groups:
+            if len(kept) + len(group) > target:
+                break
+            kept.extend(group)
+        if len(kept) % global_batch_size:
+            raise ValueError(
+                f"trimming whole prompt groups left {len(kept)} episodes, which is not a multiple of "
+                f"global_batch_size {global_batch_size}; prompt group size must divide it"
+            )
+        if not kept:
+            raise ValueError(
+                f"Not enough episodes {len(episodes)} for global_batch_size {global_batch_size}"
+            )
+        logger.info(f"trim number of episodes from {len(episodes)} to {len(kept)}")
+        return kept
 
     def _compute_dynamic_global_batch_size(self, num_samples: int) -> int:
         """Calculate dynamic global_batch_size to ensure only one training step.
@@ -641,21 +670,32 @@ class RolloutManager:
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
 
-    def _split_episodes_by_dp(self, episodes: list[Episode], dp_size: int) -> list:
-        """Split episodes across DP ranks, returning list of ray ObjectRefs."""
-        total_lengths = [len(ep.tokens) for ep in episodes]
+    def _split_trajectories_by_dp(self, episodes: list[Episode]) -> list:
+        """Flatten episodes to trajectories and split them across DP ranks."""
+        dp_size = self.train_parallel_config["dp_size"]
+        global_batch_size = self._dynamic_global_batch_size or self.args.global_batch_size
+        num_steps = max(len(episodes) // global_batch_size, 1)
+        batches = build_dp_batches(
+            episodes,
+            dp_size=dp_size,
+            num_steps=num_steps,
+            loss_normalization_unit=self.args.loss_normalization_unit,
+            pad_token_id=self._pad_token_id,
+            balance_data=self.args.balance_data,
+        )
+        logger.info(
+            "Split %d episodes into %d trajectories per DP rank across %d optimizer steps",
+            len(episodes),
+            len(batches[0]),
+            num_steps,
+        )
+        return [ray.put(batch) for batch in batches]
 
-        if self.args.balance_data:
-            partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
-        else:
-            partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
+    @functools.cached_property
+    def _pad_token_id(self) -> int:
+        from slim.utils.processing_utils import load_tokenizer
 
-        refs = []
-        for i in range(dp_size):
-            partition = partitions[i]
-            partition_episodes = [episodes[j] for j in partition]
-            refs.append(ray.put(partition_episodes))
-        return refs
+        return load_tokenizer(self.args.hf_checkpoint, trust_remote_code=True).pad_token_id
 
 
 def _allocate_rollout_engine_addr_and_ports_external(args, rollout_engines):
@@ -1002,7 +1042,7 @@ def _log_eval_rollout_data(rollout_id, args, data: dict[str, list[Episode]], ext
 
     log_dict = extra_metrics or {}
     for key, episodes in data.items():
-        rewards = [ep.reward for ep in episodes]
+        rewards = [ep.get_reward_value() for ep in episodes]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), f"eval/{key}/")
         if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
@@ -1038,7 +1078,7 @@ def _save_eval_rollout(rollout_id, args, data: dict[str, list[Episode]]):
     for key, episodes in data.items():
         path = Path(path_template.format(rollout_id=rollout_id, dataset_key=key))
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save([ep.tokens for ep in episodes], path)
+        torch.save([[t.token_ids for t in ep.trajectories] for ep in episodes], path)
         logger.info(f"Saved eval rollout to {path}")
 
 
@@ -1050,7 +1090,7 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 
     log_dict = {**(rollout_extra_metrics or {})}
     if episodes:
-        rewards = [ep.reward for ep in episodes]
+        rewards = [ep.get_reward_value() for ep in episodes]
         log_dict["rollout/reward"] = sum(rewards) / len(rewards)
     if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
         log_dict["rollout/rollout_log_probs"] = rollout_log_probs
@@ -1063,36 +1103,37 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 
 
 def _compute_rollout_log_probs_metric(episodes: list[Episode]) -> float | None:
-    """Mean over samples of each sample's mean rollout log-prob across response tokens.
+    """Mean over trajectories of each one's mean rollout log-prob across response tokens.
 
     This belongs to rollout logging because these log-probs are emitted by the
     rollout engine before actor-side training diagnostics are computed.
     """
-    per_sample_means = []
-    for ep in episodes:
-        if ep.rollout_log_probs is None:
+    per_trajectory_means = []
+    for trajectory in (t for ep in episodes for t in ep.trajectories):
+        if trajectory.rollout_log_probs is None:
             continue
-        log_probs = torch.as_tensor(ep.rollout_log_probs, dtype=torch.float32)
-        if ep.loss_mask is None:
+        log_probs = torch.as_tensor(trajectory.rollout_log_probs, dtype=torch.float32)
+        if trajectory.loss_mask is None:
             mask = torch.ones_like(log_probs, dtype=torch.float32)
         else:
-            mask = torch.as_tensor(ep.loss_mask, dtype=torch.float32)
+            mask = torch.as_tensor(trajectory.loss_mask, dtype=torch.float32)
         denom = mask.sum().clamp_min(1)
-        per_sample_means.append(((log_probs * mask).sum() / denom).item())
-    if not per_sample_means:
+        per_trajectory_means.append(((log_probs * mask).sum() / denom).item())
+    if not per_trajectory_means:
         return None
-    return sum(per_sample_means) / len(per_sample_means)
+    return sum(per_trajectory_means) / len(per_trajectory_means)
 
 
 def _compute_episode_metrics(args, episodes: list[Episode]):
-    context_lengths = [len(ep.tokens) for ep in episodes]
-
     log_dict = {}
-    log_dict |= dict_add_prefix(compute_statistics(context_lengths), "context_len/")
-    log_dict |= _compute_zero_std_metrics(args, episodes)
-    log_dict["context_len/repetition_frac"] = sum(int(has_repetition(ep.generated_text or "")) for ep in episodes) / max(
-        len(episodes), 1
+    log_dict |= dict_add_prefix(compute_statistics([ep.token_count for ep in episodes]), "context_len/")
+    log_dict |= dict_add_prefix(
+        compute_statistics([len(ep.trajectories) for ep in episodes]), "trajectories/"
     )
+    log_dict |= _compute_zero_std_metrics(args, episodes)
+    log_dict["context_len/repetition_frac"] = sum(
+        int(any(has_repetition(t.generated_text or "") for t in ep.trajectories)) for ep in episodes
+    ) / max(len(episodes), 1)
     log_dict["context_len/truncated_ratio"] = sum(int(ep.status == Episode.Status.TRUNCATED) for ep in episodes) / max(
         len(episodes), 1
     )
@@ -1114,14 +1155,13 @@ def _compute_zero_std_metrics(args, episodes: list[Episode]):
     if args.advantage_estimator == "ppo_gae":
         return {}
 
-    n = args.n_samples_per_prompt
-    groups = [episodes[i : i + n] for i in range(0, len(episodes), n)]
+    groups: dict[Any, list[float]] = {}
+    for episode in episodes:
+        groups.setdefault(episode.group_index, []).append(episode.get_reward_value())
 
-    def _is_zero_std(group):
-        rewards = [ep.reward for ep in group]
-        return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
-
-    interesting = [g for g in groups if _is_zero_std(g)]
-    interesting_rewards = [str(round(g[0].reward, 1)) for g in interesting]
-
-    return {f"zero_std/count_{reward}": len(items) for reward, items in group_by(interesting_rewards).items()}
+    counts = Counter(
+        str(round(rewards[0], 1))
+        for rewards in groups.values()
+        if all(reward == rewards[0] for reward in rewards)
+    )
+    return {f"zero_std/count_{label}": count for label, count in counts.items()}

@@ -2,12 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import logging
 import random
-
-import aiohttp
-
-logger = logging.getLogger(__name__)
 
 from slim.utils.misc import load_function
 from slim.utils.types import Episode
@@ -18,64 +13,21 @@ from .gpqa import compute_gpqa_reward
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
-_shared_session: aiohttp.ClientSession | None = None
 
-
-def _get_shared_session() -> aiohttp.ClientSession:
-    global _shared_session
-    if _shared_session is None or _shared_session.closed:
-        connector = aiohttp.TCPConnector(
-            limit=64,
-            enable_cleanup_closed=True,
-        )
-        timeout = aiohttp.ClientTimeout(total=120)
-        _shared_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
-    return _shared_session
-
-
-async def remote_rm(args, episode: Episode, max_retries: int = 10):
-    payload = {
-        "prompt": episode.example.get("prompt", ""),
-        "response": episode.generated_text or "",
-        "text": episode.text or "",
-        "label": episode.example.get("label"),
-    }
-    session = _get_shared_session()
-    for attempt in range(max_retries):
-        try:
-            async with session.post(args.rm_url, json=payload) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-        except Exception as e:
-            if attempt + 1 >= max_retries:
-                logger.warning(f"remote_rm failed after {attempt + 1} attempts: {e}")
-                raise
-            backoff = min(2**attempt, 30) + random.random()
-            logger.info(f"remote_rm: {type(e).__name__}, retrying in {backoff:.1f}s ({attempt + 1}/{max_retries})")
-            await asyncio.sleep(backoff)
-
-
-async def async_rm(args, episode: Episode, **kwargs):
-    if args.custom_rm_path is not None:
-        rm_function = load_function(args.custom_rm_path)
-        return await rm_function(args, episode, **kwargs)
-
+async def _rule_based_reward(args, episode: Episode, **kwargs) -> int | float:
     metadata = episode.example.get("metadata") or {}
     if isinstance(metadata, str):
         import json
         metadata = json.loads(metadata)
     rm_type = (metadata.get("rm_type") or args.rm_type or "").strip()
-    response = episode.generated_text or ""
+    # the built-in scorer reads the last trajectory holding the attempt's answer;
+    response = episode.trajectories[-1].generated_text or ""
     label = episode.example.get("label")
     if rm_type.startswith("boxed_"):
         response = extract_boxed_answer(response) or ""
         rm_type = rm_type[len("boxed_") :]
 
-    # This function is intended for remote or time-consuming reward model evaluation.
-    # Implement the actual logic as needed.
-    if rm_type == "remote_rm":
-        return await remote_rm(args, episode)
-    elif rm_type == "deepscaler":
+    if rm_type == "deepscaler":
         return get_deepscaler_rule_based_reward(response, label)
     elif rm_type == "math":
         return 1 if grade_answer_verl(response, label) else 0
@@ -95,15 +47,18 @@ async def async_rm(args, episode: Episode, **kwargs):
         raise NotImplementedError("Rule-based RM type is not specified.")
 
 
-async def batched_async_rm(
-    args,
-    episodes: list[Episode],
-    **kwargs,
-) -> list[int | float]:
+async def async_rm(args, episode: Episode, **kwargs) -> None:
+    """Score one attempt in place, on `episode.reward` or on each `trajectory.reward`."""
     if args.custom_rm_path is not None:
-        # Ensure the custom reward function is implemented in batch mode
-        rm_function = load_function(args.custom_rm_path)
-        return await rm_function(args, episodes, **kwargs)
-    tasks = [async_rm(args, episode, **kwargs) for episode in episodes]
-    rewards = await asyncio.gather(*tasks)
-    return rewards
+        await load_function(args.custom_rm_path)(args, episode, **kwargs)
+    else:
+        episode.reward = await _rule_based_reward(args, episode, **kwargs)
+
+
+async def batched_async_rm(args, episodes: list[Episode], **kwargs) -> None:
+    """Score a whole group in place with `--group-rm`"""
+    if args.custom_rm_path is not None:
+        await load_function(args.custom_rm_path)(args, episodes, **kwargs)
+        return
+    await asyncio.gather(*[async_rm(args, episode, **kwargs) for episode in episodes])
+

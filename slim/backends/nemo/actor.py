@@ -34,8 +34,8 @@ from .packed_cp_forward import prepare_forward
 from .loss import (
     count_global_denominators,
     entropy_from_logits,
-    normalize_policy_values,
-    normalize_sequence_values,
+    reduce_token_mean,
+    reduce_weighted_sequence_mean,
     selective_log_probs,
     sequence_mean_at_tokens,
 )
@@ -163,8 +163,8 @@ class ActorNeMoTrainer(NeMoTrainer):
                 active_model.train()
 
     def compute_log_probs(self, rollout_data_ref: list) -> None:
-        episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-        packed_batches, grad_accum = self._packed_data(episodes)
+        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+        packed_batches, grad_accum = self._packed_data(batch)
         if self.ref_model is not None or self._needs_actor_old_log_probs():
             self.wake_up()
             if self.ref_model is not None:
@@ -200,43 +200,6 @@ class ActorNeMoTrainer(NeMoTrainer):
                 for name, values in custom_metrics.items()
             }
 
-    def _normalize_policy(
-        self,
-        values: torch.Tensor,
-        mask: torch.Tensor,
-        document_ids: torch.Tensor,
-        num_documents: int,
-        global_sequences: torch.Tensor,
-        global_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        return normalize_policy_values(
-            values,
-            mask,
-            document_ids,
-            num_documents,
-            sum_tokens=self.args.calculate_per_token_loss,
-            global_sequences=global_sequences,
-            global_tokens=global_tokens,
-            cp_group=self.cp_group,
-        )
-
-    def _normalize_sequence(
-        self,
-        values: torch.Tensor,
-        mask: torch.Tensor,
-        document_ids: torch.Tensor,
-        num_documents: int,
-        global_sequences: torch.Tensor,
-    ) -> torch.Tensor:
-        return normalize_sequence_values(
-            values,
-            mask,
-            document_ids,
-            num_documents,
-            global_sequences,
-            self.cp_group,
-        )
-
     def _policy_loss(
         self,
         logits: torch.Tensor,
@@ -245,6 +208,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         num_documents: int,
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
+        loss_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         labels = fields["labels"]
         mask = fields["loss_masks"].to(torch.float32)
@@ -279,41 +243,52 @@ class ActorNeMoTrainer(NeMoTrainer):
         effective_mask = fields.get("mismatch_masks", mask).to(mask.dtype)
         if "mismatch_weights" in fields:
             pg_values = pg_values * fields["mismatch_weights"].to(pg_values.dtype)
+        pg_kl_values = torch.exp(-policy_log_ratio) + policy_log_ratio - 1
 
-        pg_loss = self._normalize_policy(
-            pg_values,
-            effective_mask,
-            document_ids,
-            num_documents,
-            global_sequences,
-            global_tokens,
-        )
-        pg_clipfrac = self._normalize_policy(
-            clip_values,
-            mask,
-            document_ids,
-            num_documents,
-            global_sequences,
-            global_tokens,
-        )
-        pg_kl_k3 = self._normalize_policy(
-            torch.exp(-policy_log_ratio) + policy_log_ratio - 1,
-            mask,
-            document_ids,
-            num_documents,
-            global_sequences,
-            global_tokens,
-        )
+        if self.args.loss_normalization_unit == "token":
+            pg_loss = reduce_token_mean(pg_values, effective_mask, global_tokens)
+            pg_clipfrac = reduce_token_mean(clip_values, mask, global_tokens)
+            pg_kl_k3 = reduce_token_mean(pg_kl_values, mask, global_tokens)
+        else:
+            pg_loss = reduce_weighted_sequence_mean(
+                pg_values,
+                effective_mask,
+                document_ids,
+                num_documents,
+                global_sequences,
+                self.cp_group,
+                loss_weights,
+            )
+            pg_clipfrac = reduce_weighted_sequence_mean(
+                clip_values,
+                mask,
+                document_ids,
+                num_documents,
+                global_sequences,
+                self.cp_group,
+                loss_weights,
+            )
+            pg_kl_k3 = reduce_weighted_sequence_mean(
+                pg_kl_values,
+                mask,
+                document_ids,
+                num_documents,
+                global_sequences,
+                self.cp_group,
+                loss_weights,
+            )
 
         zero = logits.new_zeros((), dtype=torch.float32)
         entropy_loss = zero
         if local_entropy is not None:
-            entropy_loss = self._normalize_sequence(
+            entropy_loss = reduce_weighted_sequence_mean(
                 local_entropy,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
+                self.cp_group,
+                loss_weights,
             )
 
         kl_loss = zero
@@ -329,12 +304,14 @@ class ActorNeMoTrainer(NeMoTrainer):
                 kl_loss_type=self.args.kl_loss_type,
                 importance_ratio=importance_ratio,
             )
-            kl_loss = self._normalize_sequence(
+            kl_loss = reduce_weighted_sequence_mean(
                 kl_values,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
+                self.cp_group,
+                loss_weights,
             )
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss + self.args.kl_loss_coef * kl_loss
@@ -349,29 +326,35 @@ class ActorNeMoTrainer(NeMoTrainer):
             metrics["kl_loss"] = kl_loss.detach()
         if "actor_old_log_probs" in fields and "rollout_log_probs" in fields:
             mismatch_ratio = fields["actor_old_log_probs"] - fields["rollout_log_probs"]
-            metrics["mismatch/kl_k3"] = self._normalize_sequence(
+            metrics["mismatch/kl_k3"] = reduce_weighted_sequence_mean(
                 torch.exp(mismatch_ratio) - mismatch_ratio - 1,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
+                self.cp_group,
+                loss_weights,
             ).detach()
-            metrics["mismatch/log_prob_abs_diff"] = self._normalize_sequence(
+            metrics["mismatch/log_prob_abs_diff"] = reduce_weighted_sequence_mean(
                 mismatch_ratio.abs(),
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
+                self.cp_group,
+                loss_weights,
             ).detach()
         for name, values in fields.items():
             if not name.startswith("mismatch/"):
                 continue
-            metrics[name] = self._normalize_sequence(
+            metrics[name] = reduce_weighted_sequence_mean(
                 values,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
+                self.cp_group,
+                loss_weights,
             ).detach()
         return loss, metrics
 
@@ -413,6 +396,11 @@ class ActorNeMoTrainer(NeMoTrainer):
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        loss_weights = torch.tensor(
+            pack["loss_weights"],
+            dtype=torch.float32,
+            device=torch.cuda.current_device(),
+        )
         prepared = prepare_forward(
             self.model,
             self.device_mesh,
@@ -446,6 +434,7 @@ class ActorNeMoTrainer(NeMoTrainer):
                     num_documents=pack["cu_seqlens"].numel() - 1,
                     global_sequences=global_sequences,
                     global_tokens=global_tokens,
+                    loss_weights=loss_weights,
                 )
             (loss * self.backward_group_size).backward()
         return metrics

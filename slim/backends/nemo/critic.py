@@ -20,7 +20,7 @@ from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .packed_cp_forward import prepare_forward
-from .loss import count_global_denominators, normalize_sequence_values
+from .loss import count_global_denominators, reduce_weighted_sequence_mean
 from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
 
@@ -94,8 +94,8 @@ class CriticNeMoTrainer(NeMoTrainer):
         return self.value_head(get_final_hidden_states(output))
 
     def compute_values(self, rollout_data_ref: list) -> dict:
-        episodes = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
-        packed_batches, grad_accum = self._packed_data(episodes)
+        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+        packed_batches, grad_accum = self._packed_data(batch)
 
         self.wake_up()
         self.model.eval()
@@ -118,16 +118,16 @@ class CriticNeMoTrainer(NeMoTrainer):
         self.model.train()
         self.value_head.train()
 
-        all_values: list[torch.Tensor | None] = [None] * len(episodes)
+        all_values: list[torch.Tensor | None] = [None] * len(batch)
         for pack in packed_batches:
-            for episode_index, batch in zip(
-                pack["_episode_dp_indices"],
+            for document_index, document in zip(
+                pack["_document_indices"],
                 unpack_sequences(pack),
                 strict=True,
             ):
-                all_values[episode_index] = batch["cur_values"]
+                all_values[document_index] = document["cur_values"]
         if any(value is None for value in all_values):
-            raise RuntimeError("critic value reconstruction omitted an episode")
+            raise RuntimeError("critic value reconstruction omitted a trajectory")
 
         self._cache_packed_data(packed_batches, grad_accum)
         return {
@@ -151,6 +151,11 @@ class CriticNeMoTrainer(NeMoTrainer):
         )
         if is_final:
             self._prepare_final_backward()
+        loss_weights = torch.tensor(
+            pack["loss_weights"],
+            dtype=torch.float32,
+            device=torch.cuda.current_device(),
+        )
         with self._sync_context(is_final), prepared.context_factory():
             values = self._forward_values(prepared)
             mask = prepared.fields["loss_masks"].to(values.dtype)
@@ -164,21 +169,23 @@ class CriticNeMoTrainer(NeMoTrainer):
             )
             document_ids = prepared.fields["document_ids"]
             num_documents = pack["cu_seqlens"].numel() - 1
-            value_loss = normalize_sequence_values(
+            value_loss = reduce_weighted_sequence_mean(
                 value_values,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
                 self.cp_group,
+                loss_weights,
             )
-            value_clipfrac = normalize_sequence_values(
+            value_clipfrac = reduce_weighted_sequence_mean(
                 clip_values,
                 mask,
                 document_ids,
                 num_documents,
                 global_sequences,
                 self.cp_group,
+                loss_weights,
             )
             (value_loss * self.backward_group_size).backward()
         return {

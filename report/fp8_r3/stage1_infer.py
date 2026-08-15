@@ -27,7 +27,6 @@ def build_args(model_dir: str, rm_type: str, max_context_len: int, concurrency: 
         custom_rm_path=None,
         max_context_len=max_context_len,
         rollout_temperature=1.0,
-        rollout_sampling_params={},
         apply_chat_template_kwargs={"enable_thinking": False},
         use_rollout_routing_replay=r3,
         rollout_concurrency_per_replica=concurrency,
@@ -127,7 +126,7 @@ def main():
 
     # slim's GenerateState gives us the same tokenizer/processor/routing-shape the real rollout uses.
     from slim.rollout.sglang_rollout import GenerateState
-    from slim.utils.types import Episode
+    from slim.utils.types import Episode, Trajectory
 
     GenerateState._instances = {}  # singleton reset between configs in one process
     state = GenerateState(args)
@@ -174,12 +173,7 @@ def main():
         # --max-new-tokens cap is given. Per-request because prompts differ in length.
         budget = max(1, args_cli.max_context_len - prompt_len)
         cap = budget if args_cli.max_new_tokens is None else min(args_cli.max_new_tokens, budget)
-        return {
-            "temperature": args.rollout_temperature,
-            "no_stop_trim": True,
-            "spaces_between_special_tokens": False,
-            "max_new_tokens": cap,
-        }
+        return {"temperature": args.rollout_temperature, "max_new_tokens": cap}
 
     # Expand to S samples per prompt; track origin so accuracy aggregates per prompt if desired.
     jobs = []  # (example_idx, example, prompt_ids, mm_inputs)
@@ -227,14 +221,14 @@ def main():
             truncated = finish_type == "length"
 
             # Build prediction fields, then finalize them to Slim's source-token layout.
-            ep = Episode.from_example(ex)
-            ep.tokens = list(pids)
             P = len(pids)
-            ep.loss_mask = [0] * max(P - 1, 0)
-            ep.rollout_log_probs = [0.0] * max(P - 1, 0)
-            ep.tokens.extend(new_tokens)
-            ep.loss_mask.extend([1] * len(new_tokens))
-            ep.rollout_log_probs.extend(new_lps)
+            traj = Trajectory(
+                token_ids=list(pids) + new_tokens,
+                loss_mask=[0] * max(P - 1, 0) + [1] * len(new_tokens),
+                rollout_log_probs=[0.0] * max(P - 1, 0) + new_lps,
+            )
+            ep = Episode.from_example(ex)
+            ep.trajectories.append(traj)
 
             routed = None
             if routing_shape is not None:
@@ -245,9 +239,9 @@ def main():
                     L, K = routing_shape
                     arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
                     routed = arr.reshape(-1, L, K)  # [num_predictions, L, K]
-                    ep.rollout_routed_experts = routed
+                    traj.rollout_routed_experts = routed
 
-            ep.generated_text = state.tokenizer.decode(new_tokens)
+            traj.generated_text = state.tokenizer.decode(new_tokens)
             r = asyncio.run(score(args, ep))
             ep.finalize_source_token_alignment()
             rewards.append(r)
@@ -261,9 +255,9 @@ def main():
             rec = {
                 "sample_idx": j,
                 "example_idx": ei,
-                "tokens": ep.tokens.tolist(),
-                "loss_mask": ep.loss_mask.tolist(),
-                "rollout_log_probs": ep.rollout_log_probs.tolist(),
+                "tokens": traj.token_ids.tolist(),
+                "loss_mask": traj.loss_mask.tolist(),
+                "rollout_log_probs": traj.rollout_log_probs.tolist(),
                 "num_prompt_tokens": P,
                 "reward": float(r),
                 "label": ex.get("label"),
@@ -273,8 +267,8 @@ def main():
                 "truncated": bool(truncated),  # True == hit length budget (no natural EOS)
             }
             C.append_record(fh, rec)
-            if ep.rollout_routed_experts is not None:
-                C.save_experts(out_dir, j, ep.rollout_routed_experts.numpy())
+            if traj.rollout_routed_experts is not None:
+                C.save_experts(out_dir, j, traj.rollout_routed_experts.numpy())
             n_records += 1
             if j % 100 == 0:
                 print(f"[score {j}/{len(jobs)}] acc={np.mean(rewards):.3f} elapsed={time.time()-t0:.0f}s", flush=True)

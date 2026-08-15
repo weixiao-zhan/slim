@@ -24,7 +24,9 @@ The two design axes are:
 ## Advantage Estimators
 
 `--advantage-estimator` controls how per-token advantages $A_{i,t}$ are derived from rewards.
-The driver invokes `AdvantageEstimator.compute_training_targets()` after rollout. It processes the complete batch in `episode_index` order and writes targets through `Episode.set_train_targets()`.
+The driver invokes `AdvantageEstimator.compute_training_targets()` after rollout. It regroups the flattened trajectories by `episode_index` so baselines see an attempt as a unit, then writes targets through `Trajectory.set_train_targets()`.
+
+Reward lives on the trajectory. The reward model can score each `Trajectory.reward`, or score `Episode.reward`, which is short-hand for broadcasting to every trajectory.
 
 ### `ppo_gae`
 
@@ -35,19 +37,27 @@ GAE computes advantages with discount $\gamma$ (`--gamma`, default 1.0) and lamb
 $$\delta_{i,t} = R_{i,t} + \gamma V_{i,t+1} - V_{i,t}$$
 $$A_{i,t} = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{i,t+l}$$
 
-The reward is placed at the last response token; all others have $R_{i,t} = 0$.
+The reward is placed at the last response token of each trajectory; all others have $R_{i,t} = 0$.
 Masked prompt, observation, and terminal source positions do not advance the GAE recurrence and receive zero advantage.
+
+The recurrence runs per trajectory, which is contiguous, so the recurrence within one is sound; it does not cross trajectory boundaries, since bootstrapping $V$ from one into another would require knowing which follows which. Each computes its own return from the reward it received.
 
 ### `grpo` (default)
 
 Group-Relative Policy Optimization simplifies PPO-GAE by eliminating the critic entirely.
-Instead of learning a value baseline, it uses the other sequences from the same prompt group as the baseline.
-The raw rewards remain unchanged. GRPO computes one group-relative advantage per sequence from the $n$ sequences sampled for the same prompt:
+Instead of learning a value baseline, it uses the other attempts on the same prompt as the baseline.
+The raw rewards remain unchanged. Group statistics are computed over **episode-level scalars**, scattered by `group_index`.
 
-$$A_{i,t} = \frac{R_i - \text{mean}(R_{1..n})}{\text{std}(R_{1..n})}$$
+For group $g$ with episodes $e \in g$, let $R_e$ be the mean of episode $e$'s trajectory rewards. Then for each trajectory $\tau$ of each episode in the group:
+
+$$A_{\tau} = \frac{R_\tau - \text{mean}_{e \in g}(R_e)}{\text{std}_{e \in g}(R_e)}$$
+
+The baseline and scale come from episode-level statistics, so an episode that made 20 generation calls does not dominate the group mean of one that made a single call.
+The numerator is the trajectory's own reward, so within-episode differentiation survives when rewards are genuinely per-trajectory.
+For single-trajectory episodes this reduces to the per-sequence form.
 
 `--disable-group-advantage-std-normalization` keeps the mean-centering step but omits division by the group standard deviation.
-`--disable-group-advantage-normalization` skips both operations and uses $A_{i,t} = R_i$, providing REINFORCE-style reward direction without changing the stored raw reward.
+`--disable-group-advantage-normalization` skips both operations and uses $A_{\tau} = R_\tau$, providing REINFORCE-style reward direction without changing the stored raw reward.
 
 
 ### `gspo`
@@ -125,7 +135,7 @@ Entropy calculation requires realizing full `[seq_len, vocab]` which consumes si
 ## Critic Value Loss
 
 When using `ppo_gae`, the critic is trained alongside the actor.
-The critic first produces the old per-token predictions consumed by `AdvantageEstimator`. The estimator writes actor `advantages`, critic `values`, and critic `value_targets` to each episode. The actor and critic then train from separate physical packs.
+The critic first produces the old per-token predictions consumed by `AdvantageEstimator`. The estimator writes actor `advantages`, critic `values`, and critic `value_targets` to each trajectory. The actor and critic then train from separate physical packs.
 
 The critic updates its weights to minimize:
 $$L_\text{value} = \frac{1}{2}\max\left((V_\theta - G)^2,\ \left(\text{clip}(V_\theta, V_\text{old} \pm \varepsilon_v) - G\right)^2\right)$$
@@ -138,8 +148,25 @@ Before its start step, a component has zero learning rate and does not accumulat
 
 ## Loss Reduction
 
-By default, per-token losses within each sequence are averaged, then summed across the batch.
-When `--calculate-per-token-loss` is set, per-token losses are summed (not averaged) within each sequence, weighting longer responses more.
+`--loss-normalization-unit` selects the unit the loss denominator counts.
+
+| Value | Weighting | Meaning |
+|---|---|---|
+| `episode` (default) | $w_d = 1 / k_{e(d)}$ | Each attempt weighted equally. Pairs with the episode-level GRPO baseline. |
+| `trajectory` | $w_d = 1$ | Each generation call weighted equally. |
+| `token` | — | Token-sum denominator, no per-document weight. |
+
+Both sequence-level units are one formula over the per-document weight $w_d$, where $d$ ranges over packed documents (trajectories) and $m_{d,t}$ is the loss mask:
+
+$$L = \frac{1}{\sum_d w_d} \sum_{d} w_d \cdot \frac{\sum_t v_{d,t} m_{d,t}}{\sum_t m_{d,t}}$$
+
+Under `episode`, $\sum_d w_d$ counts attempts and the loss is a mean over episodes of the mean over each episode's trajectories. Under `trajectory` it is the document mean. The two coincide for single-trajectory episodes.
+
+`episode` is the default because group centering zeroes the mean advantage per *episode*, so the denominator must use the same unit. Otherwise an episode with $k$ trajectories carries $k$ times the gradient weight of a single-trajectory episode and the advantage mean over the gradient is not zero. It is also the setting under which a broadcast episode reward stays credit-neutral: reward $R$ spread over $k$ trajectories each weighing $1/k$ gives the attempt total credit $R$.
+
+Choosing `trajectory` weights a 50-call attempt 50 times as heavily as a single-call one, which is deliberate only when the generation call is genuinely the unit of interest. Under `token`, per-token losses are summed rather than averaged within each document, weighting longer responses more.
+
+`Trajectory.loss_weight` carries $w_d$: the flattener writes $1/k_e$ under `episode`, $1.0$ under `trajectory`, and $0.0$ for padding trajectories. The loss applies $w_d$ and divides by $\sum_d w_d$ with no mode switch, and `count_global_denominators` reduces that one sum over the DP group.
 
 ## CLI Reference
 
@@ -162,7 +189,7 @@ When `--calculate-per-token-loss` is set, per-token losses are summed (not avera
 | `--value-clip` | `0.2` | Critic value loss clip range |
 | `--old-logprob-source` | `actor` | Source of old log-probs: `actor`, `rollout` |
 | `--mismatch-correction` | `none` | `none`, `custom` |
-| `--calculate-per-token-loss` | `False` | Sum (not average) token losses within each sequence |
+| `--loss-normalization-unit` | `episode` | Loss denominator unit: `episode`, `trajectory`, `token` |
 | `--loss-type` | `policy_loss` | `policy_loss`, `custom_loss` |
 | `--ref-load` | `None` | Reference model checkpoint |
 
