@@ -2,9 +2,9 @@
 
 **slim** is a lightweight fork of [slime](https://github.com/THUDM/slime) (v0.2.3) that is better suited for VLM and research and prototype.
 
-We love slime — it is well-architected and customizable. 
+We love slime — it is well-architected and customizable.
 We also love NeMo AutoModel and FSDP2 — they provide context and expert parallelism for VLM and research.
-However, slime [deprecated FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron. 
+However, slime [deprecated FSDP backend](https://github.com/THUDM/slime/commit/0d0b974d) in favor of Megatron.
 
 Thus we forked `slim` — keeping Slime's customizability and efficient RL orchestration while optimizing for VLMs.
 
@@ -14,7 +14,7 @@ Thus we forked `slim` — keeping Slime's customizability and efficient RL orche
 - [ ] True parallel generate function
 - [x] Decouple colocate critic and colocate rollout placement (train PPO on one GPU).
 - [x] FP8 inference (per-block with fp32 or UE8M0 scale)
-- [x] Rollout Routing Replay for MoE and use processor output format to avoid vision token drifts. 
+- [x] Rollout Routing Replay for MoE and use processor output format to avoid vision token drifts.
 - [x] Over-sampled groups that are partial complete are not discarded and save to next step.
 - [x] Support mixed modality (pure text + vision) training batch.
 - [x] Overlap actor forward pass for ref-log-probs and critic forward pass for values.

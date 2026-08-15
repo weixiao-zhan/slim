@@ -2,24 +2,19 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Episode/Trajectory layout sweep: exercises the flatten-pad-partition boundary across
-# loss normalization units, advantage estimators, multi-step rollouts, and context
-# parallel, on a 4-GPU node with Qwen3.5-2B.
-#
-# Usage:  bash tests/sweep_trajectory.sh [combo_name ...]
+# Compare episode and trajectory packing configurations.
 source "$(dirname "$0")/common.sh"
 
-MODEL_DIR="$REPO_DIR/models/Qwen3.5-2B"
+MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 
-# Sizes: 8 prompts x 4 samples = 32 episodes; 2 rollout steps.
-# Disaggregated placement: 2 GPUs train, 2 serve rollout, so weight sync goes over
-# NCCL rather than the CUDA IPC path, which needs CAP_SYS_PTRACE.
+# Disaggregated placement: 2 GPUs train while 2 serve the next rollout through the
+# one-step-off-policy async trainer. Weight sync uses NCCL instead of CUDA IPC.
 COMMON_ARGS="
-    --num-rollout 2
+    --num-rollout 4
     --rollout-batch-size 8
     --n-samples-per-prompt 4
-    --max-context-len 4096
+    --max-context-len $(K 16)
     --rollout-temperature 1
     --rollout-shuffle
 
@@ -33,17 +28,19 @@ COMMON_ARGS="
     --sglang-page-size 64
     --sglang-attention-backend triton
 
+    --actor-num-gpus 2
     --activation-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 4096
+    --max-tokens-per-gpu $(K 16)
 
     --old-logprob-source rollout
+
     --lr 1e-6
-    --actor-num-gpus 2
+
     --hf-checkpoint $MODEL_DIR
 "
 
-GRPO="--advantage-estimator grpo --disable-group-advantage-std-normalization"
+GRPO="$(group_advantage_filter_args 32) --advantage-estimator grpo --disable-group-advantage-std-normalization"
 
 # One optimizer step per rollout: the whole batch lands in a single step.
 UNIT_EPISODE_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episode"
@@ -57,9 +54,9 @@ MULTI_STEP_ARGS="$GRPO --num-steps-per-rollout 2 --loss-normalization-unit episo
 CP2_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episode --context-parallel-size 2"
 
 # Group std normalization exercises the Bessel-corrected per-group scatter.
-GRPO_STD_ARGS="--advantage-estimator grpo --num-steps-per-rollout 1 --loss-normalization-unit episode"
+GRPO_STD_ARGS="$(group_advantage_filter_args 32) --advantage-estimator grpo --num-steps-per-rollout 1 --loss-normalization-unit episode"
 
-GSPO_ARGS="--advantage-estimator gspo --disable-group-advantage-std-normalization --num-steps-per-rollout 1 --loss-normalization-unit episode --eps-clip 3e-4 --eps-clip-high 4e-4"
+GSPO_ARGS="$(group_advantage_filter_args 32) --advantage-estimator gspo --disable-group-advantage-std-normalization --num-steps-per-rollout 1 --loss-normalization-unit episode --eps-clip 3e-4 --eps-clip-high 4e-4"
 
 # PPO adds the critic value round trip over trajectory-keyed values.
 PPO_ARGS="--advantage-estimator ppo_gae --num-steps-per-rollout 1 --loss-normalization-unit episode --value-clip 0.2 --eps-clip 0.2 --eps-clip-high 0.28 --lr-critic 5e-5 --critic-num-gpus 2 --critic-colocate"
@@ -71,8 +68,7 @@ FIXED_MBS_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episod
 # Round-robin assignment instead of Karmarkar-Karp balancing.
 NO_BALANCE_ARGS="$GRPO --num-steps-per-rollout 1 --loss-normalization-unit episode --no-balance-data"
 
-# combo -> "expect_actor|expect_critic|combo_args". Each combo's args must stay on one
-# line: `read` below consumes only the first line of the spec.
+# combo -> "expect_actor|expect_critic|combo_args"
 declare -A COMBOS
 COMBOS[unit_episode]="1|0|$UNIT_EPISODE_ARGS"
 COMBOS[unit_trajectory]="1|0|$UNIT_TRAJECTORY_ARGS"
@@ -88,8 +84,6 @@ COMBOS[no_balance]="1|0|$NO_BALANCE_ARGS"
 ORDER=(unit_episode unit_trajectory unit_token multi_step cp2 grpo_std gspo ppo fixed_mbs no_balance)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
-# Submit all combos to one cluster; they queue and run sequentially.
-# See tests/RUNNING_TESTS.md for watching/grading via ray job logs.
 start_ray
 
 for name in "${ORDER[@]}"; do
@@ -97,5 +91,5 @@ for name in "${ORDER[@]}"; do
     if [[ -z "$spec" ]]; then echo "Unknown combo: $name"; exit 2; fi
     IFS='|' read -r expect_actor expect_critic combo_args <<< "$spec"
     echo ">>> Submitting $name  (expect_actor=$expect_actor, expect_critic=$expect_critic)"
-    run_train "$COMMON_ARGS $combo_args"
+    run_train "$COMMON_ARGS $combo_args" slim-train-async
 done

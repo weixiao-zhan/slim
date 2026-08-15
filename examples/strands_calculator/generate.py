@@ -40,7 +40,7 @@ from slim.utils.processing_utils import decode_tensor_envelopes
 from slim.utils.types import Episode, Trajectory
 
 _MAX_AGENT_TURNS = 2
-_MAX_TOKENS_PER_TURN = 16384
+_MAX_TOKENS_PER_TURN = 20 * 1024
 
 # How the engine ended the attempt's last call is what the attempt amounts to.
 _STATUS_BY_FINISH_REASON = {
