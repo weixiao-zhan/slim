@@ -7,7 +7,7 @@
 #
 # All backends here consume our fp32 block scales EXCEPT deep_gemm (ue8m0) — which we
 # exclude because slim's online weight-sync emits fp32 scales (would be unsafe). The
-# tuned Triton config (tools/triton_fp8_configs/, installed via patch_sglang.py) only affects
+# tuned Triton config (tools/triton_fp8_configs/, installed via patch_dependencies.py) only affects
 # the `triton` backend.
 #
 # Uses sglang.bench_one_batch: prefill + decode on a fixed batch, reports median decode

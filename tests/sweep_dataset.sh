@@ -31,16 +31,12 @@ COMMON_ARGS="
     --actor-num-gpus 2
     --critic-num-gpus 2
     --rollout-num-gpus 4
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
     --advantage-estimator ppo_gae
     --value-clip 0.2 --eps-clip 0.2 --eps-clip-high 0.28
-    --optimizer adam
     --lr 1e-6
     --lr-critic 5e-5
     --hf-checkpoint $MODEL_DIR

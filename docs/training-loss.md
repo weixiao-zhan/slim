@@ -7,7 +7,7 @@ The training loop then computes advantages $A_{i,t}$ and updates $\pi_\theta$ vi
 
 Denote $\pi(x_{i,t})$: shorthand for $\pi(x_{i,t} | x_{i,<t})$;
 $\pi_\theta$: the training policy; 
-$\pi_\text{old}$: the policy used for generation running on FSDP backend;
+$\pi_\text{old}$: the actor policy used to compute the importance-ratio baseline;
 $\pi_\text{rollout}$: the policy used for generation running on SGLang; 
 $\pi_\text{ref}$: frozen reference.
 
@@ -24,6 +24,7 @@ The two design axes are:
 ## Advantage Estimators
 
 `--advantage-estimator` controls how per-token advantages $A_{i,t}$ are derived from rewards.
+The driver invokes `AdvantageEstimator.compute_training_targets()` after rollout. It processes the complete batch in `episode_index` order and writes targets through `Episode.set_train_targets()`.
 
 ### `ppo_gae`
 
@@ -35,15 +36,18 @@ $$\delta_{i,t} = R_{i,t} + \gamma V_{i,t+1} - V_{i,t}$$
 $$A_{i,t} = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{i,t+l}$$
 
 The reward is placed at the last response token; all others have $R_{i,t} = 0$.
-For long sequences, GAE uses a chunked parallel prefix scan (chunk size 128) to reduce sequential depth.
+Masked prompt, observation, and terminal source positions do not advance the GAE recurrence and receive zero advantage.
 
 ### `grpo` (default)
 
 Group-Relative Policy Optimization simplifies PPO-GAE by eliminating the critic entirely.
 Instead of learning a value baseline, it uses the other sequences from the same prompt group as the baseline.
-Rewards are normalized within each prompt group (the $n$ sequences sampled from the same prompt):
+The raw rewards remain unchanged. GRPO computes one group-relative advantage per sequence from the $n$ sequences sampled for the same prompt:
 
 $$A_{i,t} = \frac{R_i - \text{mean}(R_{1..n})}{\text{std}(R_{1..n})}$$
+
+`--disable-group-advantage-std-normalization` keeps the mean-centering step but omits division by the group standard deviation.
+`--disable-group-advantage-normalization` skips both operations and uses $A_{i,t} = R_i$, providing REINFORCE-style reward direction without changing the stored raw reward.
 
 
 ### `gspo`
@@ -121,13 +125,15 @@ Entropy calculation requires realizing full `[seq_len, vocab]` which consumes si
 ## Critic Value Loss
 
 When using `ppo_gae`, the critic is trained alongside the actor.
-Each training step, the critic runs a forward pass to produce per-token value predictions $V_\theta(x_{i,\le t})$, then updates its weights to minimize:
-$$L_\text{value} = \frac{1}{2}\max\left((V_\theta - G)^2,\ \left(\text{clip}(V_\theta, V_\text{old} \pm \varepsilon_v) - G\right)^2\right)$$
-where $G_{i,t} = A_{i,t} + V_\text{old}(x_{i,\le t})$ are the target returns and $\varepsilon_v$ = `--value-clip` (default 0.2).
+The critic first produces the old per-token predictions consumed by `AdvantageEstimator`. The estimator writes actor `advantages`, critic `values`, and critic `value_targets` to each episode. The actor and critic then train from separate physical packs.
 
-The critic has its own optimizer and learning rate (`--critic-lr`).
-`--num-critic-only-steps` (default 0) runs N critic-only training steps at the start before the actor begins updating.
-This warms up the value baseline so early advantage estimates are more stable.
+The critic updates its weights to minimize:
+$$L_\text{value} = \frac{1}{2}\max\left((V_\theta - G)^2,\ \left(\text{clip}(V_\theta, V_\text{old} \pm \varepsilon_v) - G\right)^2\right)$$
+where $G_{i,t} = A_{i,t} + V_\text{old}(x_{i,\le t})$ is stored as `value_targets`, and $\varepsilon_v$ = `--value-clip` (default 0.2).
+
+The actor, critic backbone, and critic value head use `--lr-actor`, `--lr-critic`, and `--lr-critic-value-head`.
+Their optimizer updates begin at `--lr-actor-start-step`, `--lr-critic-start-step`, and `--lr-critic-value-head-start-step`.
+Before its start step, a component has zero learning rate and does not accumulate optimizer state.
 
 
 ## Loss Reduction
@@ -151,6 +157,8 @@ When `--calculate-per-token-loss` is set, per-token losses are summed (not avera
 | `--gamma` | `1.0` | GAE discount factor |
 | `--lambd` | `1.0` | GAE lambda |
 | `--normalize-advantages` | `False` | Globally normalize advantages across DP ranks |
+| `--disable-group-advantage-normalization` | `False` | Use raw rewards directly as GRPO or GSPO advantages |
+| `--disable-group-advantage-std-normalization` | `False` | Disable group standard-deviation scaling for GRPO or GSPO advantages |
 | `--value-clip` | `0.2` | Critic value loss clip range |
 | `--old-logprob-source` | `actor` | Source of old log-probs: `actor`, `rollout` |
 | `--mismatch-correction` | `none` | `none`, `custom` |

@@ -12,7 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from .timer import Timer
 
-__all__ = ["load_hf_dataset", "get_minimum_num_micro_batch_size", "process_rollout_data"]
+__all__ = ["load_hf_dataset", "process_rollout_data"]
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +62,7 @@ def load_hf_dataset(path: str):
     return dataset
 
 
-def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):
-    batches = []
-    for length in total_lengths:
-        for i in range(len(batches)):
-            if batches[i] + length <= max_tokens_per_gpu:
-                batches[i] += length
-                break
-        else:
-            batches.append(length)
-    return len(batches)
-
-
-def process_rollout_data(args, rollout_data_refs, dp_rank, dp_size):
+def process_rollout_data(rollout_data_refs, dp_rank, dp_size):
     assert len(rollout_data_refs) == dp_size
     if ray is None:
         raise ModuleNotFoundError("ray is required to process rollout data")

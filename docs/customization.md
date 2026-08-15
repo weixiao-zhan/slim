@@ -13,11 +13,9 @@ Each accepts a dotted Python path (e.g. `my_package.module.function`) loaded at 
 | `--rollout-group-filter-path` | None | Dynamic group-level filter (e.g. DAPO) |
 | `--rollout-sample-filter-path` | None | Sample-level masking after rollout |
 | `--rollout-all-samples-process-path` | None | Post-rollout hook over all groups (including filtered) |
-| `--rollout-data-postprocess-path` | None | Post-processing after log probs are computed |
 | `--custom-loss-function-path` | None | Custom training loss (requires `--loss-type custom_loss`) |
 | `--custom-mismatch-correction-function-path` | None | Importance-weight correction for train/rollout mismatch |
-| `--custom-pg-loss-reducer-function-path` | None | Custom reducer for pg_loss aggregation |
-| `--custom-reward-post-process-path` | None | Reward normalization / shaping after RM |
+| `--custom-reward-post-process-path` | None | Reward shaping before advantage estimation |
 | `--custom-rollout-log-function-path` | None | Custom logging for train rollout |
 | `--custom-eval-rollout-log-function-path` | None | Custom logging for eval rollout |
 | `--data-source-path` | `slim.rollout.data_source.RolloutDataSource` | Dataset iteration and state persistence |
@@ -95,8 +93,8 @@ def custom_loss(args, unpacked_batches: list[dict]) -> tuple[torch.Tensor, dict[
 Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 (policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
 `unpacked_batches` is the per-sample list from `unpack_sequences`; each dict
-carries `cur_log_probs`, `advantages`, `loss_masks`, `edge_lengths`, and the
-old/ref log-probs when available.
+carries the raw `reward`, `cur_log_probs`, `advantages`, `loss_masks`,
+and the old/ref log-probs when available.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
 a dict of scalar tensors logged under `train/`.

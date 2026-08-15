@@ -30,10 +30,7 @@ run_train "
     --rollout-colocate
 
     --actor-num-gpus $NUM_GPUS
-    --attn-implementation flash_attention_3
-    --master-weight-dtype fp32
-    --compute-dtype bf16
-    --gradient-checkpointing
+    --activation-checkpointing
     --use-dynamic-batch-size
     --max-tokens-per-gpu 8192
 
@@ -43,13 +40,12 @@ run_train "
     --profile-dir $PROFILE_DIR
 
     --advantage-estimator grpo
-    --disable-rewards-std-normalization
+    --disable-group-advantage-std-normalization
     --policy-surrogate cis
     --old-logprob-source rollout
     --eps-clip 1
     --eps-clip-high 1
 
-    --optimizer adam
     --lr 3e-6
     --lr-warmup-iters 0
     --lr-decay-style constant

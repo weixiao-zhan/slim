@@ -44,6 +44,17 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Episode]:
+    path = Path(path_template.format(rollout_id=rollout_id))
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    records = payload.get("episodes") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
+        raise ValueError(f"debug rollout data at {path} must contain an episodes list")
+    episodes = [Episode(**record) for record in records]
+    logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
+    return episodes
+
+
 @dataclasses.dataclass
 class ServerGroup:
     """A group of homogeneous SGLang engines with the same configuration.
@@ -368,9 +379,6 @@ class RolloutManager:
 
         self.generate_rollout = load_function(self.args.rollout_function_path)
         self.eval_generate_rollout = load_function(self.args.eval_function_path)
-        self.custom_reward_post_process_func = None
-        if self.args.custom_reward_post_process_path is not None:
-            self.custom_reward_post_process_func = load_function(self.args.custom_reward_post_process_path)
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -494,8 +502,9 @@ class RolloutManager:
         _log_rollout_data(rollout_id, self.args, episodes, metrics, time.time() - start_time)
         if self.args.debug_rollout_only:
             return
-        self._normalize_rewards(episodes)
-        self._apply_loss_masks(episodes)
+        for index, episode in enumerate(episodes):
+            episode.episode_index = index
+            episode.finalize_source_token_alignment()
         return self._split_episodes_by_dp(episodes, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):
@@ -561,10 +570,14 @@ class RolloutManager:
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def _get_rollout_episodes(self, rollout_id) -> tuple[list[Episode], dict | None]:
-        with profile_rollout(self.args, rollout_id):
-            result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
-        metrics = result.metrics
-        episodes = result.episodes
+        if self.args.load_debug_rollout_data is not None:
+            episodes = _load_debug_rollout_episodes(self.args.load_debug_rollout_data, rollout_id)
+            metrics = None
+        else:
+            with profile_rollout(self.args, rollout_id):
+                result = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+            metrics = result.metrics
+            episodes = result.episodes
 
         if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
             global_batch_size = self.args.global_batch_size
@@ -624,35 +637,6 @@ class RolloutManager:
                 dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in data])
 
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
-
-    def _normalize_rewards(self, episodes: list[Episode]):
-        """Normalize rewards in-place (e.g. GRPO group normalization)."""
-        if self.custom_reward_post_process_func is not None:
-            self.custom_reward_post_process_func(self.args, episodes)
-            return
-
-        if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.rewards_normalization:
-            rewards = torch.tensor([ep.reward for ep in episodes], dtype=torch.float)
-            if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
-                rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
-            else:
-                # when samples count are not equal in each group
-                rewards = rewards.view(-1, rewards.shape[-1])
-            mean = rewards.mean(dim=-1, keepdim=True)
-            rewards = rewards - mean
-
-            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.rewards_std_normalization:
-                std = rewards.std(dim=-1, keepdim=True)
-                rewards = rewards / (std + 1e-6)
-
-            for ep, r in zip(episodes, rewards.flatten().tolist(), strict=True):
-                ep.raw_reward = ep.reward
-                ep.reward = r
-
-    def _apply_loss_masks(self, episodes: list[Episode]):
-        """Materialize loss_mask: None → all-ones."""
-        for ep in episodes:
-            ep.ensure_edge_alignment()
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
@@ -1066,12 +1050,12 @@ def _log_rollout_data(rollout_id, args, episodes: list[Episode], rollout_extra_m
 
     log_dict = {**(rollout_extra_metrics or {})}
     if episodes:
-        raw_rewards = [getattr(ep, "raw_reward", ep.reward) for ep in episodes]
-        log_dict["rollout/raw_reward"] = sum(raw_rewards) / len(raw_rewards)
+        rewards = [ep.reward for ep in episodes]
+        log_dict["rollout/reward"] = sum(rewards) / len(rewards)
     if (rollout_log_probs := _compute_rollout_log_probs_metric(episodes)) is not None:
         log_dict["rollout/rollout_log_probs"] = rollout_log_probs
     log_dict |= dict_add_prefix(_compute_episode_metrics(args, episodes), "rollout/")
-    log_dict |= dict_add_prefix(_compute_perf_metrics(args, episodes, rollout_time), "perf/")
+    log_dict |= dict_add_prefix(_compute_perf_metrics(episodes, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
@@ -1115,7 +1099,7 @@ def _compute_episode_metrics(args, episodes: list[Episode]):
     return log_dict
 
 
-def _compute_perf_metrics(args, episodes: list[Episode], rollout_time):
+def _compute_perf_metrics(episodes: list[Episode], rollout_time):
     non_generation_time = [ep.non_generation_time for ep in episodes]
 
     log_dict = {}
