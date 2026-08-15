@@ -251,7 +251,6 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --sglang-attention-backend fa3 \
   --mamba-radix-cache-strategy extra_buffer \
   --sglang-page-size 64 \
-  --sglang-enforce-disable-flashinfer-allreduce-fusion \
   --rollout-colocate \
   --actor-num-gpus 8 \
   --context-parallel-size 2 \
