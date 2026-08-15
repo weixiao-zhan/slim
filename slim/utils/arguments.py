@@ -14,6 +14,7 @@ from slim.backends.sglang_utils.arguments import sglang_parse_args
 from slim.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from slim.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slim.utils.logging_utils import configure_logger
+from slim.utils.trajectory_batch import LOSS_NORMALIZATION_UNITS
 
 logger = logging.getLogger(__name__)
 
@@ -139,19 +140,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 type=float,
                 default=1.0,
                 help="the temperature for the inference engine during rollout.",
-            )
-            parser.add_argument(
-                "--rollout-sampling-params",
-                type=json.loads,
-                default={},
-                help=(
-                    "Extra SGLang sampling params as a JSON dict, e.g. "
-                    "'{\"top_p\":0.95,\"top_k\":50,\"stop\":[\"<|im_end|>\"]}'. "
-                    "Merged on top of {temperature, no_stop_trim=True, "
-                    "spaces_between_special_tokens=False}. Use this for top_p, "
-                    "top_k, stop, stop_token_ids, skip_special_tokens, "
-                    "min_new_tokens, repetition_penalty, ignore_eos, etc."
-                ),
             )
             parser.add_argument(
                 "--max-context-len",
@@ -466,7 +454,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=1,
                 help="number of responses for each prompt in generation",
             )
-            parser.add_argument("--eval-temperature", type=float, default=None)
 
             return parser
 
@@ -517,7 +504,18 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             )
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
-            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
+            parser.add_argument(
+                "--loss-normalization-unit",
+                type=str,
+                default="episode",
+                choices=LOSS_NORMALIZATION_UNITS,
+                help=(
+                    "Unit the loss denominator counts. `episode` weights each attempt equally "
+                    "by giving its trajectories weight 1/k, which is the unit the GRPO baseline "
+                    "centers on. `trajectory` weights each generation call equally. `token` uses "
+                    "a token-sum denominator for the policy term."
+                ),
+            )
             reset_arg(parser, "--lr", type=float, default=1e-6)
 
             parser.add_argument(
@@ -860,19 +858,14 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 "--group-rm", action="store_true", default=False, help="Whether to do rm on a whole group."
             )
             parser.add_argument(
-                "--rm-url",
-                type=str,
-                default=None,
-                help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000",
-            )
-            parser.add_argument(
                 "--custom-rm-path",
                 type=str,
                 default=None,
                 help=(
                     "Path to the custom reward model function. "
                     "If set, we will use this function to calculate the reward instead of the default one. "
-                    "The function should have the signature `def custom_rm(args, sample) -> float`."
+                    "The function sets `episode.reward` or every `trajectory.reward` in place. "
+                    "With --group-rm, it receives the whole group of episodes."
                 ),
             )
             parser.add_argument(
@@ -1037,8 +1030,7 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     elif args.eval_prompt_data:
         values = list(args.eval_prompt_data)
         if len(values) == 1:
-            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
-            values = ["aime", values[0]]
+            values = ["eval", values[0]]
         if len(values) % 2 != 0:
             raise ValueError("eval prompt data must be provided as name/path pairs.")
         datasets_config = [{"name": values[i], "path": values[i + 1]} for i in range(0, len(values), 2)]

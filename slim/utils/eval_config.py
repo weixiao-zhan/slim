@@ -16,11 +16,6 @@ DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
         "default_keys": ("eval_n_samples_per_prompt",),
         "arg_attrs": ("eval_n_samples_per_prompt", "n_samples_per_prompt"),
     },
-    "temperature": {
-        "dataset_keys": ("temperature",),
-        "default_keys": ("temperature",),
-        "arg_attrs": ("eval_temperature", "rollout_temperature"),
-    },
     "max_context_len": {
         "dataset_keys": ("max_context_len",),
         "default_keys": ("max_context_len",),
@@ -71,11 +66,7 @@ class EvalDatasetConfig:
 
     eval_n_samples_per_prompt: int | None = None
 
-    temperature: float | None = None
     max_context_len: int | None = None
-    # Per-dataset overrides merged onto args.rollout_sampling_params
-    # (e.g., top_p, top_k, stop, stop_token_ids, min_new_tokens).
-    sampling_params: dict[str, Any] = field(default_factory=dict)
 
     # per-dataset custom generate function (e.g., for tool calling)
     custom_generate_function_path: str | None = None

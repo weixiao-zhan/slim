@@ -23,7 +23,8 @@ from slim.backends.nemo.models.qwen3_5 import (
 from slim.backends.nemo.packed_cp_forward import (
     build_packed_cp_sharder,
 )
-from slim.utils.types import Episode
+from slim.utils.trajectory_batch import TrajectoryBatch
+from slim.utils.types import Trajectory
 from tests.backends.nemo.run_packed_cp_qualification import _compare_with_baseline
 from tests.backends.nemo.run_training_qualification import (
     _heterogeneous_rollout_partition,
@@ -37,8 +38,11 @@ NUM_GPUS = 0
 
 @pytest.mark.unit
 def test_fixed_heterogeneous_records_assign_vision_to_dp1_and_center_every_reward():
-    records = [{"reward": 0.0, "multimodal_inputs": None} for _ in range(8)]
-    records.extend({"reward": 1.0, "multimodal_inputs": {"pixel_values": torch.ones(1)}} for _ in range(4))
+    records = [{"reward": 0.0, "trajectories": [{"multimodal_inputs": None}]} for _ in range(8)]
+    records.extend(
+        {"reward": 1.0, "trajectories": [{"multimodal_inputs": {"pixel_values": torch.ones(1)}}]}
+        for _ in range(4)
+    )
 
     batch, vision_indices = build_heterogeneous_records(
         records,
@@ -48,7 +52,11 @@ def test_fixed_heterogeneous_records_assign_vision_to_dp1_and_center_every_rewar
     )
 
     assert vision_indices == [1, 9, 17, 25]
-    assert [index for index, record in enumerate(batch) if record["multimodal_inputs"]] == vision_indices
+    assert [
+        index
+        for index, record in enumerate(batch)
+        if record["trajectories"][0]["multimodal_inputs"]
+    ] == vision_indices
     for start in range(0, len(batch), 8):
         rewards = torch.tensor([record["reward"] for record in batch[start : start + 8]])
         advantages = rewards - rewards.mean()
@@ -68,23 +76,26 @@ def test_heterogeneous_multimodal_assignment_keeps_cp_peers_aligned():
 @pytest.mark.parametrize("dp_size", [8, 4])
 def test_heterogeneous_rollout_partition_assigns_vision_only_to_dp1(dp_size):
     vision_indices = {1, 9, 17, 25}
-    episodes = [
-        Episode(
-            tokens=[index, index + 1],
+    trajectories = [
+        Trajectory(
+            token_ids=[index, index + 1],
             loss_mask=[1],
             multimodal_inputs={"pixel_values": torch.ones(1, 2)} if index in vision_indices else None,
         )
         for index in range(256)
     ]
-    for episode in episodes:
-        episode.finalize_source_token_alignment()
-        episode.set_train_targets([1.0, 0.0])
+    for trajectory in trajectories:
+        trajectory.finalize_source_token_alignment()
+        trajectory.set_train_targets([1.0, 0.0])
 
-    partitions = [_heterogeneous_rollout_partition(episodes, dp_rank=dp_rank, dp_size=dp_size) for dp_rank in range(dp_size)]
+    partitions = [
+        _heterogeneous_rollout_partition(trajectories, dp_rank=dp_rank, dp_size=dp_size)
+        for dp_rank in range(dp_size)
+    ]
 
     assert sum(len(partition) for partition, _ in partitions) == 256
     for dp_rank, (partition, uses_vision) in enumerate(partitions):
-        vision_count = sum(bool(episode.multimodal_inputs) for episode in partition)
+        vision_count = sum(bool(trajectory.multimodal_inputs) for trajectory in partition)
         assert uses_vision == (dp_rank == 1)
         assert vision_count == (4 if uses_vision else 0)
 
@@ -213,25 +224,19 @@ class _FakeDeviceMesh:
         return self.cp
 
 
-def _episode(start):
-    episode = Episode(tokens=[start, start + 1, start + 2], loss_mask=[1, 1], reward=1.0)
-    episode.finalize_source_token_alignment()
-    episode.set_train_targets([0.5, 0.5, 0.0], value_targets=[1.0, 1.0, 0.0])
-    return episode
-
-
-def _episode_with_length(start, length):
-    episode = Episode(
-        tokens=list(range(start, start + length)),
+def _trajectory(start, length=3):
+    trajectory = Trajectory(
+        token_ids=list(range(start, start + length)),
         loss_mask=[1] * (length - 1),
         reward=1.0,
+        loss_weight=1.0,
     )
-    episode.finalize_source_token_alignment()
-    episode.set_train_targets(
-        [0.5] * (len(episode.tokens) - 1) + [0.0],
-        value_targets=[1.0] * (len(episode.tokens) - 1) + [0.0],
+    trajectory.finalize_source_token_alignment()
+    trajectory.set_train_targets(
+        [0.5] * (length - 1) + [0.0],
+        value_targets=[1.0] * (length - 1) + [0.0],
     )
-    return episode
+    return trajectory
 
 
 @pytest.mark.unit
@@ -474,7 +479,6 @@ def test_cp1_kv_gather_is_differentiable_identity(monkeypatch):
 def test_physical_pack_count_is_model_independent(monkeypatch):
     trainer = NeMoTrainer.__new__(NeMoTrainer)
     trainer.args = Namespace(
-        global_batch_size=4,
         micro_batch_size=2,
         use_dynamic_batch_size=False,
     )
@@ -483,11 +487,14 @@ def test_physical_pack_count_is_model_independent(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
 
-    packs, boundaries = trainer._packed_data([_episode(10), _episode(20), _episode(30), _episode(40)])
+    batch = TrajectoryBatch(
+        trajectories=[_trajectory(10), _trajectory(20), _trajectory(30), _trajectory(40)],
+    )
+    packs, boundaries = trainer._packed_data(batch)
 
     assert len(packs) == 2
     assert boundaries == [2]
-    assert [len(pack["_episode_dp_indices"]) for pack in packs] == [2, 2]
+    assert [len(pack["_document_indices"]) for pack in packs] == [2, 2]
 
 
 @pytest.mark.unit
@@ -506,7 +513,6 @@ def test_dynamic_pack_budget_is_gpu_local_after_cp(
 ):
     trainer = NeMoTrainer.__new__(NeMoTrainer)
     trainer.args = Namespace(
-        global_batch_size=4,
         micro_batch_size=1,
         use_dynamic_batch_size=True,
         max_tokens_per_gpu=4,
@@ -517,14 +523,10 @@ def test_dynamic_pack_budget_is_gpu_local_after_cp(
     monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
     monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
 
-    packs, boundaries = trainer._packed_data(
-        [
-            _episode_with_length(10, 4),
-            _episode_with_length(20, 4),
-            _episode_with_length(30, 4),
-            _episode_with_length(40, 4),
-        ]
+    batch = TrajectoryBatch(
+        trajectories=[_trajectory(start, length=4) for start in (10, 20, 30, 40)],
     )
+    packs, boundaries = trainer._packed_data(batch)
 
     assert len(packs) == expected_pack_count
     assert boundaries == [expected_pack_count]

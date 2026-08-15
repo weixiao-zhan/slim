@@ -63,9 +63,10 @@ def load_hf_dataset(path: str):
 
 
 def process_rollout_data(rollout_data_refs, dp_rank, dp_size):
+    """Fetch this DP rank's trajectory batch."""
     assert len(rollout_data_refs) == dp_size
     if ray is None:
         raise ModuleNotFoundError("ray is required to process rollout data")
-    rollout_data = ray.get(rollout_data_refs[dp_rank])
-    Timer().seq_lens = [len(ep.tokens) for ep in rollout_data]
-    return rollout_data
+    batch = ray.get(rollout_data_refs[dp_rank])
+    Timer().seq_lens = [len(trajectory.token_ids) for trajectory in batch.trajectories]
+    return batch

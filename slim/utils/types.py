@@ -17,31 +17,32 @@ except ModuleNotFoundError:  # pragma: no cover - allows lightweight unit import
     torch = _TorchStub()
 
 
+def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu", dtype=dtype)
+    return torch.as_tensor(value, dtype=dtype)
+
+
 @dataclass
-class Episode:
-    """A single rollout/training record.
+class Trajectory:
+    """One contiguous generation by the policy.
 
     Lifecycle:
-      1. Created from dataset example; fields are Python lists.
-      2. Mutated in-place during async generation + reward.
-      3. ``finalize_source_token_alignment()`` converts sequence fields to tensors
-         and appends their terminal source-token slot.
-      4. Consumed by normalization, packing, and training using tensor operations.
+      1. Created empty, then filled by one or more generation calls that append
+         to the same trajectory; sequence fields are Python lists.
+      2. ``finalize_source_token_alignment()`` converts sequence fields to
+         tensors and appends their terminal source-token slot.
+      3. Flattened out of its episode, then packed and trained as one document.
 
-    Source-token-aligned fields have ``len == len(tokens)`` after finalization.
-    Position ``i`` describes the prediction of ``tokens[i+1]``. The final
-    position has no prediction target and contains the field's neutral fill.
+    Source-token-aligned fields have ``len == len(token_ids)`` after
+    finalization. Position ``i`` describes the prediction of ``token_ids[i+1]``.
+    The final position has no prediction target and carries the field's neutral
+    fill.
     """
 
-    # Raw dataset row — rollout/RM functions read whatever columns they need
-    example: dict = field(default_factory=dict)
-    generate_function_path: str | None = None
-    session_id: str | None = None
-
     # Sequence state: prediction lists during generation, source-aligned tensors after finalization.
-    tokens: Any = field(default_factory=list)          # [int] → LongTensor
+    token_ids: Any = field(default_factory=list)       # [int] → LongTensor
     loss_mask: Any | None = None                       # [int] → IntTensor
-    reward: float | None = None
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     rollout_routed_experts: Any | None = None          # np.ndarray [prediction, layer, top_k] → IntTensor
     multimodal_inputs: dict[str, Any] | None = None
@@ -50,43 +51,22 @@ class Episode:
     #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)
     #   pixel_values_videos: [num_vision_tokens, d] - video embeddings (concat dim=0)
     #   video_grid_thw: [num_videos, 3] - video metadata (concat dim=0)
-    text: str | None = None                            # decode of all tokens
-    generated_text: str | None = None                  # decode of targets selected by active prediction slots
-    non_generation_time: float = 0.0
-    max_tokens: int = 0
-    _sampling_params: dict[str, Any] | None = None     # transient rollout params; cleared during finalization
 
-    # Training targets, populated after rollout.
-    episode_index: int | None = None
+    reward: float | None = None
+    text: str | None = None                            # decode of all tokens in this trajectory
+    generated_text: str | None = None                  # decode of targets selected by active prediction slots
+
+    # Training targets, set after advantage estimation.
     advantages: Any | None = None
     values: Any | None = None
     value_targets: Any | None = None
 
-    # Status tracking
-    class Status:
-        PENDING = "pending"
-        COMPLETED = "completed"
-        TRUNCATED = "truncated"
-        ABORTED = "aborted"
-        FAILED = "failed"
-
-    status: str = Status.PENDING
-
-    @classmethod
-    def from_example(cls, example: dict) -> "Episode":
-        return cls(example=dict(example))
-
-    @property
-    def has_multimodal(self) -> bool:
-        return any(self.example.get(k) for k in ("images", "videos", "audios"))
+    # Stamped by the flattener. A padding trajectory has episode_index None.
+    episode_index: int | None = None
+    group_index: int | None = None
+    loss_weight: float = 0.0
 
     # --- Rollout finalization ---
-
-    @staticmethod
-    def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
-        if isinstance(value, torch.Tensor):
-            return value.detach().to(device="cpu", dtype=dtype)
-        return torch.as_tensor(value, dtype=dtype)
 
     def _finalize_prediction_field(
         self,
@@ -98,11 +78,11 @@ class Episode:
     ):
         if value is None:
             return None
-        tensor = self._as_cpu_tensor(value, dtype=dtype)
+        tensor = _as_cpu_tensor(value, dtype=dtype)
         if tensor.ndim == 0:
             raise ValueError(f"{name} must have a sequence dimension")
 
-        token_count = len(self.tokens)
+        token_count = len(self.token_ids)
         prediction_count = max(token_count - 1, 0)
         if tensor.shape[0] != prediction_count:
             raise ValueError(
@@ -123,13 +103,13 @@ class Episode:
     ):
         if value is None:
             return None
-        tensor = self._as_cpu_tensor(value, dtype=dtype)
-        if tensor.ndim == 0 or tensor.shape[0] != len(self.tokens):
+        tensor = _as_cpu_tensor(value, dtype=dtype)
+        if tensor.ndim == 0 or tensor.shape[0] != len(self.token_ids):
             raise ValueError(
                 f"{name} length {tensor.shape[0] if tensor.ndim else 0} "
-                f"must match token count {len(self.tokens)}"
+                f"must match token count {len(self.token_ids)}"
             )
-        if len(self.tokens) and not torch.all(tensor[-1] == fill):
+        if len(self.token_ids) and not torch.all(tensor[-1] == fill):
             raise ValueError(f"{name} terminal source-token slot must equal {fill}")
         return tensor
 
@@ -140,7 +120,7 @@ class Episode:
         if any(target is not None for target in (self.advantages, self.values, self.value_targets)):
             raise ValueError("training targets must not be present before source-token finalization")
 
-        self.tokens = self._as_cpu_tensor(self.tokens, dtype=torch.long)
+        self.token_ids = _as_cpu_tensor(self.token_ids, dtype=torch.long)
         self.loss_mask = self._finalize_prediction_field(
             "loss_mask",
             self.loss_mask,
@@ -159,7 +139,6 @@ class Episode:
             dtype=torch.int32,
             fill=0,
         )
-        self._sampling_params = None
 
     # --- Derived values ---
 
@@ -167,15 +146,15 @@ class Episode:
     def response_length(self) -> int:
         """Count source positions whose predictions contribute to training."""
         if self.loss_mask is None:
-            return max(len(self.tokens) - 1, 0)
+            return max(len(self.token_ids) - 1, 0)
         return int(sum(self.loss_mask))
 
     def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
         """Set source-token-aligned training targets after rollout processing."""
         if advantages is None:
             raise ValueError("advantages must be present")
-        if not isinstance(self.tokens, torch.Tensor) or not isinstance(self.loss_mask, torch.Tensor):
-            raise RuntimeError("episode must be source-token finalized before setting training targets")
+        if not isinstance(self.token_ids, torch.Tensor) or not isinstance(self.loss_mask, torch.Tensor):
+            raise RuntimeError("trajectory must be source-token finalized before setting training targets")
 
         self.advantages = self._source_token_tensor(
             "advantages",
@@ -196,6 +175,71 @@ class Episode:
             fill=0.0,
         )
 
+
+@dataclass
+class Episode:
+    """One complete problem-solving attempt, from prompt to final answer.
+
+    An episode holds one or more :class:`Trajectory` objects. Each is one
+    contiguous generation by the policy; they carry no ordering or dependency
+    relation between them. The append-only rollout produces a
+    single trajectory, while interleaved thinking, sub-agent dispatch, and
+    context compression produce several.
+    """
+
+    # Raw dataset row — rollout/RM functions read whatever columns they need
+    example: dict = field(default_factory=dict)
+    trajectories: list[Trajectory] = field(default_factory=list)
+    # Shorthand for one scalar scoring the whole attempt; broadcast onto every
+    # trajectory by the flattener. Setting this and Trajectory.reward is an error.
+    reward: float | None = None
+
+    # Identity, assigned at the rollout/train boundary.
+    episode_index: int | None = None
+    group_index: int | None = None
+
+    # Rollout-time control and bookkeeping.
+    generate_function_path: str | None = None
+    session_id: str | None = None
+    max_tokens: int = 0
+    non_generation_time: float = 0.0
+    sampling_seed: int | None = None                   # per-sample seed under deterministic inference
+
+    # Status tracking
+    class Status:
+        PENDING = "pending"
+        COMPLETED = "completed"
+        TRUNCATED = "truncated"
+        ABORTED = "aborted"
+        FAILED = "failed"
+
+    status: str = Status.PENDING
+
+    @classmethod
+    def from_example(cls, example: dict) -> "Episode":
+        return cls(example=dict(example))
+
+    @property
+    def trajectory(self) -> Trajectory:
+        """The sole trajectory of an append-only attempt."""
+        if len(self.trajectories) != 1:
+            raise ValueError(
+                f"episode has {len(self.trajectories)} trajectories; read `trajectories` instead"
+            )
+        return self.trajectories[0]
+
+    @property
+    def has_multimodal(self) -> bool:
+        return any(self.example.get(k) for k in ("images", "videos", "audios"))
+
+    @property
+    def token_count(self) -> int:
+        return sum(len(trajectory.token_ids) for trajectory in self.trajectories)
+
+    def finalize_source_token_alignment(self) -> None:
+        for trajectory in self.trajectories:
+            trajectory.finalize_source_token_alignment()
+
     # --- Shared helpers ---
 
     def update_status_from_finish_reason(self, finish_reason: str):
@@ -208,7 +252,11 @@ class Episode:
                 self.status = Episode.Status.COMPLETED
 
     def get_reward_value(self) -> float:
-        return self.reward
+        """One scalar scoring the attempt, whichever level carries the reward."""
+        if self.reward is not None:
+            return self.reward
+        rewards = [trajectory.reward for trajectory in self.trajectories]
+        return sum(rewards) / len(rewards)
 
 
 @dataclass(frozen=True)

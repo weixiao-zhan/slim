@@ -14,7 +14,7 @@ First-party support covers:
 Tensor parallelism, pipeline parallelism, and sequence parallelism are not supported by this backend.
 Training updates model parameters directly; adapter fine-tuning is not part of the backend.
 
-SGLang remains the rollout engine. Slim owns `Episode` processing, RL objectives, reference and critic execution, routing replay, metrics, and policy weight synchronization.
+SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processing, RL objectives, reference and critic execution, routing replay, metrics, and policy weight synchronization.
 
 ## Environment
 
@@ -53,7 +53,7 @@ There is no direct Transformers `AutoModelFor*` training path.
 
 ## Topology
 
-Let \(W\) be world size and \(C\) be context-parallel size. The logical data-parallel size used to partition episodes is:
+Let \(W\) be world size and \(C\) be context-parallel size. The logical data-parallel size used to partition trajectories is:
 
 $$
 D = \frac{W}{C}
@@ -109,11 +109,13 @@ No label or prediction crosses a document boundary.
 
 `prepare_forward` constructs one contiguous block-diagonal `ContextParallelSharder`. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
 
-Before role-local packing, the Ray `AdvantageEstimator` writes source-token-aligned training targets to each `Episode`. GRPO and GSPO produce `advantages`. PPO GAE consumes source-token-aligned critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
+Before role-local packing, the Ray `AdvantageEstimator` writes source-token-aligned training targets to each `Trajectory`. GRPO and GSPO produce `advantages`. PPO GAE consumes source-token-aligned critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
 
 Actor log-probability precompute and critic value precompute may cache packs before target construction. `update_packed_targets` attaches the completed targets to each role's cached packs immediately before training. Actor and critic do not share physical pack objects.
 
-`--balance-data` is enabled by default and uses Karmarkar-Karp partitioning to balance token counts across logical data-parallel ranks; `--no-balance-data` restores round-robin episode assignment.
+The rollout/train boundary flattens episodes into trajectories, pads the list to a multiple of `logical_dp * num_steps` with inert two-token documents, then partitions twice: across optimizer steps, then within each step across ranks. Every rank therefore holds the same document count per step, which is what the synchronized pack count in `_packed_data` requires. `--balance-data` is enabled by default and uses Karmarkar-Karp partitioning to balance token counts at both levels; `--no-balance-data` restores round-robin assignment.
+
+The optimizer step count stays denominated in episodes, so `args.train_iters` and the LR decay horizon do not move with how many generation calls a rollout made.
 
 `--max-tokens-per-gpu` is the target post-CP token budget for one rank. Dynamic packing therefore targets a physical pack length of:
 
@@ -121,7 +123,7 @@ $$
 T_{\mathrm{pack}} \le C T_{\mathrm{GPU}}
 $$
 
-For CP2 and `--max-tokens-per-gpu 8192`, each physical pack contains at most 16K tokens before CP sharding. The packer uses budget-aware first-fit decreasing partitions and only splits existing partitions when DP ranks need a synchronized pack count. Individual episodes are not split, so an episode longer than the physical budget is rejected.
+For CP2 and `--max-tokens-per-gpu 8192`, each physical pack contains at most 16K tokens before CP sharding. The packer uses budget-aware first-fit decreasing partitions and only splits existing partitions when DP ranks need a synchronized pack count. Individual trajectories are not split, so a trajectory longer than the physical budget is rejected.
 
 ## Context Parallel Layouts
 
@@ -140,7 +142,7 @@ Text positions restart at zero for every document. Mixed-modality packs call the
 
 The training loop follows AutoModel recipe ordering:
 
-1. Count global samples and valid tokens over logical DP ranks.
+1. Count the global document weight sum and valid tokens over logical DP ranks.
 2. Resolve and apply the common packed CP sharder.
 3. Enter the CP context and NeMo gradient synchronization context.
 4. Run the model with filtered forward arguments.
@@ -159,17 +161,19 @@ L_{\mathrm{token}} = \frac{1}{T}\sum_{d,t} m_{d,t}\ell_{d,t},
 T = \sum_{d,t} m_{d,t}
 $$
 
-For policy sequence-mean reduction:
+For policy sequence-mean reduction, where $w_d$ is the document's `loss_weight`:
 
 $$
-L_{\mathrm{sequence}} = \frac{1}{B}\sum_d
+L_{\mathrm{sequence}} = \frac{1}{\sum_d w_d}\sum_d w_d
 \frac{\sum_t m_{d,t}\ell_{d,t}}
 {\max(1,\sum_t m_{d,t})}
 $$
 
+A document is one trajectory. `--loss-normalization-unit` sets $w_d$: `episode` writes $1/k$ for an attempt with $k$ trajectories so $\sum_d w_d$ counts attempts, and `trajectory` writes $1$ so it counts total numbers of trajectories. Padding documents carry $w_d = 0$ and drop out of both the numerator and the denominator.
+
 GSPO computes differentiable per-document CP reductions before expanding each sequence statistic back to its local tokens.
 
-`--calculate-per-token-loss` selects policy token-sum reduction. Policy diagnostics use the same selected reduction. Entropy, reference KL, mismatch diagnostics, and clipped critic value regression use sequence-mean reduction.
+`--loss-normalization-unit token` selects policy token-sum reduction. Policy diagnostics use the same selected reduction. Entropy, reference KL, mismatch diagnostics, and clipped critic value regression use sequence-mean reduction.
 
 ## Routing Replay
 
@@ -247,7 +251,6 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --sglang-attention-backend fa3 \
   --mamba-radix-cache-strategy extra_buffer \
   --sglang-page-size 64 \
-  --sglang-enforce-disable-flashinfer-allreduce-fusion \
   --rollout-colocate \
   --actor-num-gpus 8 \
   --context-parallel-size 2 \

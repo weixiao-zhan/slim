@@ -27,7 +27,6 @@ from slim.backends.nemo.actor import ActorNeMoTrainer
 from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.critic import CriticNeMoTrainer
 from slim.backends.nemo.data_packing import (
-    build_token_budget_partitions,
     fill_document_terminal_slots,
     pack_sequences,
 )
@@ -37,7 +36,9 @@ from slim.backends.nemo.lr_scheduler import get_lr_scheduler
 from slim.backends.nemo.models import validate_config
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
-from slim.utils.types import Episode
+from slim.utils.seqlen_balancing import build_token_budget_partitions
+from slim.utils.trajectory_batch import flatten_episodes
+from slim.utils.types import Episode, Trajectory
 
 
 def _nvml_process_used_memory() -> int:
@@ -115,7 +116,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         adam_eps=1e-8,
         advantage_estimator="grpo",
         async_save=False,
-        calculate_per_token_loss=False,
         checkpoint_cpu_offload=False,
         checkpoint_save_consolidated="every",
         ckpt_step=None,
@@ -138,6 +138,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         kl_loss_coef=0.0,
         kl_loss_type="low_var_kl",
         load=checkpoint_dir,
+        loss_normalization_unit="episode",
         loss_type="policy_loss",
         lr=1e-2,
         lr_actor=1e-2,
@@ -221,7 +222,8 @@ def _pack(processor=None) -> dict:
         "cu_seqlens": cu_seqlens,
         "response_lengths": [first_end - 1, len(second_document) - 1],
         "reward": [1.0, 1.0],
-        "_episode_dp_indices": [0, 1],
+        "loss_weights": [1.0, 1.0],
+        "_document_indices": [0, 1],
     }
     if multimodal_inputs:
         pack["multimodal_inputs"] = multimodal_inputs
@@ -243,7 +245,8 @@ def _training_pack(
     return _pack(trainer.processor if uses_vision else None), uses_vision
 
 
-def _load_rollout_episodes(path: Path, samples_per_prompt: int = 8) -> list[Episode]:
+def _load_rollout_trajectories(path: Path, samples_per_prompt: int = 8) -> list[Trajectory]:
+    """Rebuild the saved rollout and give every trajectory its group-centered advantage."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
     records = payload.get("episodes") if isinstance(payload, dict) else None
     if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
@@ -251,47 +254,55 @@ def _load_rollout_episodes(path: Path, samples_per_prompt: int = 8) -> list[Epis
     if len(records) % samples_per_prompt:
         raise ValueError(f"{len(records)} episodes is not divisible by group size {samples_per_prompt}")
 
-    episodes = [Episode(**record) for record in records]
+    episodes = []
+    for record in records:
+        record = dict(record)
+        record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
+        episode = Episode(**record)
+        episode.finalize_source_token_alignment()
+        episodes.append(episode)
+
+    trajectories = flatten_episodes(episodes, loss_normalization_unit="episode")
     for start in range(0, len(episodes), samples_per_prompt):
         group = episodes[start : start + samples_per_prompt]
-        mean_reward = sum(float(episode.reward) for episode in group) / samples_per_prompt
+        mean_reward = sum(episode.get_reward_value() for episode in group) / samples_per_prompt
         for episode in group:
-            episode.finalize_source_token_alignment()
-            advantage = float(episode.reward) - mean_reward
-            episode.reward = advantage
-            targets = torch.full((len(episode.tokens),), advantage)
-            targets[-1] = 0
-            episode.set_train_targets(targets)
-    return episodes
+            for trajectory in episode.trajectories:
+                advantage = float(trajectory.reward) - mean_reward
+                trajectory.reward = advantage
+                targets = torch.full((len(trajectory.token_ids),), advantage)
+                targets[-1] = 0
+                trajectory.set_train_targets(targets)
+    return trajectories
 
 
 def _heterogeneous_rollout_partition(
-    episodes: list[Episode],
+    trajectories: list[Trajectory],
     *,
     dp_rank: int,
     dp_size: int,
-) -> tuple[list[Episode], bool]:
+) -> tuple[list[Trajectory], bool]:
     if dp_size < 2 or dp_size % 2:
         raise ValueError(f"heterogeneous rollout partition requires an even DP size of at least 2, got {dp_size}")
-    if len(episodes) % dp_size:
-        raise ValueError(f"fixed batch size {len(episodes)} is not divisible by DP size {dp_size}")
+    if len(trajectories) % dp_size:
+        raise ValueError(f"fixed batch size {len(trajectories)} is not divisible by DP size {dp_size}")
 
-    text_count = sum(not episode.multimodal_inputs for episode in episodes)
-    vision = [episode for episode in episodes if episode.multimodal_inputs]
+    text_count = sum(not trajectory.multimodal_inputs for trajectory in trajectories)
+    vision = [trajectory for trajectory in trajectories if trajectory.multimodal_inputs]
     if not text_count or not vision:
-        raise ValueError("heterogeneous rollout qualification requires both text and vision episodes")
-    inactive_count = sum(not any(float(advantage) != 0 for advantage in episode.advantages) for episode in episodes)
+        raise ValueError("heterogeneous rollout qualification requires both text and vision trajectories")
+    inactive_count = sum(not any(float(advantage) != 0 for advantage in trajectory.advantages) for trajectory in trajectories)
     if inactive_count:
-        raise ValueError(f"heterogeneous rollout qualification has {inactive_count} episodes with zero advantage")
-    active_vision = [episode for episode in vision if any(float(advantage) != 0 for advantage in episode.advantages)]
+        raise ValueError(f"heterogeneous rollout qualification has {inactive_count} trajectories with zero advantage")
+    active_vision = [trajectory for trajectory in vision if any(float(advantage) != 0 for advantage in trajectory.advantages)]
     if len(vision) != 4 or len(active_vision) != len(vision):
-        raise ValueError("heterogeneous rollout qualification requires four vision episodes with nonzero advantages")
+        raise ValueError("heterogeneous rollout qualification requires four vision trajectories with nonzero advantages")
 
-    vision_dp_ranks = {index % dp_size for index, episode in enumerate(episodes) if episode.multimodal_inputs}
+    vision_dp_ranks = {index % dp_size for index, trajectory in enumerate(trajectories) if trajectory.multimodal_inputs}
     if vision_dp_ranks != {1}:
         raise ValueError(f"fixed heterogeneous rollout assigns vision to DP ranks {sorted(vision_dp_ranks)}, expected [1]")
 
-    local = episodes[dp_rank::dp_size]
+    local = trajectories[dp_rank::dp_size]
     uses_vision = dp_rank == 1
     return local, uses_vision
 
@@ -302,26 +313,20 @@ def _rollout_training_packs(
 ) -> tuple[list[dict], bool]:
     if cli.rollout_data is None:
         raise ValueError("--rollout-data is required for rollout-backed qualification")
-    episodes = _load_rollout_episodes(cli.rollout_data)
-    local_episodes, uses_vision = _heterogeneous_rollout_partition(
-        episodes,
+    trajectories = _load_rollout_trajectories(cli.rollout_data)
+    local_trajectories, uses_vision = _heterogeneous_rollout_partition(
+        trajectories,
         dp_rank=trainer.dp_rank,
         dp_size=trainer.dp_size,
     )
     token_budget = cli.max_tokens_per_gpu * trainer.cp_size
-    partitions = build_token_budget_partitions(
-        [len(episode.tokens) for episode in local_episodes],
-        token_budget,
-    )
+    lengths = [len(trajectory.token_ids) for trajectory in local_trajectories]
+    partitions = build_token_budget_partitions(lengths, token_budget)
     synchronized_count = torch.tensor(len(partitions), dtype=torch.int32, device=torch.cuda.current_device())
     dist.all_reduce(synchronized_count, op=dist.ReduceOp.MAX, group=trainer.dp_group)
     pack_count = int(synchronized_count.item())
-    partitions = build_token_budget_partitions(
-        [len(episode.tokens) for episode in local_episodes],
-        token_budget,
-        num_packs=pack_count,
-    )
-    return pack_sequences(local_episodes, partitions=partitions), uses_vision
+    partitions = build_token_budget_partitions(lengths, token_budget, num_packs=pack_count)
+    return pack_sequences(local_trajectories, partitions=partitions), uses_vision
 
 
 def _validate_modality_layout(
@@ -329,15 +334,15 @@ def _validate_modality_layout(
     uses_vision: bool,
     packs: list[dict],
 ) -> list[dict[str, object]]:
-    episode_count = sum(pack["cu_seqlens"].numel() - 1 for pack in packs)
-    vision_episode_count = 0
+    trajectory_count = sum(pack["cu_seqlens"].numel() - 1 for pack in packs)
+    vision_trajectory_count = 0
     for pack in packs:
         media_counts = pack.get("multimodal_num_items", {})
-        for episode_offset in range(pack["cu_seqlens"].numel() - 1):
-            if any(counts[episode_offset] > 0 for counts in media_counts.values()):
-                vision_episode_count += 1
-    if uses_vision != (vision_episode_count > 0):
-        raise RuntimeError(f"DP rank {trainer.dp_rank} vision assignment disagrees with its packs: uses_vision={uses_vision}, vision_episodes={vision_episode_count}")
+        for trajectory_offset in range(pack["cu_seqlens"].numel() - 1):
+            if any(counts[trajectory_offset] > 0 for counts in media_counts.values()):
+                vision_trajectory_count += 1
+    if uses_vision != (vision_trajectory_count > 0):
+        raise RuntimeError(f"DP rank {trainer.dp_rank} vision assignment disagrees with its packs: uses_vision={uses_vision}, vision_trajectories={vision_trajectory_count}")
 
     local = {
         "rank": dist.get_rank(),
@@ -345,9 +350,9 @@ def _validate_modality_layout(
         "cp_rank": trainer.cp_rank,
         "pack": "vision_and_text" if uses_vision else "text_only",
         "physical_packs": len(packs),
-        "episodes": episode_count,
-        "text_episodes": episode_count - vision_episode_count,
-        "vision_episodes": vision_episode_count,
+        "trajectories": trajectory_count,
+        "text_trajectories": trajectory_count - vision_trajectory_count,
+        "vision_trajectories": vision_trajectory_count,
     }
     layout = [None] * dist.get_world_size()
     dist.all_gather_object(layout, local, group=get_gloo_group())
@@ -357,21 +362,21 @@ def _validate_modality_layout(
         signature = (
             item["pack"],
             item["physical_packs"],
-            item["episodes"],
-            item["text_episodes"],
-            item["vision_episodes"],
+            item["trajectories"],
+            item["text_trajectories"],
+            item["vision_trajectories"],
         )
         by_dp_rank.setdefault(item["dp_rank"], set()).add(signature)
     inconsistent_cp_groups = {dp_rank: sorted(signatures) for dp_rank, signatures in by_dp_rank.items() if len(signatures) != 1}
     if inconsistent_cp_groups:
         raise RuntimeError(f"CP peers received different modality packs: {inconsistent_cp_groups}")
 
-    vision_dp_ranks = {item["dp_rank"] for item in layout if item["vision_episodes"] > 0}
+    vision_dp_ranks = {item["dp_rank"] for item in layout if item["vision_trajectories"] > 0}
     if vision_dp_ranks != {1}:
         raise RuntimeError(f"heterogeneous multimodal qualification put vision on DP ranks {sorted(vision_dp_ranks)}")
     dp1 = next(item for item in layout if item["dp_rank"] == 1)
-    if dp1["text_episodes"] == 0:
-        raise RuntimeError("DP rank 1 must contain both text and vision episodes")
+    if dp1["text_trajectories"] == 0:
+        raise RuntimeError("DP rank 1 must contain both text and vision trajectories")
     return layout
 
 

@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _has_vision(record: dict) -> bool:
-    return bool(record.get("multimodal_inputs"))
+    return any(traj.get("multimodal_inputs") for traj in record["trajectories"])
 
 
 def build_heterogeneous_records(

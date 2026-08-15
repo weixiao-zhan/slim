@@ -8,8 +8,8 @@ import pytest
 import torch
 
 import slim.rollout.sglang_rollout as sglang_rollout
-from slim.rollout.sglang_rollout import _prepare_episode_tokens, decode_generated_text
-from slim.utils.types import Episode
+from slim.rollout.sglang_rollout import _build_trajectory_with_first_prompt, decode_generated_text
+from slim.utils.types import Episode, Trajectory
 
 
 class Tokenizer:
@@ -55,9 +55,9 @@ def test_text_chat_uses_tokenizer_template_when_processor_is_available():
     rollout_state = state()
     episode = Episode.from_example({"prompt": [{"role": "user", "content": "hello"}]})
 
-    asyncio.run(_prepare_episode_tokens(rollout_state, episode))
+    episode.trajectories.append(asyncio.run(_build_trajectory_with_first_prompt(rollout_state, episode)))
 
-    assert episode.tokens == [11, 12, 13]
+    assert episode.trajectory.token_ids == [11, 12, 13]
     assert rollout_state.tokenizer.calls[0][1]["tokenize"] is True
     assert rollout_state.tokenizer.calls[0][1]["return_dict"] is False
     assert rollout_state.processor.calls == []
@@ -72,21 +72,47 @@ def test_multimodal_chat_renders_with_tokenizer_before_processing():
         }
     )
 
-    asyncio.run(_prepare_episode_tokens(rollout_state, episode))
+    episode.trajectories.append(asyncio.run(_build_trajectory_with_first_prompt(rollout_state, episode)))
 
     assert rollout_state.tokenizer.calls[0][1]["tokenize"] is False
     assert rollout_state.processor.calls[0]["text"] == "rendered prompt"
-    assert episode.tokens == [21, 22, 23]
-    assert set(episode.multimodal_inputs) == {"pixel_values"}
+    assert episode.trajectory.token_ids == [21, 22, 23]
+    assert set(episode.trajectory.multimodal_inputs) == {"pixel_values"}
 
 
 def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch):
     rollout_state = state()
     monkeypatch.setattr(sglang_rollout, "GenerateState", lambda args: rollout_state)
-    episode = Episode(tokens=[10, 11, 12, 13], loss_mask=[0, 1, 1])
+    trajectory = Trajectory(token_ids=[10, 11, 12, 13], loss_mask=[0, 1, 1])
 
-    assert decode_generated_text(SimpleNamespace(), episode) == "12,13"
+    assert decode_generated_text(SimpleNamespace(), trajectory) == "12,13"
 
-    episode.loss_mask.append(0)
+    trajectory.loss_mask.append(0)
     with pytest.raises(ValueError, match="zip\\(\\) argument 2 is longer"):
-        decode_generated_text(SimpleNamespace(), episode)
+        decode_generated_text(SimpleNamespace(), trajectory)
+
+
+def test_generate_handles_aborted_routing_replay_response(monkeypatch):
+    async def build_trajectory(_state, _episode):
+        return Trajectory(token_ids=[10, 11], loss_mask=[0], rollout_log_probs=[0.0])
+
+    async def post(_url, _payload, headers=None):
+        del headers
+        return {"meta_info": {"finish_reason": {"type": "abort"}}}
+
+    monkeypatch.setattr(sglang_rollout, "_build_trajectory_with_first_prompt", build_trajectory)
+    monkeypatch.setattr(sglang_rollout, "post", post)
+
+    args = SimpleNamespace(
+        rollout_temperature=1,
+        router_policy="cache_aware",
+        router_ip="127.0.0.1",
+        router_port=30000,
+    )
+    rollout_state = SimpleNamespace(args=args, routing_replay_shape=(40, 8))
+    episode = Episode.from_example({"prompt": "prompt"})
+    episode.max_tokens = 16
+
+    result = asyncio.run(sglang_rollout.generate(rollout_state, episode))
+
+    assert result.status == Episode.Status.ABORTED

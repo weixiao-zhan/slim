@@ -64,7 +64,11 @@ def make_keep_predicate(keep_patterns):
     """Build an `is_kept(module_name)` predicate from a `modules_to_not_convert` list."""
 
     def is_kept(module_name):
-        return any(module_path_match(p, module_name) for p in keep_patterns)
+        module_names = [module_name]
+        language_model_prefix = "model.language_model."
+        if module_name.startswith(language_model_prefix):
+            module_names.append("model." + module_name.removeprefix(language_model_prefix))
+        return any(module_path_match(pattern, name) for pattern in keep_patterns for name in module_names)
 
     return is_kept
 
@@ -94,25 +98,25 @@ def parse_quant_recipe(quantization_config):
 
 
 def _block_fp8_fp32(weight, block_size):
-    """128x128 block e4m3 quant with full float32 per-block scales (slim's own recipe).
+    """128x128 block e4m3 quant over the last two dimensions with fp32 scales.
 
     Validated bit-for-bit against the official Qwen3.6-27B-FP8 checkpoint.
     """
     block_n, block_k = block_size
-    shape_0, shape_1 = weight.shape
+    *batch_shape, shape_0, shape_1 = weight.shape
     n_tiles, k_tiles = ceildiv(shape_0, block_n), ceildiv(shape_1, block_k)
 
     padded = F.pad(weight, (0, k_tiles * block_k - shape_1, 0, n_tiles * block_n - shape_0))
-    tiled = padded.reshape(n_tiles, block_n, k_tiles, block_k)
-    scale = tiled.abs().amax(dim=(1, 3), keepdim=True).to(torch.float32).clamp(min=1e-12) / FP8_MAX
+    tiled = padded.reshape(*batch_shape, n_tiles, block_n, k_tiles, block_k)
+    scale = tiled.abs().amax(dim=(-3, -1), keepdim=True).to(torch.float32).clamp(min=1e-12) / FP8_MAX
     qweight = (
         (tiled / scale)
         .clamp(FP8_MIN, FP8_MAX)
-        .reshape(n_tiles * block_n, k_tiles * block_k)
-        .to(torch.float8_e4m3fn)[:shape_0, :shape_1]
+        .reshape(*batch_shape, n_tiles * block_n, k_tiles * block_k)
+        .to(torch.float8_e4m3fn)[..., :shape_0, :shape_1]
         .contiguous()
     )
-    return qweight, scale.reshape(n_tiles, k_tiles)
+    return qweight, scale.reshape(*batch_shape, n_tiles, k_tiles)
 
 
 def _block_fp8_ue8m0(weight, block_size):
@@ -233,23 +237,48 @@ class QuantizerFP8(Quantizer):
             scale_fmt=scale_fmt,
         )
 
-    def quantize(self, name, param):
-        """Quantizable 2D weights become `(name, fp8_weight)` plus
-        `(name.weight_scale_inv, scale)`; everything else passes through unchanged.
-
-        For ue8m0 on Blackwell the scale is packed into DeepGEMM's int32 layout, because
-        the engine's `update_weights_from_tensor` -> `load_weights` path does NOT re-run
-        `process_weights_after_loading` (which is where it would otherwise pack scales).
-        """
-        if not (name.endswith(".weight") and param.dim() == 2 and not self.is_kept(module_name_of(name))):
-            return ((name, param),)
+    def _quantize_weight(self, name, param):
         if hasattr(param, "wait"):
             param = param.wait()
         block_n = self.block_size[0]
-        assert param.shape[0] % block_n == 0, (
-            f"{name}: output dim {param.shape[0]} is not divisible by block size {block_n}"
+        assert param.shape[-2] % block_n == 0, (
+            f"{name}: output dim {param.shape[-2]} is not divisible by block size {block_n}"
         )
         qweight, scale = block_fp8(param, self.block_size, scale_fmt=self.scale_fmt)
         if self._pack_ue8m0:
             scale = pack_ue8m0_scale_for_engine(scale, mn=qweight.shape[-2])
+        return qweight, scale
+
+    def _quantize_linear_weight(self, name, param):
+        qweight, scale = self._quantize_weight(name, param)
         return ((name, qweight), (name.replace(".weight", ".weight_scale_inv"), scale))
+
+    def _quantize_grouped_expert_weight(self, name, param):
+        qweight, scale = self._quantize_weight(name, param)
+        expert_prefix, projection = name.rsplit(".", 1)
+        if projection == "gate_up_proj":
+            gate_scale, up_scale = scale.chunk(2, dim=-2)
+            scales = [
+                pair
+                for expert_id in range(scale.shape[0])
+                for pair in (
+                    (f"{expert_prefix}.{expert_id}.gate_proj.weight_scale_inv", gate_scale[expert_id]),
+                    (f"{expert_prefix}.{expert_id}.up_proj.weight_scale_inv", up_scale[expert_id]),
+                )
+            ]
+        else:
+            scales = [
+                (f"{expert_prefix}.{expert_id}.down_proj.weight_scale_inv", scale[expert_id])
+                for expert_id in range(scale.shape[0])
+            ]
+        return ((name, qweight), *scales)
+
+    def quantize(self, name, param):
+        """Quantize linear weights and grouped MoE expert weights."""
+        if self.is_kept(module_name_of(name)):
+            return ((name, param),)
+        if name.endswith(".weight") and param.dim() == 2:
+            return self._quantize_linear_weight(name, param)
+        if param.dim() == 3 and name.endswith((".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")):
+            return self._quantize_grouped_expert_weight(name, param)
+        return ((name, param),)

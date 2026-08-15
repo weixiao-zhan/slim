@@ -21,7 +21,7 @@ from slim.utils.async_utils import run
 from slim.utils.eval_config import EvalDatasetConfig
 from slim.utils.http_utils import get, post
 from slim.utils.misc import SingletonMeta, load_function
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 __all__ = ["generate_rollout", "get_model_url"]
 
@@ -55,15 +55,7 @@ class GenerateState(metaclass=SingletonMeta):
         concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
         self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
-        self.sampling_params: dict[str, Any] = {
-            "temperature": args.rollout_temperature,
-            "no_stop_trim": True,
-            "spaces_between_special_tokens": False,
-            **args.rollout_sampling_params,
-        }
-        if getattr(args, "sglang_enable_deterministic_inference", False):
-            sampling_seed_base = args.rollout_seed
-            self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
+        self.deterministic_inference = getattr(args, "sglang_enable_deterministic_inference", False)
 
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
@@ -107,20 +99,20 @@ class GenerateState(metaclass=SingletonMeta):
             )
 
 
-def decode_text(args: Namespace, episode: Episode) -> str:
-    """Decode the full prompt+response sequence. Multi-turn safe; RM may parse it as needed."""
-    if not len(episode.tokens):
+def decode_text(args: Namespace, trajectory: Trajectory) -> str:
+    """Decode one trajectory's full prompt+response sequence. RM may parse it as needed."""
+    if not len(trajectory.token_ids):
         return ""
-    return GenerateState(args).tokenizer.decode(episode.tokens)
+    return GenerateState(args).tokenizer.decode(trajectory.token_ids)
 
 
-def decode_generated_text(args: Namespace, episode: Episode) -> str:
-    """Decode generated targets from a rollout-stage episode."""
-    if episode.loss_mask is None:
+def decode_generated_text(args: Namespace, trajectory: Trajectory) -> str:
+    """Decode generated targets from a rollout-stage trajectory."""
+    if trajectory.loss_mask is None:
         raise ValueError("loss_mask must be present")
     gen_ids = [
         token
-        for token, active in zip(episode.tokens[1:], episode.loss_mask, strict=True)
+        for token, active in zip(trajectory.token_ids[1:], trajectory.loss_mask, strict=True)
         if active
     ]
     if not gen_ids:
@@ -140,16 +132,11 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> None:
-    """Tokenize prompt into episode.tokens if not already set."""
-    if episode.tokens:
-        return
-
+async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Episode) -> Trajectory:
+    """The trajectory that opens an append-only attempt, holding the tokenized prompt."""
     prompt = episode.example.get("prompt", "")
     tools = episode.example.get("tools")
-
-    if episode.has_multimodal and state.processor is None:
-        raise RuntimeError("Multimodal examples require a processor, but none could be loaded for this checkpoint.")
+    multimodal_inputs = None
 
     if episode.has_multimodal:
         prompt_text = (
@@ -173,7 +160,7 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
             return_mm_token_type_ids=False,
         )
         prompt_ids = processor_output["input_ids"][0].tolist()
-        episode.multimodal_inputs = {
+        multimodal_inputs = {
             k: v
             for k, v in processor_output.items()
             if k not in ["input_ids", "attention_mask"] and isinstance(v, torch.Tensor)
@@ -191,10 +178,13 @@ async def _prepare_episode_tokens(state: GenerateState, episode: Episode) -> Non
         # Raw string prompt
         prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
-    episode.tokens = prompt_ids
-    edge_len = max(len(episode.tokens) - 1, 0)
-    episode.loss_mask = [0] * edge_len
-    episode.rollout_log_probs = [0.0] * edge_len
+    edge_len = max(len(prompt_ids) - 1, 0)
+    return Trajectory(
+        token_ids=prompt_ids,
+        loss_mask=[0] * edge_len,
+        rollout_log_probs=[0.0] * edge_len,
+        multimodal_inputs=multimodal_inputs,
+    )
 
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
@@ -202,31 +192,44 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     from slim.utils.processing_utils import encode_tensor_to_b64_envelope
 
     assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
-    sampling_params = episode._sampling_params
 
-    await _prepare_episode_tokens(state, episode)
-    assert episode.rollout_log_probs is not None
+    trajectory = await _build_trajectory_with_first_prompt(state, episode)
+    episode.trajectories.append(trajectory)
 
-    max_new_tokens = episode.max_tokens - len(episode.tokens)
+    max_new_tokens = episode.max_tokens - len(trajectory.token_ids)
     if max_new_tokens <= 0:
         episode.status = Episode.Status.TRUNCATED
         return episode
 
-    sampling_params["max_new_tokens"] = max_new_tokens
+    sampling_params = {
+        "temperature": args.rollout_temperature,
+        "max_new_tokens": max_new_tokens,
+    }
+    if episode.sampling_seed is not None:
+        sampling_params["sampling_seed"] = episode.sampling_seed
 
     payload = {
-        "input_ids": episode.tokens,
+        "input_ids": trajectory.token_ids,
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+    routed_experts_start_len = 0
+    if state.routing_replay_shape is not None:
+        # Expert capture is indexed by KV-cache slot, so a position reports the routing
+        # of whichever forward pass last wrote its slot. Rows already held end where
+        # this call's fresh prefill begins, which is the first token of the new turn.
+        if trajectory.rollout_routed_experts is not None:
+            routed_experts_start_len = len(trajectory.rollout_routed_experts)
+        payload["return_routed_experts"] = True
+        payload["routed_experts_start_len"] = routed_experts_start_len
     if episode.has_multimodal:
         processor_output = {
             "format": "processor_output",
             "input_ids": await asyncio.to_thread(
-                encode_tensor_to_b64_envelope, torch.as_tensor([episode.tokens], dtype=torch.long)
+                encode_tensor_to_b64_envelope, torch.as_tensor([trajectory.token_ids], dtype=torch.long)
             ),
         }
-        for key, value in episode.multimodal_inputs.items():
+        for key, value in trajectory.multimodal_inputs.items():
             processor_output[key] = (
                 await asyncio.to_thread(encode_tensor_to_b64_envelope, value) if hasattr(value, "detach") else value
             )
@@ -245,29 +248,37 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     output = await post(url, payload, headers=headers)
 
     meta_info = output["meta_info"]
+    episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
+    if episode.status == Episode.Status.ABORTED:
+        return episode
+
     new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
     new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
 
-    episode.tokens.extend(new_tokens)
-    episode.loss_mask.extend([1] * len(new_tokens))
-    episode.rollout_log_probs.extend(new_log_probs)
+    trajectory.token_ids.extend(new_tokens)
+    trajectory.loss_mask.extend([1] * len(new_tokens))
+    trajectory.rollout_log_probs.extend(new_log_probs)
 
     if state.routing_replay_shape is not None:
         import numpy as np
         import pybase64
 
-        b64 = meta_info.get("routed_experts")
-        if b64 is not None:
-            num_layers, top_k = state.routing_replay_shape
+        num_layers, top_k = state.routing_replay_shape
+        # The response covers [start_len, seqlen - 1), one row per prediction.
+        prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
-            def _decode_routed_experts(raw: str):
-                # pybase64 decode + numpy copy both release the GIL.
-                arr = np.frombuffer(pybase64.b64decode(raw.encode("utf-8")), dtype=np.int32).copy()
-                return arr.reshape(-1, num_layers, top_k)
+        def _decode_routed_experts(raw: str):
+            # pybase64 decode + numpy copy both release the GIL.
+            arr = np.frombuffer(pybase64.b64decode(raw.encode("ascii")), dtype=np.int32).copy()
+            return arr.reshape(prediction_count, num_layers, top_k)
 
-            episode.rollout_routed_experts = await asyncio.to_thread(_decode_routed_experts, b64)
+        fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
+        trajectory.rollout_routed_experts = (
+            fresh
+            if trajectory.rollout_routed_experts is None
+            else np.concatenate((trajectory.rollout_routed_experts, fresh))
+        )
 
-    episode.update_status_from_finish_reason(meta_info["finish_reason"]["type"])
     return episode
 
 
@@ -297,15 +308,21 @@ async def generate_and_rm(
                 episode = await generate(state, episode)
 
     if episode.status != Episode.Status.ABORTED:
-        episode.text = decode_text(args, episode)
-        if episode.generated_text is None:
-            episode.generated_text = decode_generated_text(args, episode)
+        for trajectory in episode.trajectories:
+            trajectory.text = decode_text(args, trajectory)
+            if trajectory.generated_text is None:
+                trajectory.generated_text = decode_generated_text(args, trajectory)
 
-    if not args.group_rm and episode.status != Episode.Status.ABORTED and episode.reward is None:
+    if not args.group_rm and episode.status != Episode.Status.ABORTED and _needs_reward(episode):
         from .rm_hub import async_rm
 
-        episode.reward = await async_rm(args, episode)
+        await async_rm(args, episode)
     return episode
+
+
+def _needs_reward(episode: Episode) -> bool:
+    """A reward function may score at either level; scoring runs when neither is set."""
+    return episode.reward is None and all(t.reward is None for t in episode.trajectories)
 
 
 async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation: bool = False) -> RolloutGroup:
@@ -313,25 +330,19 @@ async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation
     if state.aborted:
         return group
 
-    for episode in group.episodes:
-        if episode.session_id is None:
-            episode.session_id = str(uuid.uuid4())
-
     tasks = []
     for idx, episode in enumerate(group.episodes):
-        current_sampling_params = state.sampling_params.copy()
-        if getattr(args, "sglang_enable_deterministic_inference", False):
-            current_sampling_params["sampling_seed"] = state.group_sampling_seeds[idx]
-        episode._sampling_params = current_sampling_params
+        if episode.session_id is None:
+            episode.session_id = str(uuid.uuid4())
+        if state.deterministic_inference:
+            episode.sampling_seed = args.rollout_seed + idx
         tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=evaluation)))
 
     group.episodes = await asyncio.gather(*tasks)
     if not state.aborted and args.group_rm:
         from .rm_hub import batched_async_rm
 
-        rewards = await batched_async_rm(args, group.episodes)
-        for episode, reward in zip(group.episodes, rewards, strict=False):
-            episode.reward = reward
+        await batched_async_rm(args, group.episodes)
 
     group.completed = all(ep.status != Episode.Status.ABORTED for ep in group.episodes)
     return group
@@ -387,6 +398,8 @@ async def generate_rollout_async(
             groups = _examples_to_rollout_groups(examples, args)
             for group in groups:
                 group.index = next_group_index
+                for episode in group.episodes:
+                    episode.group_index = next_group_index
                 next_group_index += 1
             state.submit_generate_tasks(groups)
 
@@ -397,7 +410,8 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+                    f"First rollout sample: {[t.text for t in ep.trajectories]}, "
+                    f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
                 )
                 do_print = False
 
@@ -417,7 +431,8 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[ep.text]}, label: {ep.example.get('label')}, reward: {ep.reward}",
+        f"Finish rollout: {[t.text for t in ep.trajectories]}, "
+        f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
     )
 
     aborted_examples = await abort(args)
@@ -463,18 +478,11 @@ async def eval_rollout_single_dataset(
     global EVAL_PROMPT_DATASET
     from slim.utils.data import load_hf_dataset
 
+    state = GenerateState(args)
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
         EVAL_PROMPT_DATASET[cache_key] = load_hf_dataset(dataset_cfg.path)
     dataset = EVAL_PROMPT_DATASET[cache_key]
-
-    base_sampling_params = {
-        "temperature": dataset_cfg.temperature,
-        "no_stop_trim": True,
-        "spaces_between_special_tokens": False,
-        **args.rollout_sampling_params,
-        **dataset_cfg.sampling_params,
-    }
 
     tasks = []
     for raw_row in dataset:
@@ -483,17 +491,18 @@ async def eval_rollout_single_dataset(
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             episode.max_tokens = dataset_cfg.max_context_len
-            sampling_params = base_sampling_params.copy()
-            if getattr(args, "sglang_enable_deterministic_inference", False):
-                sampling_params["sampling_seed"] = args.rollout_seed + j
-            episode._sampling_params = sampling_params
+            if state.deterministic_inference:
+                episode.sampling_seed = args.rollout_seed + j
             tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=True)))
 
     raw_episodes = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
     episodes = []
     for i, episode in enumerate(raw_episodes):
         if i == 0:
-            logger.info(f"eval_rollout_single_dataset example data: {[episode.text]} reward={episode.reward}")
+            logger.info(
+                f"eval_rollout_single_dataset example data: {[t.text for t in episode.trajectories]} "
+                f"reward={episode.get_reward_value()}"
+            )
         episodes.append(episode)
 
     return {dataset_cfg.name: episodes}

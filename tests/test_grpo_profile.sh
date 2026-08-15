@@ -11,16 +11,17 @@ mkdir -p "$SAVE_DIR"
 
 start_ray
 run_train "
-    --num-rollout 3
+    --num-rollout 4
     --rollout-batch-size 8
     --n-samples-per-prompt 4
-    --max-context-len 8192
-    --rollout-temperature 1
     --num-steps-per-rollout 1
+    --max-context-len $(K 16)
+    --rollout-temperature 1
+    --rollout-shuffle
+    $(group_advantage_filter_args 32)
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
-    --rollout-shuffle
     --skip-eval-before-train
 
     --rollout-num-gpus-per-replica 1
@@ -32,7 +33,7 @@ run_train "
     --actor-num-gpus $NUM_GPUS
     --activation-checkpointing
     --use-dynamic-batch-size
-    --max-tokens-per-gpu 8192
+    --max-tokens-per-gpu $(K 16)
 
     --profile-target train_pg rollout
     --profile-step-start 0

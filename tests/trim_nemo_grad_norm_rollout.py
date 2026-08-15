@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 
-from slim.utils.types import Episode
+from slim.utils.types import Episode, Trajectory
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,38 +27,54 @@ def _slice_predictions(value, prediction_count: int):
     return value[:prediction_count]
 
 
-def trim_record(record: dict, max_response_tokens: int) -> tuple[dict, int]:
-    episode = Episode(**record)
-    mask = torch.as_tensor(episode.loss_mask)
+def _trim_trajectory(traj: dict, max_response_tokens: int) -> tuple[dict, int]:
+    """Bound one trajectory's response, returning the trimmed trajectory and its token count."""
+    trajectory = Trajectory(**traj)
+    mask = torch.as_tensor(trajectory.loss_mask)
     generated_positions = torch.nonzero(mask, as_tuple=False).flatten()
     if generated_positions.numel() == 0:
-        return record, len(episode.tokens)
+        return traj, len(trajectory.token_ids)
 
     first_generated_position = int(generated_positions[0].item())
     prediction_count = min(
-        len(episode.tokens) - 1,
+        len(trajectory.token_ids) - 1,
         first_generated_position + max_response_tokens,
     )
     token_count = prediction_count + 1
-    trimmed = dict(record)
-    trimmed["tokens"] = episode.tokens[:token_count]
-    trimmed["loss_mask"] = _slice_predictions(episode.loss_mask, prediction_count)
+    trimmed = dict(traj)
+    trimmed["token_ids"] = trajectory.token_ids[:token_count]
+    trimmed["loss_mask"] = _slice_predictions(trajectory.loss_mask, prediction_count)
     trimmed["rollout_log_probs"] = _slice_predictions(
-        episode.rollout_log_probs,
+        trajectory.rollout_log_probs,
         prediction_count,
     )
     trimmed["rollout_routed_experts"] = _slice_predictions(
-        episode.rollout_routed_experts,
+        trajectory.rollout_routed_experts,
         prediction_count,
     )
-    trimmed["max_tokens"] = token_count
-    if token_count < len(episode.tokens):
+    if token_count < len(trajectory.token_ids):
         trimmed["text"] = None
         trimmed["generated_text"] = None
-        trimmed["status"] = Episode.Status.TRUNCATED
 
-    Episode(**trimmed).finalize_source_token_alignment()
+    Trajectory(**trimmed).finalize_source_token_alignment()
     return trimmed, token_count
+
+
+def trim_record(record: dict, max_response_tokens: int) -> tuple[dict, int]:
+    """Bound every trajectory of one attempt."""
+    trajectories = []
+    token_counts = []
+    for traj in record["trajectories"]:
+        trimmed, token_count = _trim_trajectory(traj, max_response_tokens)
+        trajectories.append(trimmed)
+        token_counts.append(token_count)
+
+    trimmed_record = dict(record)
+    trimmed_record["trajectories"] = trajectories
+    trimmed_record["max_tokens"] = max(token_counts, default=0)
+    if any(len(traj["token_ids"]) < len(original["token_ids"]) for traj, original in zip(trajectories, record["trajectories"], strict=True)):
+        trimmed_record["status"] = Episode.Status.TRUNCATED
+    return trimmed_record, sum(token_counts)
 
 
 def main() -> None:
@@ -70,7 +86,9 @@ def main() -> None:
     if not isinstance(records, list):
         raise ValueError(f"{args.input} does not contain an episodes list")
 
-    original_tokens = sum(len(record["tokens"]) for record in records)
+    original_tokens = sum(
+        len(traj["token_ids"]) for record in records for traj in record["trajectories"]
+    )
     trimmed_records = []
     token_counts = []
     for record in records:

@@ -1,26 +1,18 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
-import copy
 import io
 import logging
-import torch
 
 import pybase64
+import torch
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 logger = logging.getLogger(__name__)
 
-# Default image patch size for vision-language models
-# Note: Qwen3-VL uses 16, Qwen2.5-VL uses 14
-# Reference: https://github.com/QwenLM/Qwen3-VL/blob/main/qwen-vl-utils/README.md
-DEFAULT_PATCH_SIZE = 14
-
 
 def load_tokenizer(name_or_path: str, **kwargs):
     return AutoTokenizer.from_pretrained(name_or_path, **kwargs)
-
 
 
 def load_processor(name_or_path: str, **kwargs):
@@ -37,44 +29,13 @@ def load_processor(name_or_path: str, **kwargs):
     return proc
 
 
-def process_vision_info(prompt, processor):
-    # Deprecated: the default path expects canonical datasets with top-level `images`
-    # aligned to {"type": "image"} prompt items. This helper remains only for older
-    # datasets that inline image references inside the prompt itself.
-    from qwen_vl_utils import process_vision_info as qwen_process_vision_info
-
-    if hasattr(processor.image_processor, "patch_size"):
-        image_patch_size = processor.image_processor.patch_size
-    else:
-        logger.info(f"Using default patch size: {DEFAULT_PATCH_SIZE}")
-        image_patch_size = DEFAULT_PATCH_SIZE
-
-    # Normalize OpenAI image_url format to Qwen format before processing.
-    # qwen_vl_utils expects {"type": "image", "image": url} but OpenAI format
-    # uses {"type": "image_url", "image_url": {"url": ...}}.
-    normalized = copy.deepcopy(prompt)
-    for msg in normalized:
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "image_url":
-                image_url = item.pop("image_url", {})
-                item["type"] = "image"
-                item["image"] = image_url.get("url", "") if isinstance(image_url, dict) else image_url
-
-    images, videos = qwen_process_vision_info(normalized, image_patch_size=image_patch_size)
-    multimodal_inputs = {"images": images, "videos": videos}
-    return multimodal_inputs
-
-
-def encode_image_for_rollout_engine(image) -> str:
-    """Load an image from path, ensure RGB, encode as PNG base64 string."""
+def pil_to_data_url(image) -> str:
+    """Encode a PIL image as a PNG data URL."""
     buffer = io.BytesIO()
     if image.mode != "RGB":
         image = image.convert("RGB")
     image.save(buffer, format="PNG")
-    image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    image_base64 = pybase64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{image_base64}"
 
 
@@ -88,3 +49,69 @@ def encode_tensor_to_b64_envelope(value) -> dict:
         "shape": list(tensor.shape),
         "data": pybase64.b64encode(raw).decode("ascii"),
     }
+
+
+def decode_tensor_from_b64_envelope(value: dict) -> torch.Tensor:
+    """Decode a tensor produced by ``encode_tensor_to_b64_envelope``."""
+    raw = pybase64.b64decode(value["data"], validate=True)
+    dtype = getattr(torch, value["dtype"])
+    return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(value["shape"])
+
+
+def decode_tensor_envelopes(value):
+    """Decode every tensor envelope nested in a JSON-decoded structure."""
+    if isinstance(value, dict):
+        if value.get("__tensor__"):
+            return decode_tensor_from_b64_envelope(value)
+        return {key: decode_tensor_envelopes(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [decode_tensor_envelopes(item) for item in value]
+    return value
+
+
+# SGLang names a modality's primary processor tensor after the modality itself.
+_MODALITY_FEATURE_NAMES = {
+    "IMAGE": "pixel_values",
+    "VIDEO": "pixel_values_videos",
+    "AUDIO": "input_features",
+}
+
+
+def _merge_processor_field(name: str, values: list) -> torch.Tensor:
+    """Join one processor field across the multimodal items of a single prompt."""
+    tensors = []
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            tensors.extend(torch.as_tensor(item) for item in value)
+        else:
+            tensors.append(torch.as_tensor(value))
+    if name.endswith("_grid_thw"):
+        tensors = [tensor.unsqueeze(0) if tensor.ndim == 1 else tensor for tensor in tensors]
+    if len(tensors) == 1:
+        return tensors[0]
+    if all(tensor.ndim == 0 for tensor in tensors):
+        return torch.stack(tensors)
+    return torch.cat(tensors, dim=0)
+
+
+def encode_processor_outputs(mm_inputs) -> dict[str, dict] | None:
+    """Encode an SGLang ``MultimodalInputs``' processor tensors for JSON transport.
+
+    Returns the same field names an ``AutoProcessor`` call produces, so a caller can
+    train on an SGLang-tokenized prompt exactly as it trains on its own.
+    """
+    if mm_inputs is None:
+        return None
+
+    fields: dict[str, list] = {}
+    for item in mm_inputs.mm_items:
+        feature_name = _MODALITY_FEATURE_NAMES.get(item.modality.name)
+        if feature_name is not None and item.feature is not None:
+            fields.setdefault(feature_name, []).append(item.feature)
+        for name, value in item.model_specific_data.items():
+            fields.setdefault(name, []).append(value)
+
+    return {
+        name: encode_tensor_to_b64_envelope(_merge_processor_field(name, values))
+        for name, values in fields.items()
+    } or None
