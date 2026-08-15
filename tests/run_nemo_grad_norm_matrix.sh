@@ -51,7 +51,6 @@ if [[ ! -f "$FIRST_ROLLOUT_CAPTURE" || "${NEMO_GRAD_NORM_REGENERATE_ROLLOUT:-0}"
         --sglang-attention-backend fa3
         --mamba-radix-cache-strategy extra_buffer
         --sglang-page-size 64
-        --sglang-enforce-disable-flashinfer-allreduce-fusion
 
         --hf-checkpoint $MODEL_DIR
         --save-debug-rollout-data $ROLLOUT_CAPTURE

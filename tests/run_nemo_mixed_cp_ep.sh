@@ -38,7 +38,6 @@ run_train_wait "
     --sglang-attention-backend fa3
     --mamba-radix-cache-strategy extra_buffer
     --sglang-page-size 64
-    --sglang-enforce-disable-flashinfer-allreduce-fusion
     --rollout-colocate
 
     --actor-num-gpus 8

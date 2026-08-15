@@ -42,7 +42,6 @@ ARGS="
     --sglang-page-size 64
     --sglang-attention-backend fa3
     --sglang-load-format dummy
-    --sglang-enforce-disable-flashinfer-allreduce-fusion
 
     --activation-checkpointing
     --use-dynamic-batch-size
