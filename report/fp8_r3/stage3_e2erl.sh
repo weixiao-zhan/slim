@@ -37,7 +37,7 @@ COMMON_ARGS="
     --rollout-concurrency-per-replica 128
     --sglang-attention-backend fa3
     --sglang-mem-fraction-static 0.8
-    --sglang-mamba-scheduler-strategy extra_buffer
+    --sglang-mamba-radix-cache-strategy extra_buffer
     --sglang-page-size 64
     --sglang-enable-metrics
 

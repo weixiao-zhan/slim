@@ -9,7 +9,7 @@ dependencies = [
     "flash-attn-3",
     "httpx[http2]",
     "liger-kernel",
-    "nemo-automodel[fla,vlm]",
+    "nemo-automodel[fla,vlm]==0.6.0",
     "omegaconf",
     "packaging",
     "orjson",
@@ -18,10 +18,10 @@ dependencies = [
     "pyyaml",
     "ray[default]",
     "requests",
-    "sglang==0.5.15.post1",
+    "sglang==0.5.20",
     "sglang-router==0.3.2.post1",
     "sympy",
-    "torch==2.11.0",
+    "torch==2.13.0",
     "tqdm",
     "transformers==5.12.1",
     "wandb",
@@ -63,12 +63,10 @@ packages = ["slim"]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
 torchaudio = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
-flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-linux_x86_64.whl" }
-flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.05.11-5e0e3b1/flash_attn_3-3.0.0%2B20260511.cu130torch2110cxx11abitrue.ab6632-cp39-abi3-linux_x86_64.whl" }
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-cp312-cp312-linux_x86_64.whl" }
+flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.08.17-542a34a/flash_attn_3-3.0.0%2B20260817.cu130torch2130cxx11abitrue.25110-cp310-abi3-linux_x86_64.whl" }
 # Forked gateway: the released wheel forwards the SGLang request fields upstream drops.
 sglang-router = { url = "https://github.com/weixiao-zhan/sgl-model-gateway/releases/download/v0.3.2.post1/sglang_router-0.3.2.post1-cp38-abi3-manylinux_2_28_x86_64.whl" }
-# Pin for Qwen3.5 packed attention/Gated DeltaNet CP and CP vision-tower sharding; bump to the next release.
-nemo-automodel = { git = "https://github.com/NVIDIA-NeMo/Automodel.git", rev = "2de37e53d42e26409f08a8a9fa3a1269c56479a4" }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
@@ -141,3 +139,5 @@ markers = [
 [tool.uv]
 environments = ["sys_platform == 'linux'"]
 prerelease = "allow"
+# SGLang's kernel stack requires this version alongside AutoModel 0.6.0.
+override-dependencies = ["quack-kernels==0.6.4"]

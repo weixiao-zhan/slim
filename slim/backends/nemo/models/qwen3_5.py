@@ -1,25 +1,19 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen3.5 construction and packed context-parallel graph patches."""
+"""Qwen3.5 construction, packed CP configuration, and synchronized vision."""
 
 from __future__ import annotations
 
 from types import MethodType
-from typing import Any
 
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForImageTextToText
-from nemo_automodel.components.distributed.activation_checkpointing import unwrap_checkpoint_wrapper
-from nemo_automodel.components.distributed.blockdiag_cp import (
-    configure_cp_varlen,
-    cp_blockdiag_sdpa,
-    current_blockdiag_cp_state,
-)
+from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
-from nemo_automodel.components.distributed.cp_vision_shard import (
-    CpVisionShardingConfig,
+from nemo_automodel.components.distributed.cp_vision_frame_shard import (
+    CpVisionFrameShardingConfig,
     reset_cp_vision_group,
     set_cp_vision_group,
 )
@@ -31,11 +25,9 @@ from nemo_automodel.components.distributed.parallelizer import (
 )
 from nemo_automodel.components.models.common import BackendConfig
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
-from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
-from nemo_automodel.components.moe.layers import MoE
 
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
-CP_VISION_SHARDING = CpVisionShardingConfig(enabled=True)
+CP_VISION_SHARDING = CpVisionFrameShardingConfig(enabled=True)
 
 
 def _is_moe(config) -> bool:
@@ -113,84 +105,8 @@ def build_model(
     if routing_replay:
         kwargs["moe_overrides"] = {"enable_routing_replay": True}
     model = NeMoAutoModelForImageTextToText.from_pretrained(checkpoint, **kwargs)
-    install_packed_cp(model, distributed_setup.mesh_context.device_mesh)
+    configure_packed_cp(model, distributed_setup.mesh_context.device_mesh)
     return model
-
-
-def _blockdiag_attention(self, query, key, value, **attn_kwargs):
-    if current_blockdiag_cp_state() is not None:
-        return cp_blockdiag_sdpa(query, key, value, **attn_kwargs)
-    return self._slim_base_attn_func(query, key, value, **attn_kwargs)
-
-
-def _install_attention_dispatch(model: torch.nn.Module) -> None:
-    seen = set()
-    for module in model.modules():
-        attention = unwrap_checkpoint_wrapper(module)
-        if not isinstance(attention, Qwen3NextAttention) or id(attention) in seen:
-            continue
-        seen.add(id(attention))
-        if getattr(attention, "_slim_packed_cp_dispatch", False):
-            continue
-        attention._slim_base_attn_func = attention.attn_func
-        attention.attn_func = MethodType(_blockdiag_attention, attention)
-        attention._slim_packed_cp_dispatch = True
-
-
-def _blockdiag_gdn(
-    self,
-    hidden_states,
-    cache_params=None,
-    cache_position=None,
-    attention_mask=None,
-    position_ids=None,
-    qkv_format=None,
-    cu_seqlens=None,
-    indices=None,
-    seq_index=None,
-):
-    blockdiag_state = current_blockdiag_cp_state()
-    if blockdiag_state is None:
-        return self._slim_base_gdn_forward(
-            hidden_states,
-            cache_params=cache_params,
-            cache_position=cache_position,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            qkv_format=qkv_format,
-            cu_seqlens=cu_seqlens,
-            indices=indices,
-            seq_index=seq_index,
-        )
-    if cache_params is not None:
-        raise ValueError("packed Qwen3.5 training does not support a Gated DeltaNet cache")
-    return self._forward_with_cp(
-        hidden_states,
-        position_ids=position_ids,
-        seq_index=seq_index,
-        blockdiag_state=blockdiag_state,
-    )
-
-
-def _install_gdn_dispatch(model: torch.nn.Module, cp_mesh) -> None:
-    seen = set()
-    for module in model.modules():
-        gdn = unwrap_checkpoint_wrapper(module)
-        if not isinstance(gdn, CPAwareGatedDeltaNet) or id(gdn) in seen:
-            continue
-        seen.add(id(gdn))
-        gdn._cp_mesh = cp_mesh
-        if getattr(gdn, "_slim_packed_cp_dispatch", False):
-            continue
-        gdn._slim_base_gdn_forward = gdn.forward
-        gdn.forward = MethodType(_blockdiag_gdn, gdn)
-        gdn._slim_packed_cp_dispatch = True
-
-
-def _install_moe_cp(model: torch.nn.Module, cp_mesh) -> None:
-    for module in model.modules():
-        if isinstance(module, MoE):
-            module.cp_mesh = cp_mesh
 
 
 def _global_media_presence(
@@ -316,67 +232,8 @@ def _install_synchronized_vision(model: torch.nn.Module, sync_group, cp_group) -
     model._slim_synchronized_vision = True
 
 
-def _pad_sequence(tensor: torch.Tensor, *, seq_dim: int, pad_len: int, fill: float | int) -> torch.Tensor:
-    if pad_len == 0:
-        return tensor
-    shape = list(tensor.shape)
-    shape[seq_dim] = pad_len
-    padding = torch.full(shape, fill, dtype=tensor.dtype, device=tensor.device)
-    return torch.cat((tensor, padding), dim=seq_dim)
-
-
-def _install_primary_shard(model: torch.nn.Module, cp_mesh) -> None:
-    if getattr(model, "_slim_packed_cp_primary_shard", False):
-        return
-
-    def shard_primary(
-        module: torch.nn.Module,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-        if current_blockdiag_cp_state() is None:
-            return None
-
-        if kwargs.get("inputs_embeds") is not None:
-            return None
-
-        input_ids = kwargs.get("input_ids")
-        if input_ids is None or torch.is_floating_point(input_ids):
-            return None
-
-        inputs_embeds = module._embed_and_splice_for_cp(
-            input_ids,
-            pixel_values=kwargs.get("pixel_values"),
-            pixel_values_videos=kwargs.get("pixel_values_videos"),
-            image_grid_thw=kwargs.get("image_grid_thw"),
-            video_grid_thw=kwargs.get("video_grid_thw"),
-        )
-        cp_size = cp_mesh.size()
-        pad_len = (-inputs_embeds.shape[1]) % (2 * cp_size)
-        inputs_embeds = _pad_sequence(inputs_embeds, seq_dim=1, pad_len=pad_len, fill=0)
-        local_len = inputs_embeds.shape[1] // cp_size
-        rank = cp_mesh.get_local_rank()
-        inputs_embeds = inputs_embeds[:, rank * local_len : (rank + 1) * local_len].contiguous()
-
-        kwargs = dict(kwargs)
-        kwargs["input_ids"] = None
-        kwargs["inputs_embeds"] = inputs_embeds
-        for media_key in (
-            "pixel_values",
-            "pixel_values_videos",
-            "image_grid_thw",
-            "video_grid_thw",
-            "mm_token_type_ids",
-        ):
-            kwargs.pop(media_key, None)
-        return args, kwargs
-
-    model.register_forward_pre_hook(shard_primary, with_kwargs=True)
-    model._slim_packed_cp_primary_shard = True
-
-
-def install_packed_cp(model: torch.nn.Module, device_mesh) -> None:
-    """Install the packed training path missing from Qwen3.5 AutoModel."""
+def configure_packed_cp(model: torch.nn.Module, device_mesh) -> None:
+    """Configure the packed CP runtime, Gated DeltaNet meshes, and vision synchronization."""
     if model.backend.attn != "sdpa":
         raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
 
@@ -384,13 +241,10 @@ def install_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     cp_mesh = device_mesh["cp"]
     vision_sync_group = _vision_sync_group(device_mesh)
     model.cp_mesh = cp_mesh
-    if not _is_moe(model.config):
-        _install_attention_dispatch(model)
-    if cp_mesh.size() == 1:
-        _install_gdn_dispatch(model, cp_mesh)
-    _install_moe_cp(model, cp_mesh)
+    for module in model.modules():
+        if isinstance(module, CPAwareGatedDeltaNet):
+            module._cp_mesh = cp_mesh
     _install_synchronized_vision(model, vision_sync_group, cp_mesh.get_group())
-    _install_primary_shard(model, cp_mesh)
 
 
 def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: dict) -> torch.Tensor:

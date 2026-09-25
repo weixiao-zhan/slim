@@ -14,12 +14,9 @@ per-token / per-sequence K3 arrays as .npy.
 import os
 import sys
 
-# Pin the venv's nvidia libs ahead of the system CUDA on LD_LIBRARY_PATH, before `import torch`
-# (the dynamic linker reads LD_LIBRARY_PATH only at process start). Otherwise the loader splits a
-# library family across versions — e.g. main libcudnn.so.9 from the venv (9.19) but its sub-engine
-# libcudnn_graph.so.9 from /usr/local/cuda (9.20.0) — which aborts the VLM tower's patch-embed conv.
-# slim's training pipeline applies the same prepend via Ray runtime_env; here we set it then re-exec
-# once (execv keeps the PID, so it is safe under torchrun).
+# Load CUDA runtime libraries from NVIDIA wheels, matching Ray workers.
+# Re-exec before importing torch so the dynamic linker uses the updated search path.
+# execv preserves the PID for torchrun.
 if not os.environ.get("_STAGE2_NVIDIA_LD_PINNED"):
     from slim.utils.env_utils import get_nvidia_ld_library_path
 

@@ -38,7 +38,7 @@ ARGS="
     --sglang-context-length $(K 64)
     --sglang-tool-call-parser qwen3_coder
     --sglang-mem-fraction-static 0.7
-    --mamba-radix-cache-strategy extra_buffer
+    --sglang-mamba-radix-cache-strategy extra_buffer
     --sglang-page-size 64
     --sglang-attention-backend fa3
     --sglang-load-format dummy

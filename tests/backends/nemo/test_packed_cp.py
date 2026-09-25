@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from argparse import Namespace
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -13,12 +13,9 @@ from slim.backends.nemo.base import NeMoTrainer
 from slim.backends.nemo.models.qwen3_5 import (
     _dummy_visual_inputs,
     _global_media_presence,
-    _install_attention_dispatch,
-    _install_moe_cp,
-    _install_primary_shard,
     _vision_sync_group,
     build_packed_position_ids,
-    install_packed_cp,
+    configure_packed_cp,
 )
 from slim.backends.nemo.packed_cp_forward import (
     build_packed_cp_sharder,
@@ -154,28 +151,16 @@ def test_dummy_visual_inputs_form_one_merged_token():
 
 
 @pytest.mark.unit
-def test_packed_runtime_attaches_cp_mesh_to_moe_routers(monkeypatch):
-    class FakeMoE(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.cp_mesh = None
+@pytest.mark.parametrize("cp_size", [1, 2, 4])
+def test_packed_runtime_binds_native_gdn_and_defaults_to_halo(monkeypatch, cp_size):
+    from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
 
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.MoE", FakeMoE)
-    model = torch.nn.Sequential(FakeMoE())
-    cp_mesh = object()
-
-    _install_moe_cp(model, cp_mesh)
-
-    assert model[0].cp_mesh is cp_mesh
-
-
-@pytest.mark.unit
-def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
     calls = []
-    model = nn.Module()
+    gdn = CPAwareGatedDeltaNet.__new__(CPAwareGatedDeltaNet)
+    nn.Module.__init__(gdn)
+    model = nn.Sequential(gdn)
     model.backend = SimpleNamespace(attn="sdpa")
-    model.config = SimpleNamespace(model_type="qwen3_5")
-    cp_mesh = SimpleNamespace(size=lambda: 1, get_group=lambda: object())
+    cp_mesh = _FakeCPMesh(size=cp_size)
     device_mesh = {"cp": cp_mesh}
 
     monkeypatch.setattr(
@@ -183,19 +168,18 @@ def test_packed_runtime_defaults_to_halo_kv_exchange(monkeypatch):
         lambda **kwargs: calls.append(kwargs),
     )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._vision_sync_group", lambda mesh: object())
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_attention_dispatch", lambda model: None)
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_gdn_dispatch", lambda model, mesh: None)
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_moe_cp", lambda model, mesh: None)
     monkeypatch.setattr(
         "slim.backends.nemo.models.qwen3_5._install_synchronized_vision",
         lambda model, sync_group, cp_group: None,
     )
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5._install_primary_shard", lambda model, mesh: None)
 
-    install_packed_cp(model, device_mesh)
+    configure_packed_cp(model, device_mesh)
 
     assert calls == [{"attn_backend": "flash", "kv_exchange": "halo"}]
     assert model.cp_mesh is cp_mesh
+    assert gdn._cp_mesh is cp_mesh
+    assert gdn.forward.__func__ is CPAwareGatedDeltaNet.forward
+    assert not model._forward_pre_hooks
 
 
 class _FakeCPMesh:
@@ -329,100 +313,161 @@ def test_image_grid_hws_is_promoted_for_positions_and_forward():
 
 
 @pytest.mark.unit
-def test_dense_attention_dispatches_to_block_diagonal_runtime(monkeypatch):
-    from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
+def test_dense_block_uses_native_packed_attention(monkeypatch):
+    from nemo_automodel.components.distributed import blockdiag_cp
+    from nemo_automodel.components.models.common import BackendConfig
+    from nemo_automodel.components.models.qwen3_5.model import Qwen3_5DenseBlock, _dense_moe_config
+    from nemo_automodel.components.models.qwen3_5_moe.model import _Qwen3_5MoeAttention
+    from transformers import Qwen3_5TextConfig
 
-    attention = Qwen3NextAttention.__new__(Qwen3NextAttention)
-    nn.Module.__init__(attention)
-    attention.backend = SimpleNamespace(attn="sdpa")
-    attention.attn_func = lambda query, key, value, **kwargs: "base"
-    model = nn.Module()
-    model.add_module("self_attn", attention)
-    _install_attention_dispatch(model)
-
-    monkeypatch.setattr(
-        "slim.backends.nemo.models.qwen3_5.current_blockdiag_cp_state",
-        lambda: object(),
+    config = Qwen3_5TextConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+        layer_types=["full_attention"],
     )
-    monkeypatch.setattr(
-        "slim.backends.nemo.models.qwen3_5.cp_blockdiag_sdpa",
-        lambda *args, **kwargs: "packed",
-    )
+    backend = BackendConfig(attn="sdpa", linear="torch", rms_norm="torch", rope_fusion=False)
+    block = Qwen3_5DenseBlock(0, config, _dense_moe_config(config, torch.float32), backend)
+    attention = block.self_attn
+    assert isinstance(attention, _Qwen3_5MoeAttention)
 
-    tensor = torch.zeros(1)
-    assert attention.attn_func(tensor, tensor, tensor) == "packed"
+    query = torch.randn(1, 2, 5, 16)
+    key, value = torch.randn(2, 1, 2, 5, 16)
+    expected = torch.nn.functional.scaled_dot_product_attention(query, key, value, is_causal=True)
+    torch.testing.assert_close(attention.attn_func(query, key, value, is_causal=True), expected)
+
+    monkeypatch.setattr(blockdiag_cp, "current_blockdiag_cp_state", lambda: object())
+    monkeypatch.setattr(blockdiag_cp, "cp_blockdiag_sdpa", lambda *args, **kwargs: "packed")
+    assert attention.attn_func(query, key, value) == "packed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("cp_size", "packed"), [(None, False), (1, False), (2, False), (1, True), (2, True)])
+def test_native_gdn_selects_cp_from_mesh_and_packed_state(monkeypatch, cp_size, packed):
+    from nemo_automodel.components.distributed import blockdiag_cp
+    from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
+
+    model = CPAwareGatedDeltaNet.__new__(CPAwareGatedDeltaNet)
+    nn.Module.__init__(model)
+    model._cp_mesh = None if cp_size is None else _FakeCPMesh(size=cp_size)
+    active_state = object() if packed else None
+    monkeypatch.setattr(blockdiag_cp, "current_blockdiag_cp_state", lambda: active_state)
+    monkeypatch.setattr(model, "_forward_no_cp", lambda hidden, **kwargs: ("base", kwargs))
+    monkeypatch.setattr(model, "_forward_with_cp", lambda hidden, **kwargs: ("cp", kwargs))
+    positions = torch.arange(5).view(1, 5)
+    path, kwargs = model(torch.randn(1, 5, 8), position_ids=positions)
+    if packed or cp_size == 2:
+        assert path == "cp"
+        assert kwargs["position_ids"] is positions
+        assert kwargs["blockdiag_state"] is active_state
+    else:
+        assert path == "base"
+    if packed:
+        with pytest.raises(ValueError, match="does not support a Gated DeltaNet cache"):
+            model(torch.randn(1, 5, 8), cache_params=object())
+
+
+class _DecoderInputCaptured(Exception):
+    pass
+
+
+def _native_primary_model(model_kind, cp_mesh):
+    from nemo_automodel.components.models.qwen3_5.model import Qwen3_5ForConditionalGeneration
+    from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeForConditionalGeneration
+
+    class DecoderInput(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = nn.Module()
+            self.language_model.embed_tokens = nn.Embedding(64, 3)
+
+        def forward(self, **kwargs):
+            self.inputs = kwargs
+            raise _DecoderInputCaptured
+
+    cls = Qwen3_5ForConditionalGeneration if model_kind == "dense" else Qwen3_5MoeForConditionalGeneration
+    model = cls.__new__(cls)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        text_config=SimpleNamespace(output_hidden_states=False),
+        image_token_id=0,
+        video_token_id=61,
+        vision_start_token_id=63,
+    )
+    model.cp_mesh = cp_mesh
+    model.model = DecoderInput()
+    model.lm_head = nn.Identity()
+    model.vision_scale = nn.Parameter(torch.tensor(0.5))
+    model.embed_calls = []
+
+    def embed_and_splice(self, input_ids, **media):
+        self.embed_calls.append((input_ids, media))
+        return self.model.language_model.embed_tokens(input_ids) + self.vision_scale * media["pixel_values"].mean()
+
+    model._embed_and_splice_for_cp = MethodType(embed_and_splice, model)
+    return model
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("model_kind", ["dense", "moe"])
-def test_primary_shard_is_contiguous_for_dense_and_moe(model_kind):
+@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("length", [5, 8, 9])
+def test_native_primary_shards_preserve_contiguous_values_and_gradients(model_kind, cp_size, length):
     from nemo_automodel.components.distributed.blockdiag_cp import state
 
-    calls = []
+    values = torch.arange(length).view(1, length)
+    for rank in range(cp_size):
+        model = _native_primary_model(model_kind, _FakeCPMesh(size=cp_size, rank=rank))
+        pixels = torch.tensor([2.0])
+        token = state._CP_BLOCKDIAG_STATE.set({"model_state": object()})
+        try:
+            with pytest.raises(_DecoderInputCaptured):
+                model(
+                    input_ids=values,
+                    pixel_values=pixels,
+                    image_grid_thw=torch.ones(1, 3),
+                    mm_token_type_ids=torch.ones_like(values),
+                )
+        finally:
+            state._CP_BLOCKDIAG_STATE.reset(token)
 
-    class Model(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.cp_mesh = _FakeCPMesh(size=2, rank=0)
-            self.model_kind = model_kind
+        inputs = model.model.inputs
+        assert inputs["input_ids"] is None
+        for name in ("pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw", "mm_token_type_ids"):
+            assert inputs.get(name) is None
+        assert len(model.embed_calls) == 1
+        assert model.embed_calls[0][0] is values
+        assert model.embed_calls[0][1]["pixel_values"] is pixels
+        assert not model._forward_pre_hooks
 
-        def _embed_and_splice_for_cp(self, input_ids, **media):
-            calls.append((input_ids.clone(), media))
-            return input_ids.unsqueeze(-1)
-
-        def forward(self, *, input_ids=None, inputs_embeds=None, **kwargs):
-            return input_ids, inputs_embeds, kwargs
-
-    values = torch.arange(8).view(1, 8)
-    model = Model()
-    _install_primary_shard(model, model.cp_mesh)
-    token = state._CP_BLOCKDIAG_STATE.set({"model_state": object()})
-    try:
-        input_ids, local, kwargs = model(
-            input_ids=values,
-            pixel_values=torch.ones(1),
-            image_grid_thw=torch.ones(1, 3),
-            mm_token_type_ids=torch.ones_like(values),
-        )
-    finally:
-        state._CP_BLOCKDIAG_STATE.reset(token)
-
-    assert input_ids is None
-    assert local.flatten().tolist() == [0, 1, 2, 3]
-    assert kwargs == {}
-    assert calls[0][0].tolist() == values.tolist()
-    assert calls[0][1]["pixel_values"].tolist() == [1.0]
+        embedding = model.model.language_model.embed_tokens.weight
+        ref_weight = embedding.detach().clone().requires_grad_()
+        ref_vision = model.vision_scale.detach().clone().requires_grad_()
+        full = torch.nn.functional.embedding(values, ref_weight) + ref_vision * pixels.mean()
+        padded = torch.nn.functional.pad(full, (0, 0, 0, (-length) % (2 * cp_size)))
+        expected = padded.chunk(cp_size, dim=1)[rank]
+        local = inputs["inputs_embeds"]
+        torch.testing.assert_close(local, expected, rtol=0, atol=0)
+        local.square().sum().backward()
+        expected.square().sum().backward()
+        torch.testing.assert_close(embedding.grad, ref_weight.grad, rtol=0, atol=0)
+        torch.testing.assert_close(model.vision_scale.grad, ref_vision.grad, rtol=0, atol=0)
 
 
 @pytest.mark.unit
-def test_primary_shard_does_not_modify_automodel_modules():
-    from nemo_automodel.components.distributed.blockdiag_cp import state
-    from nemo_automodel.components.models.qwen3_5 import model as dense_model_module
-
-    original = dense_model_module.shard_sequence_for_cp_round_robin
-
-    class Model(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.cp_mesh = _FakeCPMesh(size=2, rank=0)
-
-        def _embed_and_splice_for_cp(self, input_ids, **_media):
-            return input_ids.unsqueeze(-1)
-
-        def forward(self, *, input_ids=None, inputs_embeds=None):
-            assert dense_model_module.shard_sequence_for_cp_round_robin is original
-            raise RuntimeError("forward failed")
-
-    model = Model()
-    _install_primary_shard(model, model.cp_mesh)
-    token = state._CP_BLOCKDIAG_STATE.set({"model_state": object()})
-    try:
-        with pytest.raises(RuntimeError, match="forward failed"):
-            model(input_ids=torch.arange(8).view(1, 8))
-    finally:
-        state._CP_BLOCKDIAG_STATE.reset(token)
-
-    assert dense_model_module.shard_sequence_for_cp_round_robin is original
+@pytest.mark.parametrize("model_kind", ["dense", "moe"])
+@pytest.mark.parametrize("cp_size", [None, 1])
+def test_native_cp_off_keeps_unsharded_input_ids(model_kind, cp_size):
+    model = _native_primary_model(model_kind, None if cp_size is None else _FakeCPMesh(size=cp_size))
+    values = torch.arange(5).view(1, 5)
+    with pytest.raises(_DecoderInputCaptured):
+        model(input_ids=values)
+    assert model.model.inputs["input_ids"] is values
+    assert model.model.inputs["inputs_embeds"] is None
+    assert model.embed_calls == []
 
 
 @pytest.mark.unit
