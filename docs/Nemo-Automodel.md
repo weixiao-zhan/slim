@@ -16,20 +16,14 @@ Training updates model parameters directly; adapter fine-tuning is not part of t
 
 SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processing, RL objectives, reference and critic execution, routing replay, metrics, and policy weight synchronization.
 
-## Environment
+## Patches
 
-[`pyproject.toml`](../pyproject.toml) is the dependency source of truth. The AutoModel dependency is pinned to revision `2de37e53d42e26409f08a8a9fa3a1269c56479a4`.
-
-Create or refresh the environment with:
-
-```bash
-uv sync --extra dev
-uv run python patch_dependencies.py
-```
-
-`patch_dependencies.py` enables AutoModel's block-diagonal batch context at CP1 and installs the runtime dependency fixes and kernel configurations used by Slim.
-
-The pinned revision supplies Qwen3.5 CP token sharding verbs, block-diagonal attention and Gated DeltaNet runtimes, grouped-expert state-dict conversion, and CP vision sharding. Slim applies these primitives through one packed Qwen3.5 integration for dense and MoE models. The corresponding upstream tracker is [NVIDIA-NeMo/Automodel#2985](https://github.com/NVIDIA-NeMo/Automodel/issues/2985).
+AutoModel 0.6.0 provides Qwen3.5 token sharding, block-diagonal attention, CP-aware Gated DeltaNet, and CP vision frame sharding.
+`dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, and native contiguous primary sharding for dense and MoE.
+Dense blocks use AutoModel's Qwen3.5 MoE full-attention class for packed dispatch; CP1 uses the same packed path as higher CP degrees.
+`models/qwen3_5.py` selects the packed runtime, binds CP meshes, and synchronizes heterogeneous vision branches across the FSDP group.
+`packed_cp_forward.py` owns the RL batch fields, token sharding, and forward context.
+The corresponding upstream tracker is [NVIDIA-NeMo/Automodel#2985](https://github.com/NVIDIA-NeMo/Automodel/issues/2985).
 
 ## Model Construction
 
@@ -41,7 +35,7 @@ Policy and reference models are created with:
 NeMoAutoModelForImageTextToText.from_pretrained(...)
 ```
 
-`BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults `torch`, `torch_fp32`, `torch_mm`, and `torch` are the qualified configuration. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, while prefetch scheduling follows AutoModel's FSDP2 defaults. Slim exposes no separate parameter-storage or compute-dtype controls and passes no dtype override during model loading. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer is AdamW over the resulting distributed parameters.
+`BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults are `torch`, `torch_fp32`, `torch_mm`, and `torch`. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, while prefetch scheduling follows AutoModel's FSDP2 defaults. Slim exposes no separate parameter-storage or compute-dtype controls and passes no dtype override during model loading. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer is AdamW over the resulting distributed parameters.
 
 AutoModel applies the parameter freeze configuration before sharding and optimizer construction. Vision, audio, and language model parameters are trainable by default. The CLI flags `--freeze-vision-tower`, `--freeze-audio-tower`, and `--freeze-language-model` explicitly select frozen components.
 
@@ -131,10 +125,13 @@ Every physical microbatch uses the indexed packed layout, including a pack conta
 
 | Configuration | Physical pack | AutoModel layout |
 |---|---|---|
-| CP1, dense or MoE | One or more documents | Identity token layout with block-diagonal per-document attention |
+| CP1, dense or MoE | One or more documents | Full token order, even-length padding, block-diagonal per-document attention |
 | CP greater than one, dense or MoE | One or more documents | Contiguous block-diagonal CP |
 
-Full attention exchanges K/V through AutoModel's block-diagonal CP runtime. Gated DeltaNet consumes the same global document boundaries and resets convolution and recurrent state at each boundary. One Qwen3.5 adapter embeds and splices the full sequence, takes the contiguous primary-token shard, and dispatches full attention for dense and MoE models.
+Full attention exchanges K/V through AutoModel's block-diagonal CP runtime. Gated DeltaNet consumes the same global document boundaries and resets convolution and recurrent state at each boundary.
+AutoModel's dense and MoE forwards embed and splice the full sequence, then select the contiguous primary-token shard.
+CP1 uses the same packed path with padding to a multiple of two; it is distinct from execution outside the packed context.
+Slim's embedding and vision integration aligns image and video branches across FSDP ranks while retaining gradients through the trainable vision tower.
 
 Text positions restart at zero for every document. Mixed-modality packs call the Qwen3.5 mRoPE builder once per document with that document's image and video grids, then concatenate the resulting position axes before CP sharding.
 
@@ -249,7 +246,7 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --rollout-num-gpus-per-replica 2 \
   --sglang-mem-fraction-static 0.7 \
   --sglang-attention-backend fa3 \
-  --mamba-radix-cache-strategy extra_buffer \
+  --sglang-mamba-radix-cache-strategy extra_buffer \
   --sglang-page-size 64 \
   --rollout-colocate \
   --actor-num-gpus 8 \

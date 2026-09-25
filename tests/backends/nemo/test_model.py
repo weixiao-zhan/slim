@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 from slim.backends.nemo.models import build_model
 from slim.backends.nemo.models.qwen3_5 import (
@@ -65,7 +64,7 @@ def test_policy_model_disables_mtp_training_layers(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(model_type="qwen3_5_moe"),
     )
     monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.build_backend_config", fake_backend_config)
-    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.install_packed_cp", lambda *args: None)
+    monkeypatch.setattr("slim.backends.nemo.models.qwen3_5.configure_packed_cp", lambda *args: None)
 
     args = SimpleNamespace(
         freeze_vision_tower=True,

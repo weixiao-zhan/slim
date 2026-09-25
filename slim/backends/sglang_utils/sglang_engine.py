@@ -1,7 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import dataclasses
 import ipaddress
 import logging
 import multiprocessing
@@ -9,6 +8,7 @@ import os
 import time
 
 import requests
+from msgspec.structs import fields
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
@@ -536,15 +536,17 @@ def _compute_server_args(
         "dp_size": args.sglang_dp_size,
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
-        # cuda graph must cover the max concurrent batch size to avoid eager fallback.
-        "cuda_graph_max_bs": int(args.rollout_concurrency_per_replica),
+        # Memory saver cannot capture breakable prefill CUDA graphs.
+        "disable_prefill_cuda_graph": args.rollout_colocate or args.sglang_disable_prefill_cuda_graph,
+        # Default decode graph coverage to rollout concurrency.
+        "cuda_graph_max_bs_decode": args.sglang_cuda_graph_max_bs_decode or int(args.rollout_concurrency_per_replica),
         "max_running_requests": int(args.rollout_concurrency_per_replica),
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.
         "enable_draft_weights_cpu_backup": True,
-        # disable fast image processor to avoid compatibility issues with some VLMs.
-        "disable_fast_image_processor": True,
+        # use the PIL image processor to avoid compatibility issues with some VLMs.
+        "image_processor_backend": "pil",
     }
 
     # Routing replay: capture per-token expert ids during rollout so the actor
@@ -567,7 +569,7 @@ def _compute_server_args(
 
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 
-    server_arg_fields = dataclasses.fields(ServerArgs)
+    server_arg_fields = fields(ServerArgs)
     server_arg_field_names = {attr.name for attr in server_arg_fields}
     unused_keys = set(kwargs.keys())
     for attr in server_arg_fields:
@@ -580,10 +582,6 @@ def _compute_server_args(
     # Default context_length from the single source of truth if not set via --sglang-context-length.
     if kwargs.get("context_length") is None:
         kwargs["context_length"] = args.max_context_len
-
-    # Allow --sglang-cuda-graph-max-bs to override the heuristic default above.
-    if getattr(args, "sglang_cuda_graph_max_bs", None) is not None:
-        kwargs["cuda_graph_max_bs"] = args.sglang_cuda_graph_max_bs
 
     # Per-server-group overrides from --sglang-config YAML.
     # Applied after base args so they take highest priority.

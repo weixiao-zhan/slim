@@ -26,7 +26,7 @@ run_train "
 
     --rollout-num-gpus-per-replica 1
     --sglang-mem-fraction-static 0.8
-    --sglang-mamba-scheduler-strategy extra_buffer
+    --sglang-mamba-radix-cache-strategy extra_buffer
     --sglang-page-size 64
     --rollout-colocate
 

@@ -21,5 +21,4 @@ def get_nvidia_ld_library_path() -> dict[str, str]:
     if not lib_dirs:
         return {}
 
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    return {"LD_LIBRARY_PATH": ":".join(lib_dirs) + (f":{existing}" if existing else "")}
+    return {"LD_LIBRARY_PATH": ":".join(lib_dirs)}

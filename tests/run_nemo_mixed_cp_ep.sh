@@ -36,7 +36,7 @@ run_train_wait "
     --rollout-num-gpus-per-replica 2
     --sglang-mem-fraction-static 0.7
     --sglang-attention-backend fa3
-    --mamba-radix-cache-strategy extra_buffer
+    --sglang-mamba-radix-cache-strategy extra_buffer
     --sglang-page-size 64
     --rollout-colocate
 
