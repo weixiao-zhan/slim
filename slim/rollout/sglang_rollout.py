@@ -19,7 +19,7 @@ from slim.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slim.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from slim.utils.async_utils import run
 from slim.utils.eval_config import EvalDatasetConfig
-from slim.utils.http_utils import get, post
+from slim.utils.http_utils import post
 from slim.utils.misc import SingletonMeta, load_function
 from slim.utils.types import Episode, Trajectory
 
@@ -45,14 +45,13 @@ class RolloutGroup:
 
 
 class GenerateState(metaclass=SingletonMeta):
-    def __init__(self, args: Namespace) -> None:
+    def __init__(self, args: Namespace, concurrency: int) -> None:
         from slim.utils.processing_utils import load_processor, load_tokenizer
 
         self.args = args
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
         self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
         self.deterministic_inference = getattr(args, "sglang_enable_deterministic_inference", False)
@@ -83,20 +82,7 @@ class GenerateState(metaclass=SingletonMeta):
             assert self.dp_counts[dp_rank] >= 0
 
     def reset(self) -> None:
-        self.pendings: set[asyncio.Task] = set()
         self.aborted = False
-
-    def submit_generate_tasks(self, groups: list[RolloutGroup]) -> None:
-        for group in groups:
-            self.pendings.add(
-                asyncio.create_task(
-                    generate_and_rm_group(
-                        self.args,
-                        group,
-                        evaluation=False,
-                    )
-                )
-            )
 
 
 def decode_text(args: Namespace, trajectory: Trajectory) -> str:
@@ -348,39 +334,13 @@ async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation
     return group
 
 
-async def abort(args: Namespace) -> list[dict]:
-    aborted_examples = []
-
-    state = GenerateState(args)
-    assert not state.aborted
-    state.aborted = True
-
-    response = await get(f"http://{args.router_ip}:{args.router_port}/workers")
-    urls = [worker["url"] for worker in response["workers"]]
-
-    while state.pendings:
-        logger.info(f"Abort request for {urls}")
-        await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
-        done, state.pendings = await asyncio.wait(
-            state.pendings, return_when=asyncio.ALL_COMPLETED, timeout=1
-        )
-
-        # Recycle aborted/incomplete groups back to the data buffer so they
-        # can be retried in a later rollout.  Only groups explicitly rejected
-        # by the dynamic filter (e.g. zero-std) are truly discarded.
-        for task in done:
-            group = task.result()
-            if not group.completed:
-                aborted_examples.append(group.example)
-
-    return aborted_examples
-
-
 async def generate_rollout_async(
     args: Namespace, rollout_id: int, get_examples: Callable[[int], list[dict]]
 ) -> tuple[RolloutFnTrainOutput, list[dict]]:
+    from slim.rollout.worker import RolloutWorkerPool
+
     assert args.rollout_global_dataset
-    state = GenerateState(args)
+    pool = RolloutWorkerPool(args)
     dynamic_filter = load_function(args.rollout_group_filter_path) if args.rollout_group_filter_path else None
 
     metric_gatherer = MetricGatherer()
@@ -392,7 +352,7 @@ async def generate_rollout_async(
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
 
     while len(kept_groups) < target_data_size:
-        refill = args.over_sampling_batch_size - len(state.pendings) if args.over_sampling_batch_size else target_data_size - next_group_index
+        refill = args.over_sampling_batch_size - len(pool.pendings) if args.over_sampling_batch_size else target_data_size - next_group_index
         if refill > 0:
             examples = get_examples(refill)
             groups = _examples_to_rollout_groups(examples, args)
@@ -401,9 +361,9 @@ async def generate_rollout_async(
                 for episode in group.episodes:
                     episode.group_index = next_group_index
                 next_group_index += 1
-            state.submit_generate_tasks(groups)
+            pool.submit_generate_tasks(groups)
 
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+        done, pool.pendings = await asyncio.wait(pool.pendings, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             group: RolloutGroup = task.result()
 
@@ -435,11 +395,10 @@ async def generate_rollout_async(
         f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
     )
 
-    aborted_examples = await abort(args)
+    aborted_examples = await pool.abort()
 
     assert len(kept_groups) == args.rollout_batch_size, f"Got {len(kept_groups)} samples, expected {args.rollout_batch_size}"
     kept_groups.sort(key=lambda group: group.index)
-    state.reset()
 
     episodes = [episode for group in kept_groups for episode in group.episodes]
 
@@ -476,34 +435,34 @@ async def eval_rollout_single_dataset(
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     global EVAL_PROMPT_DATASET
+    from slim.rollout.worker import RolloutWorkerPool
     from slim.utils.data import load_hf_dataset
 
-    state = GenerateState(args)
+    pool = RolloutWorkerPool(args)
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
         EVAL_PROMPT_DATASET[cache_key] = load_hf_dataset(dataset_cfg.path)
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
     tasks = []
-    for raw_row in dataset:
-        for j in range(dataset_cfg.eval_n_samples_per_prompt):
+    for index, raw_row in enumerate(dataset):
+        episodes = []
+        for _ in range(dataset_cfg.eval_n_samples_per_prompt):
             episode = Episode.from_example(raw_row)
             episode.example["metadata"] = dataset_cfg.inject_metadata(episode.example.get("metadata") or {})
             episode.generate_function_path = getattr(dataset_cfg, "custom_generate_function_path", None)
             episode.max_tokens = dataset_cfg.max_context_len
-            if state.deterministic_inference:
-                episode.sampling_seed = args.rollout_seed + j
-            tasks.append(asyncio.create_task(generate_and_rm(args, episode, evaluation=True)))
+            episodes.append(episode)
+        group = RolloutGroup(index=index, example=raw_row, episodes=episodes)
+        tasks.append(asyncio.create_task(pool.run_group(group, evaluation=True)))
 
-    raw_episodes = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
-    episodes = []
-    for i, episode in enumerate(raw_episodes):
-        if i == 0:
-            logger.info(
-                f"eval_rollout_single_dataset example data: {[t.text for t in episode.trajectories]} "
-                f"reward={episode.get_reward_value()}"
-            )
-        episodes.append(episode)
+    groups = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
+    episodes = [episode for group in groups for episode in group.episodes]
+    if episodes:
+        logger.info(
+            f"eval_rollout_single_dataset example data: {[t.text for t in episodes[0].trajectories]} "
+            f"reward={episodes[0].get_reward_value()}"
+        )
 
     return {dataset_cfg.name: episodes}
 

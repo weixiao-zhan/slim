@@ -45,7 +45,7 @@ and `Episode.get_reward_value()` returns one scalar whichever level carries the 
 | `loss_mask` | `list[int]` or `IntTensor [T]` | Source-token mask; 0 for prompt and terminal positions, 1 for generated predictions |
 | `rollout_log_probs` | `list[float]` or `FloatTensor [T]` | Source-token-aligned log-probabilities under the rollout policy |
 | `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| None` | Source-token-aligned MoE expert indices recorded during rollout |
-| `multimodal_inputs` | `dict[str, Tensor] \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
+| `multimodal_inputs` | `dict[str, Tensor] \| ObjectRef \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.); an `ObjectRef` between the rollout worker and `process_rollout_data`, see [Multimodal Input Lifecycle](#multimodal-input-lifecycle) |
 | `reward` | `float \| None` | Raw scalar reward for this trajectory |
 | `text` | `str \| None` | Decoded full trajectory (prompt + response) |
 | `generated_text` | `str \| None` | Decoded target tokens selected by active prediction slots |
@@ -118,6 +118,22 @@ to sglang inside the `image_data` field with `"format": "processor_output"`; whe
 tokenization it returns them the same way. See
 [Tokenization Ownership](sglang-config.md#tokenization-ownership) for the field names on each
 endpoint.
+
+### Multimodal Input Lifecycle
+
+`trajectory.multimodal_inputs` moves by reference, so the `RolloutManager` coordinator never holds processor tensors.
+
+| Stage | Form |
+|---|---|
+| generate and reward functions (`RolloutWorker`) | `dict[str, Tensor] \| None` |
+| end of `RolloutWorker.run_group` | `ray.put` into the worker node's object store, becomes `ObjectRef \| None` |
+| filters, batch hooks, rollout logging, `build_dp_batches`, `AdvantageEstimator`, `--custom-reward-post-process-path` | `ObjectRef \| None`, never read |
+| `process_rollout_data` (trainer) | one `ray.get` over the batch's refs, written back as `dict[str, Tensor] \| None` |
+| packing and training | `dict[str, Tensor] \| None` |
+
+`--save-debug-rollout-data` resolves the refs in the saved copy, and `--load-debug-rollout-data` puts the loaded dicts back with `ray.put`.
+Token-aligned fields stay inline throughout.
+See [Distributed Rollout](distributed-rollout.md#bulk-field-lifecycle).
 
 ### Routing Replay
 

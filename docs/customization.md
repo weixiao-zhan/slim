@@ -21,6 +21,19 @@ Each accepts a dotted Python path (e.g. `my_package.module.function`) loaded at 
 | `--data-source-path` | `slim.rollout.data_source.RolloutDataSource` | Dataset iteration and state persistence |
 | `--eval-function-path` | (same as rollout-function-path) | Evaluation rollout orchestration |
 
+## Where Hooks Run
+
+Rollout is split between one `RolloutManager` coordinator process and one `RolloutWorker` process on every node of the Ray cluster, head node included; see [Distributed Rollout](distributed-rollout.md).
+
+| Process | Hooks |
+|---|---|
+| `RolloutWorker` (every node) | `--custom-generate-function-path`, `--custom-rm-path` |
+| `RolloutManager` (coordinator) | `--rollout-function-path`, `--eval-function-path`, `--data-source-path`, `--rollout-group-filter-path`, `--rollout-sample-filter-path`, `--rollout-all-samples-process-path`, `--custom-rollout-log-function-path`, `--custom-eval-rollout-log-function-path` |
+| `AdvantageEstimator` | `--custom-reward-post-process-path` |
+
+Every node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every node.
+Hooks running in the coordinator or `AdvantageEstimator` see `trajectory.multimodal_inputs` as a `ray.ObjectRef`; they pass it through without reading it (see [Multimodal Input Lifecycle](data-layout.md#multimodal-input-lifecycle)).
+
 ## Key Interfaces
 
 ### Rollout function (`--rollout-function-path`)
@@ -31,6 +44,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 
 Replaces the entire rollout loop.
 Override this for fundamentally different sampling strategies (tree search, offline data, non-SGLang backend).
+It runs in the `RolloutManager` process and reaches the rollout workers through `RolloutWorkerPool(args)`.
 
 ### Generate function (`--custom-generate-function-path`)
 
@@ -46,6 +60,18 @@ The function owns the sampling fields of its own requests, but should honor the 
 
 Per-episode override: set `episode.generate_function_path` to route specific episodes to a different generate function.
 
+The function runs inside the `RolloutWorker` of the node its group was dispatched to, and all episodes of a group run in the same worker.
+Environments are node-local: a function that starts Docker containers talks to the daemon of that node, which may be the head node or any worker node.
+
+Abort is cooperative, so the function must return on its own in both the normal and the abort path:
+
+- A response with `finish_reason == "abort"` ends the episode: set `Episode.Status.ABORTED` and return.
+- Between environment steps, check `state.aborted` and return when it is set; an engine abort cannot interrupt a running environment call.
+- Create containers inside the `try` whose `finally` removes them.
+- Run blocking or CPU-heavy calls (environment calls, heavy processor or reward work) through `asyncio.to_thread` or a process pool. One event loop serves all groups on the node, so a blocking call stalls every episode on that node and delays abort.
+
+See [Generate Function Contract](distributed-rollout.md#generate-function-contract) for an example.
+
 ### Reward model (`--custom-rm-path`)
 
 ```python
@@ -56,6 +82,7 @@ async def custom_rm(args, episodes: list[Episode], **kwargs) -> None
 ```
 
 A reward function can set one scalar per episode on `episode.reward`, which is auto broadcast to every trajectory, or set `trajectory.reward` on each of `episode.trajectories`, and returns nothing; setting both levels is an error.
+The reward function runs in the same `RolloutWorker` as the generate function, on the same event loop, so heavy scoring goes through `asyncio.to_thread` or a process pool as well.
 The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
 
 ### Group filter (`--rollout-group-filter-path`)

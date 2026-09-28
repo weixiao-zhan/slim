@@ -20,6 +20,7 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from slim.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from slim.backends.sglang_utils.sglang_engine import SGLangEngine
+from slim.rollout.worker import RolloutWorkerPool
 from slim.utils import logging_utils
 from slim.utils.env_utils import get_nvidia_ld_library_path
 from slim.utils.health_monitor import RolloutHealthMonitor
@@ -57,6 +58,9 @@ def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Ep
     for record in records:
         record = dict(record)
         record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
+        for trajectory in record["trajectories"]:
+            if trajectory.multimodal_inputs is not None:
+                trajectory.multimodal_inputs = ray.put(trajectory.multimodal_inputs)
         episodes.append(Episode(**record))
     logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
     return episodes
@@ -392,8 +396,9 @@ class RolloutManager:
         if self.args.debug_train_only:
             self.servers: dict[str, RolloutServer] = {}
         else:
-            init_http_client(args)
             self.servers = start_rollout_servers(args, pg)
+            init_http_client(len(self.rollout_engines))
+            RolloutWorkerPool(args)
 
         # Init W&B after servers start so the router/engine Prometheus
         # endpoints are known and can be registered for scraping.
@@ -659,13 +664,14 @@ class RolloutManager:
             logger.info(f"Save debug rollout data to {path}")
             path.parent.mkdir(parents=True, exist_ok=True)
 
-            if evaluation:
-                all_episodes = [ep for episodes in data.values() for ep in episodes]
-                dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in all_episodes])
-            else:
-                dump_data = dict(episodes=[dataclasses.asdict(ep) for ep in data])
+            all_episodes = [ep for episodes in data.values() for ep in episodes] if evaluation else data
+            records = [dataclasses.asdict(ep) for ep in all_episodes]
+            # Resolve multimodal_inputs refs in the saved copy; the live episodes keep their refs.
+            trajectories = [traj for record in records for traj in record["trajectories"] if traj["multimodal_inputs"] is not None]
+            for traj, multimodal_inputs in zip(trajectories, ray.get([traj["multimodal_inputs"] for traj in trajectories]), strict=True):
+                traj["multimodal_inputs"] = multimodal_inputs
 
-            torch.save(dict(rollout_id=rollout_id, **dump_data), path)
+            torch.save(dict(rollout_id=rollout_id, episodes=records), path)
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
@@ -881,9 +887,6 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     and decode use different TP sizes).
 
     Returns a dict mapping model name → ``RolloutServer``.
-
-    Note: ``init_http_client`` should be called separately before this,
-    as the HTTP client is shared across all servers.
     """
     config = _resolve_sglang_config(args)
 

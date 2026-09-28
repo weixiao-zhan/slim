@@ -65,7 +65,6 @@ class FakeGenerateState:
         self.args = args
         self.tokenizer = _FakeTokenizer()
         self.semaphore = types.SimpleNamespace(__aenter__=None)
-        self.pendings = set()
         self.aborted = False
 
     @contextmanager
