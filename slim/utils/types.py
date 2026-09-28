@@ -45,7 +45,7 @@ class Trajectory:
     loss_mask: Any | None = None                       # [int] → IntTensor
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
     rollout_routed_experts: Any | None = None          # np.ndarray [prediction, layer, top_k] → IntTensor
-    multimodal_inputs: dict[str, Any] | None = None
+    multimodal_inputs: Any | None = None               # dict[str, Tensor] → ObjectRef → dict[str, Tensor]
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
     #   image_grid_thw: [num_images, 3] - image metadata (concat dim=0)

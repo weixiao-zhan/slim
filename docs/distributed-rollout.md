@@ -16,7 +16,7 @@ Agentic rollouts (Docker environments, code execution, agent frameworks) spend m
 
 `RolloutManager` (`slim/ray/rollout.py`) is one Ray actor with `num_cpus=1`.
 It owns the data source and calls `generate_rollout` (`slim/rollout/sglang_rollout.py`), which runs every group as an asyncio task on the background loop of `slim/utils/async_utils.py`.
-`GenerateState` is a process singleton holding the tokenizer, processor, the episode semaphore of size $R \cdot c$, and the pending task set, where $R$ is the number of rollout replicas and $c$ is `--rollout-concurrency-per-replica`.
+`GenerateState` is a process singleton holding the tokenizer, processor, the episode semaphore of size $P \cdot c$, and the pending task set, where $P$ is the number of rollout replicas and $c$ is `--rollout-concurrency-per-replica`.
 Tokenization, processor calls, reward functions, agent frameworks, base64 decoding, and JSON parsing all share that loop.
 Finished episodes are flattened and split into one `TrajectoryBatch` per DP rank, and `ray.put` from the manager process.
 
@@ -28,7 +28,7 @@ Finished episodes are flattened and split into one `TrajectoryBatch` per DP rank
                 │ RolloutWorkerPool: per-worker episode load, pending tasks     │
                 └──────▲ RolloutGroup (bulk fields as ObjectRef)    │ RolloutGroup (PENDING)
                        │                                            ▼
-  every node ── RolloutWorker (Ray async actor, many groups, semaphore ⌈R·c / N⌉)
+  every node ── RolloutWorker (Ray async actor, many groups, semaphore ⌈P·c / N⌉)
                  GenerateState · HTTP client · generate_and_rm_group · local Docker daemon
                  ray.put(multimodal_inputs) stays in this node's object store
                        │                                         │ HTTP
@@ -77,7 +77,7 @@ class RolloutWorker:
 ### Placement and Sizing
 
 The pool creates one worker on every alive Ray node with a CPU, head node included, with `NodeAffinitySchedulingStrategy` and `num_cpus=1`, and waits for them to become ready.
-With $N$ workers, the total episode concurrency stays $R \cdot c$, the size of today's semaphore, and each worker's semaphore is $\lceil R \cdot c / N \rceil$.
+With $N$ workers, the total episode concurrency stays $P \cdot c$, the size of today's semaphore, and each worker's semaphore is $\lceil P \cdot c / N \rceil$.
 Every node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every node.
 
 The pool exists only where rollout servers exist: `RolloutManager` creates it after `start_rollout_servers`, and `--debug-train-only` creates none.
@@ -172,7 +172,8 @@ Token-aligned fields (`token_ids`, `loss_mask`, `rollout_log_probs`, `rollout_ro
 ### Eval
 
 `eval_rollout_single_dataset` builds one group per dataset row with `eval_n_samples_per_prompt` episodes, sets `generate_function_path`, `max_tokens`, and `metadata` on each episode as today, and gathers `pool.run_group(group, evaluation=True)` over the rows.
-Each call waits for its own group, so the eval datasets that `eval_rollout` gathers concurrently share the pool without taking each other's results, and the worker semaphores bound eval to $R \cdot c$ episodes as today.
+Going through `generate_and_rm_group` gives eval episodes session ids, so the `consistent_hashing` router policy routes them by session like train episodes.
+Each call waits for its own group, so the eval datasets that `eval_rollout` gathers concurrently share the pool without taking each other's results, and the worker semaphores bound eval to $P \cdot c$ episodes as today.
 
 ### Data Source
 

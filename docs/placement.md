@@ -48,6 +48,17 @@ The quotas are **scheduling weights, not memory limits**: GPU memory isolation i
 Slim manage time-slicing with offload (`sleep`/`wake_up` premitive).
 Slim set fixed quotas: actor `0.4`, critic `0.4`, rollout `0.2`, so all colocate placement are valid.
 
+### Rollout workers
+
+Rollout generation runs in CPU-only `RolloutWorker` actors outside the GPU placement group.
+`RolloutManager` creates one worker on every alive Ray node with a CPU, head node included, each with `num_cpus=1` and a `NodeAffinitySchedulingStrategy` pinning it to its node.
+The workers are created after the rollout servers start; `--debug-train-only` creates none.
+
+With $P$ rollout replicas (`R / rollout_num_gpus_per_replica`), $c$ = `--rollout-concurrency-per-replica`, and $N$ workers, the total episode concurrency is $P \cdot c$ and each worker's episode semaphore is $\lceil P \cdot c / N \rceil$.
+The coordinator dispatches each prompt group to the least loaded worker with free capacity.
+Custom generate and reward modules and `--hf-checkpoint` must be reachable from every node.
+See [Distributed Rollout](distributed-rollout.md) for dispatch and abort.
+
 ## Step timeline
 
 ### no critic-colocate (# 1 & 2)
