@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 @contextlib.contextmanager
 def profile_rollout(args, rollout_id):
     """
-    Trace one rollout step's generation and rm phase with VizTracer.
+    Trace one rollout step in the RolloutManager coordinator process with VizTracer.
     """
     if "rollout" not in args.profile_target or not (args.profile_step_start <= rollout_id < args.profile_step_end):
         yield

@@ -71,6 +71,7 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
             api_key=server_args.api_key,
             is_process_alive=lambda: p.is_alive(),
         )
+        requests.post(f"{server_args.url()}/freeze_gc").raise_for_status()
 
     return p
 
@@ -135,12 +136,7 @@ class SGLangEngine(RayWorker):
         nccl_port,
         host=None,
         disaggregation_bootstrap_port=None,
-        router_ip=None,
-        router_port=None,
     ):
-        self.router_ip = router_ip if router_ip is not None else self.args.router_ip
-        self.router_port = router_port if router_port is not None else self.args.router_port
-
         host = host or get_host_info()[1]
 
         def _format_v6_uri(addr):
@@ -207,22 +203,6 @@ class SGLangEngine(RayWorker):
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self.process = launch_server_process(ServerArgs(**server_args_dict))
-
-        if self.worker_type == "encoder":
-            return
-
-        if self.node_rank == 0 and self.router_ip and self.router_port:
-            payload = {
-                "url": f"http://{self.server_host}:{self.server_port}",
-                "worker_type": self.worker_type,
-            }
-            if self.worker_type == "prefill":
-                payload["bootstrap_port"] = server_args_dict["disaggregation_bootstrap_port"]
-            response = requests.post(
-                f"http://{self.router_ip}:{self.router_port}/workers",
-                json=payload,
-            )
-            response.raise_for_status()
 
     def _make_request(self, endpoint: str, payload: dict | None = None):
         """Make a POST request to the specified endpoint with the given payload.
@@ -313,36 +293,12 @@ class SGLangEngine(RayWorker):
         else:
             raise TimeoutError("Timeout while flushing cache.")
 
-    def get_url(self):
-        if self.node_rank != 0:
-            return None
-        return f"http://{self.server_host}:{self.server_port}"
-
     def shutdown(self):
+        """Kill this node's SGLang server processes and wait until they release the GPU."""
         if self.args.rollout_external:
             return
 
         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
-        if self.worker_type != "encoder" and self.node_rank == 0:
-            worker_url = f"http://{self.server_host}:{self.server_port}"
-            response = None
-            try:
-                all_workers = requests.get(f"http://{self.router_ip}:{self.router_port}/workers").json()["workers"]
-                for worker in all_workers:
-                    if worker["url"] == worker_url:
-                        worker_id = worker["id"]
-                        response = requests.delete(
-                            f"http://{self.router_ip}:{self.router_port}/workers/{worker_id}"
-                        )
-                        break
-                else:
-                    logger.warning(f"Worker {worker_url} not found in router during shutdown.")
-            except Exception as e:
-                logger.warning(f"Failed to fetch workers list or remove worker: {e}")
-
-            if response is not None:
-                response.raise_for_status()
-        # Every rank kills its own local server subprocess.
         if self.process is not None:
             kill_process_tree(self.process.pid)
 
@@ -541,6 +497,8 @@ def _compute_server_args(
         # Default decode graph coverage to rollout concurrency.
         "cuda_graph_max_bs_decode": args.sglang_cuda_graph_max_bs_decode or int(args.rollout_concurrency_per_replica),
         "max_running_requests": int(args.rollout_concurrency_per_replica),
+        # truncate over-length prompts instead of rejecting the request.
+        "allow_auto_truncate": True,
         # always skip warmup to prevent warmup timeout.
         "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.

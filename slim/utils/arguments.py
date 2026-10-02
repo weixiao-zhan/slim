@@ -798,7 +798,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=[],
                 nargs="+",
                 help="What to profile (empty = off). "
-                "`rollout` uses VizTracer to trace whole step's async generate_rm calls."
+                "`rollout` uses VizTracer to trace one rollout step in the RolloutManager coordinator process. "
                 "`train_log_probs`, `train_pg`, and `train_overall` use torch.profiler. "
             )
             parser.add_argument("--profile-step-start", type=int, default=10)
@@ -826,10 +826,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Stop recording and dump the snapshot after this many rollouts (required for memray).",
             )
             parser.add_argument("--check-weight-update-equal", action="store_true")
-            return parser
-
-        def add_network_arguments(parser):
-            parser.add_argument("--use-distributed-post", action="store_true", default=False)
             return parser
 
         def add_reward_model_arguments(parser):
@@ -934,7 +930,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
         parser = add_wandb_arguments(parser)
         parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
-        parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_filter_arguments(parser)
         parser = add_ci_arguments(parser)
