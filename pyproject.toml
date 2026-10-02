@@ -48,8 +48,8 @@ dev = [
     "viztracer",
 ]
 strands = [
-    "strands-agents[openai]==1.50.2",
-    "strands-agents-tools==0.8.5",
+    "strands-agents[openai]",
+    "strands-agents-tools",
 ]
 
 [build-system]

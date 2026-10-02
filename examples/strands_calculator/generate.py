@@ -40,7 +40,7 @@ from slim.utils.processing_utils import decode_tensor_envelopes
 from slim.utils.types import Episode, Trajectory
 
 _MAX_AGENT_TURNS = 2
-_MAX_TOKENS_PER_TURN = 20 * 1024
+_MAX_TOKENS_PER_TURN = 8 * 1024
 
 # How the engine ended the attempt's last call is what the attempt amounts to.
 _STATUS_BY_FINISH_REASON = {
@@ -66,10 +66,11 @@ class SGLangChatModel(OpenAIModel):
 
     def __init__(self, state: GenerateState, episode: Episode) -> None:
         # Everything here is a `/v1/chat/completions` body field; Strands merges
-        # `params` into the request it builds.
+        # `params` into the request it builds. The engine owns tokenization, so it
+        # clamps the per-turn cap to the context left (slim always enables `allow_auto_truncate`).
         params: dict[str, Any] = {
             "temperature": state.args.rollout_temperature,
-            "max_completion_tokens": min(_MAX_TOKENS_PER_TURN, episode.max_tokens),
+            "max_completion_tokens": _MAX_TOKENS_PER_TURN,
             "chat_template_kwargs": state.chat_template_kwargs,
             # Token-in-token-out: keep the ids and logprobs the engine ran.
             "logprobs": True,
@@ -97,6 +98,28 @@ class SGLangChatModel(OpenAIModel):
             if state.args.router_policy == "consistent_hashing" and episode.session_id
             else None
         )
+
+    @classmethod
+    def _format_regular_messages(cls, messages: list[Message], **kwargs: Any) -> list[dict[str, Any]]:
+        """Return assistant reasoning to the engine as `reasoning_content`.
+
+        Strands drops reasoning blocks on the Chat Completions API; the chat template
+        re-renders them, which keeps thinking interleaved across tool calls.
+        """
+        formatted_messages = []
+        for message in messages:
+            reasoning = "".join(
+                content["reasoningContent"]["reasoningText"]["text"]
+                for content in message["content"]
+                if "reasoningContent" in content
+            )
+            contents = [content for content in message["content"] if "reasoningContent" not in content]
+            formatted = super()._format_regular_messages([{**message, "content": contents}], **kwargs)
+            if reasoning:
+                formatted[0]["reasoning_content"] = reasoning
+                formatted[0].setdefault("content", "")
+            formatted_messages.extend(formatted)
+        return formatted_messages
 
     def _record_trajectory(self, choice: Any) -> None:
         """Keep one call's prompt and generation as a standalone trajectory."""
@@ -129,7 +152,7 @@ class SGLangChatModel(OpenAIModel):
         **kwargs: Any,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Serve one Strands model call from SGLang and record what it ran."""
-        request = self.format_request(messages, tool_specs, system_prompt, tool_choice)
+        request = self.format_request(messages, tool_specs, system_prompt, tool_choice, **kwargs)
         payload = await post(self.url, request, headers=self.headers)
         if payload["choices"][0]["finish_reason"] == "abort":
             # `abort` is the engine's own finish reason, outside the OpenAI schema below.
