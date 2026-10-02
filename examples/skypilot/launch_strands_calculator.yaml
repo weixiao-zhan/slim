@@ -1,0 +1,190 @@
+# USAGE (run from examples/skypilot/ so SkyPilot picks up .sky.yaml):
+#   sky launch launch_strands_calculator.yaml --env-file ../../.env -c slim-dev
+#   sky exec slim-dev launch_strands_calculator.yaml --env-file ../../.env
+#
+# Strands calculator rollout over the chat completions endpoint, on one GPU per node.
+# Every node runs one RolloutWorker, so the agent loop runs on every node.
+
+name: strands-calculator
+
+workdir: ../..
+
+num_nodes: 2
+
+resources:
+  infra: aws/us-west-2
+  instance_type: p5.4xlarge
+  network_tier: best  # Enables EFA
+  disk_size: 500
+  image_id: # Deep Learning Base AMI with Single CUDA (Ubuntu 24.04) 20260915
+    us-west-2: ami-00eeb2f3214b756c9
+
+envs:
+  MODEL_NAME: Qwen3.5-4B
+
+setup: | # shell
+  set -ex
+  uv sync --extra dev --extra strands
+  uv run python patch_dependencies.py
+
+run: | # shell
+  set -ex
+  # Re-apply dependency patches, so `sky exec` picks up patch changes without a new setup.
+  uv run python patch_dependencies.py
+  # Every node loads the tokenizer and processor from --hf-checkpoint.
+  mkdir -p ${HOME}/models
+  if [ ! -d "${HOME}/models/${MODEL_NAME}" ]; then
+    uv run hf download "Qwen/${MODEL_NAME}" --local-dir "${HOME}/models/${MODEL_NAME}"
+  fi
+  # Weightless block-FP8 rollout checkpoint (128x128 e4m3, fp32 scales); the first weight sync fills it.
+  if [ ! -f "${HOME}/models/${MODEL_NAME}-FP8/config.json" ]; then
+    uv run python tools/convert_hf_to_fp8.py \
+      --model-dir "${HOME}/models/${MODEL_NAME}" \
+      --save-dir "${HOME}/models/${MODEL_NAME}-FP8" \
+      --ref-config tools/fp8_recipes/qwen35_official.json \
+      --config-only
+  fi
+
+  # =========================================================================
+  # Ray cluster setup with custom ports, so SkyPilot's own Ray (6380/8266) is untouched.
+  # Never use `ray stop` directly.
+  # =========================================================================
+  MASTER_ADDR=$(echo $SKYPILOT_NODE_IPS | awk '{print $1}')
+
+  RAY_PORT=20001
+  RAY_DASHBOARD_PORT=20002
+  RAY_DASHBOARD_AGENT_LISTEN_PORT=20003
+  RAY_DASHBOARD_AGENT_GRPC_PORT=20004
+  RAY_CLIENT_SERVER_PORT=20005
+  RAY_OBJECT_MANAGER_PORT=20006
+  RAY_NODE_MANAGER_PORT=20007
+  RAY_METRICS_EXPORT_PORT=20008
+  RAY_MIN_WORKER_PORT=20010
+  RAY_MAX_WORKER_PORT=20999
+
+  lsof -ti :${RAY_PORT} | xargs -r kill -9 2>/dev/null || true
+  pkill -f "ray.*[=:]${RAY_PORT}" 2>/dev/null || true
+  pkill -9 sglang 2>/dev/null || true
+  pkill -9 slim 2>/dev/null || true
+  sleep 10
+
+  if [ "${SKYPILOT_NODE_RANK}" != "0" ]; then
+    echo "=== Starting Ray worker node (rank ${SKYPILOT_NODE_RANK}) ==="
+    WORKER_IP=$(echo $SKYPILOT_NODE_IPS | awk -v idx=$((SKYPILOT_NODE_RANK + 1)) '{print $idx}')
+    # Wait for the head to listen, so the worker does not race it.
+    until (echo > /dev/tcp/${MASTER_ADDR}/${RAY_PORT}) 2>/dev/null; do sleep 5; done
+
+    uv run ray start \
+      --address=${MASTER_ADDR}:${RAY_PORT} \
+      --num-gpus ${SKYPILOT_NUM_GPUS_PER_NODE} \
+      --node-ip-address ${WORKER_IP} \
+      --disable-usage-stats \
+      --dashboard-agent-listen-port=${RAY_DASHBOARD_AGENT_LISTEN_PORT} \
+      --dashboard-agent-grpc-port=${RAY_DASHBOARD_AGENT_GRPC_PORT} \
+      --object-manager-port=${RAY_OBJECT_MANAGER_PORT} \
+      --node-manager-port=${RAY_NODE_MANAGER_PORT} \
+      --min-worker-port=${RAY_MIN_WORKER_PORT} \
+      --max-worker-port=${RAY_MAX_WORKER_PORT} \
+      --metrics-export-port=${RAY_METRICS_EXPORT_PORT} \
+      --block
+
+    echo "=== Worker node exiting ==="
+    exit 0
+  fi
+
+  if [ ! -f "${HOME}/sky_workdir/datasets/strands_calculator/train.parquet" ]; then
+    uv run python examples/strands_calculator/prepare_dataset.py
+  fi
+
+  echo "=== Starting Ray head node ==="
+  uv run ray start --head \
+    --node-ip-address ${MASTER_ADDR} \
+    --num-gpus ${SKYPILOT_NUM_GPUS_PER_NODE} \
+    --disable-usage-stats \
+    --port=${RAY_PORT} \
+    --dashboard-host=0.0.0.0 \
+    --dashboard-port=${RAY_DASHBOARD_PORT} \
+    --dashboard-agent-listen-port=${RAY_DASHBOARD_AGENT_LISTEN_PORT} \
+    --dashboard-agent-grpc-port=${RAY_DASHBOARD_AGENT_GRPC_PORT} \
+    --ray-client-server-port=${RAY_CLIENT_SERVER_PORT} \
+    --object-manager-port=${RAY_OBJECT_MANAGER_PORT} \
+    --node-manager-port=${RAY_NODE_MANAGER_PORT} \
+    --min-worker-port=${RAY_MIN_WORKER_PORT} \
+    --max-worker-port=${RAY_MAX_WORKER_PORT} \
+    --metrics-export-port=${RAY_METRICS_EXPORT_PORT}
+
+  # The pool places one RolloutWorker on every alive node, so wait for all of them.
+  until [ "$(uv run python -c "import ray; ray.init(address='${MASTER_ADDR}:${RAY_PORT}', logging_level='ERROR'); print(sum(n['Alive'] for n in ray.nodes()))")" = "${SKYPILOT_NUM_NODES}" ]; do
+    sleep 5
+  done
+
+  MODEL_DIR="${HOME}/models/${MODEL_NAME}"
+  DATASET_DIR="${HOME}/sky_workdir/datasets/strands_calculator"
+
+  WANDB_ARGS=()
+  if [ -n "${WANDB_API_KEY}" ]; then
+    WANDB_ARGS=(
+      --use-wandb
+      --wandb-project slim
+      --wandb-group "strands-calculator-${MODEL_NAME,,}"
+      --wandb-key "${WANDB_API_KEY}"
+    )
+  fi
+
+  RUNTIME_ENV_JSON="{
+    \"env_vars\": {
+      \"RAY_DEDUP_LOGS\": \"0\"
+    }
+  }"
+
+  uv run ray job submit --address="http://${MASTER_ADDR}:${RAY_DASHBOARD_PORT}" \
+    --runtime-env-json="${RUNTIME_ENV_JSON}" \
+    -- slim-train \
+    \
+    --num-rollout 10 \
+    --rollout-batch-size 8 \
+    --n-samples-per-prompt 8 \
+    --num-steps-per-rollout 1 \
+    --max-context-len 24576 \
+    --rollout-temperature 1 \
+    --rollout-shuffle \
+    --apply-chat-template-kwargs '{"enable_thinking":true}' \
+    --rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std \
+    --over-sampling-batch-size 16 \
+    \
+    --prompt-data ${DATASET_DIR}/train.parquet \
+    --rm-type math \
+    --custom-generate-function-path examples.strands_calculator.generate.generate \
+    --eval-interval 2 \
+    --eval-prompt-data math ${DATASET_DIR}/test_math.parquet vision ${DATASET_DIR}/test_vision.parquet \
+    --eval-n-samples-per-prompt 1 \
+    \
+    --rollout-colocate \
+    --rollout-num-gpus-per-replica 1 \
+    --rollout-concurrency-per-replica 64 \
+    --sglang-context-length 24576 \
+    --sglang-tool-call-parser qwen3_coder \
+    --sglang-reasoning-parser qwen3 \
+    --sglang-mem-fraction-static 0.6 \
+    --sglang-attention-backend fa3 \
+    --sglang-mamba-radix-cache-strategy extra_buffer \
+    --sglang-page-size 64 \
+    --sglang-load-format dummy \
+    \
+    --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
+    --num-gpus-per-node ${SKYPILOT_NUM_GPUS_PER_NODE} \
+    --activation-checkpointing \
+    --use-dynamic-batch-size \
+    --max-tokens-per-gpu 24576 \
+    \
+    --advantage-estimator grpo \
+    --disable-group-advantage-std-normalization \
+    --loss-normalization-unit episode \
+    --old-logprob-source rollout \
+    --policy-surrogate cis \
+    --lr 1e-6 \
+    \
+    --hf-checkpoint ${MODEL_DIR}-FP8 \
+    --load ${MODEL_DIR} \
+    \
+    ${WANDB_ARGS[@]}
