@@ -110,7 +110,10 @@ class RolloutWorkerPool(metaclass=SingletonMeta):
 
         while self.pendings:
             logger.info(f"Abort request for {urls}")
-            await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
+            await asyncio.gather(
+                *[post(f"{url}/abort_request", {"abort_all": True}, max_retries=1) for url in urls],
+                return_exceptions=True,
+            )
             done, self.pendings = await asyncio.wait(self.pendings, return_when=asyncio.ALL_COMPLETED, timeout=1)
 
             # Recycle aborted/incomplete groups back to the data buffer so they

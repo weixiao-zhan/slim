@@ -176,7 +176,7 @@ async def _decode_json(content):
         return content.decode() if isinstance(content, bytes) else content
 
 
-async def _post(client, url, payload, max_retries=60, headers=None):
+async def _post(client, url, payload, max_retries=10, headers=None):
     retry_count = 0
     while retry_count < max_retries:
         response = None
@@ -199,7 +199,7 @@ async def _post(client, url, payload, max_retries=60, headers=None):
             )
             if retry_count >= max_retries:
                 logger.info(f"Max retries ({max_retries}) reached, failing... (url={url})")
-                raise e
+                raise RuntimeError(f"{type(e).__name__}: {e} (url={url}, response={response_text})") from None
             await asyncio.sleep(1)
             continue
         finally:
@@ -220,7 +220,7 @@ def init_http_client(concurrency: int):
     )
 
 
-async def post(url, payload, max_retries=60, headers=None):
+async def post(url, payload, max_retries=10, headers=None):
     return await _post(_http_client, url, payload, max_retries, headers=headers)
 
 
