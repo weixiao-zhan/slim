@@ -13,7 +13,7 @@ Slim has three profiling components.
 | `train_pg` | torch.profiler | Policy gradient update (fwd+bwd over microbatches) |
 | `train_log_probs` | torch.profiler | Log-prob recompute loop |
 | `train_overall` | torch.profiler | Entire train loop spanning rollouts |
-| `rollout` | VizTracer | Rollout step (generation + reward); each concurrent episode on its own track |
+| `rollout` | VizTracer | Rollout step in the `RolloutManager` coordinator process (dispatch, filters, batch hooks, abort); work inside [`RolloutWorker`](distributed-rollout.md) processes does not appear |
 
 Other flags: `--profile-step-start` (default 10), `--profile-step-end` (default 12), `--profile-dir` (default `./profiles`).
 Output: `<profile-dir>/<target>_rank_<rank>_....json.gz`.
