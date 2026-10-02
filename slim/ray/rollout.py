@@ -14,6 +14,7 @@ from collections import Counter
 from typing import Any
 
 import ray
+import requests
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
@@ -78,6 +79,7 @@ class ServerGroup:
     args: Any
     pg: Any  # (placement_group, reordered_bundle_indices, reordered_gpu_ids)
     all_engines: list
+    engine_urls: list[str | None] = dataclasses.field(init=False)
     num_gpus_per_replica: int
     num_new_engines: int
     worker_type: str = "regular"  # "regular", "prefill", or "decode"
@@ -88,6 +90,9 @@ class ServerGroup:
     model_path: str | None = None  # checkpoint path for update_weights_from_disk
     router_ip: str | None = None
     router_port: int | None = None
+
+    def __post_init__(self):
+        self.engine_urls = [None] * len(self.all_engines)
 
     @property
     def nodes_per_replica(self):
@@ -192,15 +197,41 @@ class ServerGroup:
                 base_port=base_port,
             )
 
-        init_handles = [
-            engine.init.remote(
-                **(addr_and_ports[rank]),
-                router_ip=self.router_ip,
-                router_port=self.router_port,
-            )
-            for rank, engine in rollout_engines
-        ]
+        init_handles = [engine.init.remote(**addr_and_ports[rank]) for rank, engine in rollout_engines]
+        for rank, _ in rollout_engines:
+            i = rank - self.rank_offset
+            if i % self.nodes_per_replica != 0:
+                continue
+            self.engine_urls[i] = f"http://{_wrap_ipv6(addr_and_ports[rank]['host'])}:{addr_and_ports[rank]['port']}"
+            if not self.args.rollout_external and self.worker_type != "encoder":
+                # The router admits the worker once its /health passes, so it can be added before init finishes.
+                worker = {"url": self.engine_urls[i], "worker_type": self.worker_type}
+                if self.worker_type == "prefill":
+                    worker["bootstrap_port"] = addr_and_ports[rank]["disaggregation_bootstrap_port"]
+                requests.post(f"http://{self.router_ip}:{self.router_port}/workers", json=worker).raise_for_status()
         return init_handles, port_cursors
+
+    def kill_engine(self, engine_id: int) -> None:
+        """Remove ``engines[engine_id]`` from the router, then kill it; ``start_engines`` restarts it."""
+        first = engine_id * self.nodes_per_replica
+        url = self.engine_urls[first]
+        if not self.args.rollout_external and self.worker_type != "encoder":
+            router_url = f"http://{self.router_ip}:{self.router_port}"
+            try:
+                # DELETE takes the router's worker id, so look it up by URL.
+                for worker in requests.get(f"{router_url}/workers").json()["workers"]:
+                    if worker["url"] == url:
+                        requests.delete(f"{router_url}/workers/{worker['id']}").raise_for_status()
+            except Exception as e:
+                logger.warning(f"Fail to remove {url} from router (e: {e})")
+        for i in range(first, first + self.nodes_per_replica):
+            engine = self.all_engines[i]
+            try:
+                ray.get(engine.shutdown.remote())
+            except Exception as e:
+                logger.warning(f"Fail to shut down engine at index {i} (e: {e})")
+            ray.kill(engine)
+            self.all_engines[i] = None
 
     def offload(self):
         """Fire release_memory_occupation on all engines (non-blocking).
@@ -964,8 +995,7 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
                 handles, port_cursors = group.start_engines(port_cursors)
                 if handles:
                     ray.get(handles)
-                urls = ray.get([e.get_url.remote() for e in group.engines])
-                encoder_urls.extend(u for u in urls if u is not None)
+                encoder_urls.extend(url for url in group.engine_urls if url is not None)
                 server_groups.append(group)
 
             logger.info(f"EPD phase 1 done: collected {len(encoder_urls)} encoder URLs: {encoder_urls}")

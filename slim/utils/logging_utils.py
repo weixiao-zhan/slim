@@ -3,7 +3,6 @@
 
 import logging
 
-import ray
 import wandb
 
 from . import wandb_utils
@@ -54,9 +53,10 @@ def build_sglang_metrics_endpoints(args, servers):
             endpoints[f"sgl_router_{name}"] = f"http://{server.router_ip}:{prom_port}/metrics"
 
         if args.sglang_enable_metrics:
-            urls = ray.get([e.get_url.remote() for e in server.engines if e is not None])
-            for idx, url in enumerate(u for u in urls if u is not None):
-                endpoints[f"sgl_engine_{name}_{idx}"] = f"{url}/metrics"
+            for g in server.server_groups:
+                for i, url in enumerate(g.engine_urls):
+                    if url is not None:
+                        endpoints[f"sgl_engine_{name}_{g.rank_offset + i}"] = f"{url}/metrics"
 
     return endpoints or None
 

@@ -267,23 +267,3 @@ class ParamInfo:
     attrs: dict
     size: int
     src_rank: int
-
-
-@dataclass
-class MultimodalType:
-    name: str  # Type identifier used in message content (e.g., "image")
-    placeholder: str  # Placeholder token in conversation messages (e.g., "<image>")
-
-
-class MultimodalTypes:
-    IMAGE = MultimodalType(name="image", placeholder="<image>")
-    VIDEO = MultimodalType(name="video", placeholder="<video>")
-    AUDIO = MultimodalType(name="audio", placeholder="<audio>")
-
-    @classmethod
-    def all(cls) -> list[MultimodalType]:
-        return [cls.IMAGE, cls.VIDEO, cls.AUDIO]
-
-    @classmethod
-    def get(cls, name: str) -> MultimodalType | None:
-        return next((m for m in cls.all() if m.name == name), None)

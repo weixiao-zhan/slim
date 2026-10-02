@@ -3,6 +3,7 @@
 
 import logging
 import os
+import secrets
 from copy import deepcopy
 
 import wandb
@@ -46,9 +47,9 @@ def init_wandb_primary(args):
         wandb.login(key=args.wandb_key, host=args.wandb_host)
 
     # Prepare wandb init parameters
-    # add random 6 length string with characters
+    # Suffix the group with 8 random hex characters
     if args.wandb_random_suffix:
-        group = args.wandb_group + "_" + wandb.util.generate_id()
+        group = args.wandb_group + "_" + secrets.token_hex(4)
         run_name = f"{group}-RANK_{args.rank}"
     else:
         group = args.wandb_group

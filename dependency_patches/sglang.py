@@ -217,13 +217,48 @@ def patch_sglang_return_processor_outputs(sglang_dir: Path) -> tuple[Path, ...]:
     return protocol, io_struct, tokenizer_manager, serving_chat
 
 
+def patch_sglang_qwen_vl_image_token(qwen_vl: Path) -> bool:
+    """Count only the native vision tokens as image placeholders.
+
+    Upstream also matches a literal ``<image>``, so any conversation text containing it
+    (a user prompt, or the model's own earlier turn) adds an image placeholder without
+    image data and the request fails. slim sends native vision tokens on every endpoint.
+    """
+    return patch_file(
+        qwen_vl,
+        [
+            (
+                """        # Also match the legacy sglang <image> sentinel used by /generate,
+        # so the artifact fast path can normalize it before build_input_ids.
+        self.mm_tokens = MultimodalSpecialTokens(
+            image_token="<|vision_start|><|image_pad|><|vision_end|>",
+            image_token_id=hf_config.image_token_id,
+            image_token_regex=re.compile(
+                r"<\\|vision_start\\|>(?:<\\|image_pad\\|>)+<\\|vision_end\\|>|<image>"
+            ),
+""",
+                """        self.mm_tokens = MultimodalSpecialTokens(
+            image_token="<|vision_start|><|image_pad|><|vision_end|>",
+            image_token_id=hf_config.image_token_id,
+            image_token_regex=re.compile(
+                r"<\\|vision_start\\|>(?:<\\|image_pad\\|>)+<\\|vision_end\\|>"
+            ),
+""",
+            ),
+        ],
+        log_reason="qwen_vl.py native-only image placeholder",
+    )
+
+
 def apply() -> None:
     import sglang
 
     sglang_dir = Path(sglang.__file__).resolve().parent
     base_processor = sglang_dir / "srt" / "multimodal" / "processors" / "base_processor.py"
     patch_sglang_base_processor(base_processor)
+    qwen_vl = sglang_dir / "srt" / "multimodal" / "processors" / "qwen_vl.py"
+    patch_sglang_qwen_vl_image_token(qwen_vl)
     openai_files = patch_sglang_return_processor_outputs(sglang_dir)
     install_triton_configs(sglang_dir)
-    for path in (base_processor, *openai_files):
+    for path in (base_processor, qwen_vl, *openai_files):
         py_compile.compile(str(path), doraise=True)
