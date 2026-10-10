@@ -26,6 +26,7 @@ from nemo_automodel.components.training.utils import (
     prepare_for_grad_accumulation,
     scale_grads_and_clip_grad_norm,
 )
+from tqdm import tqdm
 from transformers import AutoConfig
 
 import slim.utils.eval_config
@@ -228,6 +229,45 @@ class NeMoTrainer(RayWorker):
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         raise NotImplementedError
 
+    def _train_microbatch(
+        self,
+        pack: dict,
+        *,
+        is_final: bool,
+        global_sequences: torch.Tensor,
+        global_tokens: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+    def _run_optimizer_steps(self, packed_batches: list[dict], grad_accum: list[int], name: str) -> None:
+        """Run one optimizer step per gradient-accumulation group of packed microbatches."""
+        progress = tqdm(packed_batches, desc=name, disable=dist.get_rank() != 0)
+        profiled = iter(self.prof.iterate_train_pg(enumerate(progress)))
+        self.optimizer.zero_grad(set_to_none=True)
+        with timer(name):
+            for step_batches in self._optimizer_step_batches(packed_batches, grad_accum):
+                global_sequences, global_tokens = count_global_denominators(
+                    step_batches,
+                    self.dp_group,
+                    torch.cuda.current_device(),
+                )
+                self._begin_gradient_accumulation()
+                metric_sums: dict[str, torch.Tensor] = {}
+                for index in range(len(step_batches)):
+                    _, pack = next(profiled)
+                    metrics = self._train_microbatch(
+                        pack,
+                        is_final=index == len(step_batches) - 1,
+                        global_sequences=global_sequences,
+                        global_tokens=global_tokens,
+                    )
+                    for metric_name, value in metrics.items():
+                        metric_sums[metric_name] = metric_sums.get(metric_name, torch.zeros_like(value)) + value
+                    if index == 0:
+                        self._after_first_microbatch()
+                grad_norm = self._optimizer_step()
+                self._log_step(self._reduce_metrics(metric_sums), grad_norm)
+
     def _maybe_update_ref_model(self, rollout_id: int) -> None:
         pass
 
@@ -406,12 +446,11 @@ class NeMoTrainer(RayWorker):
         return float(grad_norm)
 
     def _reduce_metrics(self, metrics: dict[str, torch.Tensor]) -> dict[str, float]:
-        reduced = {}
-        for key, value in metrics.items():
-            tensor = value.detach().float().clone()
-            dist.all_reduce(tensor)
-            reduced[key] = tensor.item()
-        return reduced
+        if not metrics:
+            return {}
+        stacked = torch.stack([value.detach().float() for value in metrics.values()])
+        dist.all_reduce(stacked)
+        return dict(zip(metrics, stacked.tolist(), strict=True))
 
     def _log_step(self, metrics: dict[str, float], grad_norm: float) -> None:
         if dist.get_rank() != 0:
@@ -426,29 +465,30 @@ class NeMoTrainer(RayWorker):
 
     def _log_packed_metrics(self, packed_batches, metric_keys):
         """Average each metric over documents, weighted by the loss weights."""
-        log_dict = {}
+        metric_keys = [key for key in metric_keys if key in packed_batches[0]]
+        if not metric_keys:
+            return
         weight_sum, _ = count_global_denominators(
             packed_batches,
             self.dp_group,
             torch.cuda.current_device(),
         )
-        for metric_key in metric_keys:
-            if metric_key not in packed_batches[0]:
-                continue
-            value = torch.zeros((), device=torch.cuda.current_device())
-            for packed_batch in packed_batches:
-                for document in unpack_sequences(packed_batch):
+        sums = torch.zeros(len(metric_keys), dtype=torch.float64)
+        for packed_batch in packed_batches:
+            for document in unpack_sequences(packed_batch):
+                mask = document["loss_masks"].to(torch.float64)
+                denominator = mask.sum().clamp_min(1)
+                for slot, metric_key in enumerate(metric_keys):
                     metric = document.get(metric_key)
                     if isinstance(metric, torch.Tensor):
-                        mask = document["loss_masks"].to(value.device)
-                        value += (
-                            document["loss_weights"]
-                            * (metric.to(value.device) * mask).sum()
-                            / mask.sum().clamp_min(1)
-                        )
-            dist.all_reduce(value, group=self.dp_group)
-            log_dict[f"{self._train_log_prefix}/{metric_key}"] = (value / weight_sum).item()
-        if dist.get_rank() == 0 and log_dict:
+                        sums[slot] += document["loss_weights"] * (metric.to(torch.float64) * mask).sum() / denominator
+        sums = sums.to(device=torch.cuda.current_device(), dtype=torch.float32)
+        dist.all_reduce(sums, group=self.dp_group)
+        if dist.get_rank() == 0:
+            log_dict = {
+                f"{self._train_log_prefix}/{metric_key}": value
+                for metric_key, value in zip(metric_keys, (sums / weight_sum).tolist(), strict=True)
+            }
             log_dict["train/step"] = self.global_step
             logging_utils.log(self.args, log_dict)
 

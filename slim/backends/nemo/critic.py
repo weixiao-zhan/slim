@@ -20,7 +20,7 @@ from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .packed_cp_forward import prepare_forward
-from .loss import count_global_denominators, reduce_weighted_sequence_mean
+from .loss import reduce_weighted_sequence_mean
 from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
 
@@ -133,7 +133,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         return {
             "dp_rank": self.dp_rank,
             "cp_rank": self.cp_rank,
-            "values": [value for value in all_values if value is not None],
+            "values": all_values,
         }
 
     def _train_microbatch(
@@ -142,6 +142,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         *,
         is_final: bool,
         global_sequences: torch.Tensor,
+        global_tokens: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         prepared = prepare_forward(
             self.model,
@@ -195,28 +196,4 @@ class CriticNeMoTrainer(NeMoTrainer):
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         self._log_packed_metrics(packed_batches, ["old_values", "value_targets"])
-        progress = tqdm(packed_batches, desc="critic_train", disable=dist.get_rank() != 0)
-        profiled = iter(self.prof.iterate_train_pg(enumerate(progress)))
-        self.optimizer.zero_grad(set_to_none=True)
-        with timer("critic_train"):
-            for step_batches in self._optimizer_step_batches(packed_batches, grad_accum):
-                global_sequences, _ = count_global_denominators(
-                    step_batches,
-                    self.dp_group,
-                    torch.device("cuda", torch.cuda.current_device()),
-                )
-                self._begin_gradient_accumulation()
-                metric_sums: dict[str, torch.Tensor] = {}
-                for index in range(len(step_batches)):
-                    _, pack = next(profiled)
-                    metrics = self._train_microbatch(
-                        pack,
-                        is_final=index == len(step_batches) - 1,
-                        global_sequences=global_sequences,
-                    )
-                    for name, value in metrics.items():
-                        metric_sums[name] = metric_sums.get(name, torch.zeros_like(value)) + value
-                    if index == 0:
-                        self._after_first_microbatch()
-                grad_norm = self._optimizer_step()
-                self._log_step(self._reduce_metrics(metric_sums), grad_norm)
+        self._run_optimizer_steps(packed_batches, grad_accum, "critic_train")

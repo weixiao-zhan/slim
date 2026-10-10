@@ -158,7 +158,6 @@ When an engine becomes unresponsive, it is killed and restarted with a fresh wei
 | `--rollout-health-check-first-wait` | 0 | Grace period (seconds) before health checks begin. Increase for large models with long compilation. |
 | `--rollout-health-check-interval` | 30 | Seconds between health check rounds. |
 | `--rollout-health-check-timeout` | 30 | Seconds to wait for a response before declaring the engine dead. |
-| `--rollout-disable-fault-tolerance` | false | Disable fault tolerance entirely. |
 
 ## Low-Precision Inference (FP8)
 
