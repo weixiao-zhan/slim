@@ -32,7 +32,6 @@ from .data_packing import (
 )
 from .packed_cp_forward import prepare_forward
 from .loss import (
-    count_global_denominators,
     entropy_from_logits,
     reduce_token_mean,
     reduce_weighted_sequence_mean,
@@ -448,32 +447,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             self._prepare_mismatch(pack)
 
         self._log_packed_metrics(packed_batches, ["actor_old_log_probs", "ref_log_probs", "advantages"])
-        progress = tqdm(packed_batches, desc="actor_train", disable=dist.get_rank() != 0)
-        profiled = iter(self.prof.iterate_train_pg(enumerate(progress)))
-        self.optimizer.zero_grad(set_to_none=True)
-        with timer("actor_train"):
-            for step_batches in self._optimizer_step_batches(packed_batches, grad_accum):
-                global_sequences, global_tokens = count_global_denominators(
-                    step_batches,
-                    self.dp_group,
-                    torch.cuda.current_device(),
-                )
-                self._begin_gradient_accumulation()
-                metric_sums: dict[str, torch.Tensor] = {}
-                for index in range(len(step_batches)):
-                    _, pack = next(profiled)
-                    metrics = self._train_microbatch(
-                        pack,
-                        is_final=index == len(step_batches) - 1,
-                        global_sequences=global_sequences,
-                        global_tokens=global_tokens,
-                    )
-                    for name, value in metrics.items():
-                        metric_sums[name] = metric_sums.get(name, torch.zeros_like(value)) + value
-                    if index == 0:
-                        self._after_first_microbatch()
-                grad_norm = self._optimizer_step()
-                self._log_step(self._reduce_metrics(metric_sums), grad_norm)
+        self._run_optimizer_steps(packed_batches, grad_accum, "actor_train")
 
     def _maybe_update_ref_model(self, rollout_id: int) -> None:
         if (
@@ -496,10 +470,9 @@ class ActorNeMoTrainer(NeMoTrainer):
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
-        if self.args.rollout_fault_tolerance:
-            if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.recover_and_get_updatable_engines.remote())
-            dist.barrier(group=get_gloo_group())
+        if dist.get_rank() == 0:
+            ray.get(self.rollout_manager.recover_updatable_engines.remote())
+        dist.barrier(group=get_gloo_group())
 
         rollout_engines, rollout_engine_lock, num_new_engines, engine_gpu_counts, engine_gpu_offsets = ray.get(
             self.rollout_manager.get_updatable_engines_and_lock.remote()

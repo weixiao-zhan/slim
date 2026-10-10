@@ -147,7 +147,7 @@ class Trajectory:
         """Count source positions whose predictions contribute to training."""
         if self.loss_mask is None:
             return max(len(self.token_ids) - 1, 0)
-        return int(sum(self.loss_mask))
+        return int(torch.as_tensor(self.loss_mask).sum())
 
     def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
         """Set source-token-aligned training targets after rollout processing."""
@@ -257,13 +257,3 @@ class Episode:
             return self.reward
         rewards = [trajectory.reward for trajectory in self.trajectories]
         return sum(rewards) / len(rewards)
-
-
-@dataclass(frozen=True)
-class ParamInfo:
-    name: str
-    dtype: torch.dtype
-    shape: torch.Size
-    attrs: dict
-    size: int
-    src_rank: int

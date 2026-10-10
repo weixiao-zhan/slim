@@ -128,7 +128,7 @@ def pack_sequences(
                 _validate_source_field(trajectories[index], "values", value)
             pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
 
-        multimodal_inputs: dict[str, torch.Tensor] = {}
+        multimodal_inputs: dict[str, list[torch.Tensor]] = {}
         multimodal_counts: dict[str, list[int]] = {}
         for document_offset, index in enumerate(indices):
             inputs = trajectories[index].multimodal_inputs or {}
@@ -140,12 +140,10 @@ def pack_sequences(
                     counts.append(0)
                     continue
                 tensor = tensor.detach().cpu()
-                multimodal_inputs[name] = (
-                    tensor if name not in multimodal_inputs else torch.cat((multimodal_inputs[name], tensor), dim=0)
-                )
+                multimodal_inputs.setdefault(name, []).append(tensor)
                 counts.append(tensor.shape[0])
         if multimodal_inputs:
-            pack["multimodal_inputs"] = multimodal_inputs
+            pack["multimodal_inputs"] = {name: torch.cat(parts, dim=0) for name, parts in multimodal_inputs.items()}
             pack["multimodal_num_items"] = multimodal_counts
         packs.append(pack)
     return packs

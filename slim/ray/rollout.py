@@ -41,7 +41,7 @@ from slim.utils.trajectory_batch import build_dp_batches
 from slim.utils.types import Episode, Trajectory
 
 from ..utils.metric_utils import has_repetition
-from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
+from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock, train_span
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -87,7 +87,6 @@ class ServerGroup:
     gpu_offset: int = 0  # cumulative GPU count before this group
     sglang_overrides: dict = dataclasses.field(default_factory=dict)
     needs_offload: bool = False  # True when this group's GPUs overlap with training
-    model_path: str | None = None  # checkpoint path for update_weights_from_disk
     router_ip: str | None = None
     router_port: int | None = None
 
@@ -253,18 +252,6 @@ class ServerGroup:
             return []
         return [engine.resume_memory_occupation.remote(tags=tags) for engine in self.engines if engine is not None]
 
-    def onload_weights_from_disk(self):
-        """Reload weights from ``model_path`` for non-updatable groups.
-
-        Used instead of ``resume_memory_occupation(tags=[WEIGHTS])`` so that
-        CPU memory is not consumed by offloaded weight copies.
-        """
-        if not self.needs_offload or not self.model_path:
-            return []
-        return [
-            engine.update_weights_from_disk.remote(self.model_path) for engine in self.engines if engine is not None
-        ]
-
 
 @dataclasses.dataclass
 class RolloutServer:
@@ -318,14 +305,6 @@ class RolloutServer:
                 offsets.append(g.gpu_offset + j * g.num_gpus_per_replica)
         return offsets
 
-    @property
-    def nodes_per_replica(self):
-        """Nodes per replica.  Only valid when all active groups share the same value."""
-        values = {g.nodes_per_replica for g in self.server_groups}
-        if len(values) != 1:
-            raise ValueError(f"Heterogeneous nodes_per_replica across groups: {values}")
-        return values.pop()
-
     def recover(self):
         """Recover dead engines across all active groups, overlapping init."""
         # Record dead indices per group before starting.
@@ -340,34 +319,17 @@ class RolloutServer:
         if all_handles:
             ray.get(all_handles)
 
-        # Post-recovery: offload then onload weights for newly created engines.
-        release_handles = []
-        updatable_new_engines = []
-        non_updatable_groups_engines: list[tuple[str, list]] = []
+        # Post-recovery: offload then onload weights for newly created engines that share training GPUs.
+        new_engines = []
         for g, dead_indices in zip(self.server_groups, dead_per_group, strict=True):
             logger.info(f"Recovered {g.num_new_engines} dead rollout engines (worker_type={g.worker_type})")
             assert g.num_new_engines == len(dead_indices), "num_new_engines does not match dead_indices length"
-            if g.needs_offload and dead_indices:
-                new_engines = [g.all_engines[i] for i in dead_indices]
-                release_handles.extend(engine.release_memory_occupation.remote() for engine in new_engines)
-                if self.update_weights:
-                    updatable_new_engines.extend(new_engines)
-                elif g.model_path:
-                    non_updatable_groups_engines.append((g.model_path, new_engines))
+            if g.needs_offload:
+                new_engines.extend(g.all_engines[i] for i in dead_indices)
 
-        if release_handles:
-            ray.get(release_handles)
-            # Resume GPU memory for all engines that need offload.
-            all_resume_engines = updatable_new_engines[:]
-            for _model_path, engines in non_updatable_groups_engines:
-                all_resume_engines.extend(engines)
-            if all_resume_engines:
-                ray.get(
-                    [
-                        engine.resume_memory_occupation.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS])
-                        for engine in all_resume_engines
-                    ]
-                )
+        if new_engines:
+            ray.get([engine.release_memory_occupation.remote() for engine in new_engines])
+            ray.get([engine.resume_memory_occupation.remote(tags=[GPU_MEMORY_TYPE_WEIGHTS]) for engine in new_engines])
 
     def offload(self):
         """Release memory occupation across all groups (concurrent)."""
@@ -391,19 +353,11 @@ class RolloutServer:
         ``update_weights`` shortly after.  For non-updatable servers the
         CPU backup already contains the correct (unchanged) weights.
         """
-        handles = []
-        for g in self.server_groups:
-            if not g.needs_offload:
-                continue
-            handles.extend(g.onload(tags=[GPU_MEMORY_TYPE_WEIGHTS]))
-        return ray.get(handles) if handles else []
+        return self.onload([GPU_MEMORY_TYPE_WEIGHTS])
 
     def onload_kv(self):
         """Resume KV cache and CUDA graphs for offloaded groups."""
-        handles = []
-        for g in self.server_groups:
-            handles.extend(g.onload(tags=[GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH]))
-        return ray.get(handles) if handles else []
+        return self.onload([GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH])
 
 
 @ray.remote
@@ -439,13 +393,12 @@ class RolloutManager:
         self._dynamic_global_batch_size = None
 
         self._health_monitors = []
-        if not self.args.debug_train_only and self.args.rollout_fault_tolerance:
-            for srv in self.servers.values():
-                for group in srv.server_groups:
-                    monitor = RolloutHealthMonitor(group, args)
-                    monitor.start()
-                    self._health_monitors.append(monitor)
-            self._ci_fault_injection_pending = self.args.ci_test  # Flag for CI fault injection
+        for srv in self.servers.values():
+            for group in srv.server_groups:
+                monitor = RolloutHealthMonitor(group, args)
+                monitor.start()
+                self._health_monitors.append(monitor)
+        self._ci_fault_injection_pending = self.args.ci_test  # Flag for CI fault injection
 
     def _try_ci_fault_injection(self):
         """Try to inject fault during generate (when health monitor is running)."""
@@ -507,29 +460,16 @@ class RolloutManager:
         """All node-0 engines across all servers / models."""
         return [e for srv in self.servers.values() for e in srv.engines]
 
-    def recover_and_get_updatable_engines(self):
-        """Recover dead engines and return engines eligible for weight updates.
+    def recover_updatable_engines(self) -> None:
+        """Pause health monitoring and restart dead engines of the updatable model.
 
-        Restarts any dead rollout engines for the updatable model (the one
-        that receives weight updates from training).  Frozen models
-        (reference, reward, etc.) are automatically excluded.
+        Only the model that receives weight updates from training is
+        recovered.  Frozen models (reference, reward, etc.) are excluded.
         """
         self.health_monitoring_pause()
         srv = self._get_updatable_server()
-        if self.rollout_id == -1 or srv is None:
-            engines = srv.engines if srv else []
-            gpu_counts = srv.engine_gpu_counts if srv else []
-            gpu_offsets = srv.engine_gpu_offsets if srv else []
-            return engines, self.rollout_engine_lock, (srv.num_new_engines if srv else 0), gpu_counts, gpu_offsets
-
-        srv.recover()
-        return (
-            srv.engines,
-            self.rollout_engine_lock,
-            srv.num_new_engines,
-            srv.engine_gpu_counts,
-            srv.engine_gpu_offsets,
-        )
+        if self.rollout_id != -1 and srv is not None:
+            srv.recover()
 
     def get_num_rollout_per_epoch(self):
         assert self.args.rollout_global_dataset
@@ -539,7 +479,7 @@ class RolloutManager:
         start_time = time.time()
         self.rollout_id = rollout_id
         self.health_monitoring_resume()
-        if self.args.ci_test and self.args.rollout_fault_tolerance and rollout_id >= 2:
+        if self.args.ci_test and rollout_id >= 2:
             self._try_ci_fault_injection()
         episodes, metrics = self._get_rollout_episodes(rollout_id=rollout_id)
         self._save_debug_rollout_data(episodes, rollout_id=rollout_id, evaluation=False)
@@ -572,10 +512,6 @@ class RolloutManager:
         for srv in self.servers.values():
             srv.offload()
 
-    def onload(self, tags: list[str] | None = None):
-        for srv in self.servers.values():
-            srv.onload(tags)
-
     def onload_weights(self):
         for srv in self.servers.values():
             srv.onload_weights()
@@ -588,7 +524,7 @@ class RolloutManager:
         """Return engines eligible for weight updates (read-only, no recovery).
 
         All ranks call this after rank-0 has already called
-        ``recover_and_get_updatable_engines``, so ``num_new_engines`` is stable.
+        ``recover_updatable_engines``, so ``num_new_engines`` is stable.
         """
         srv = self._get_updatable_server()
         engines = srv.engines if srv else []
@@ -890,25 +826,6 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
     return router_ip, router_port, prometheus_port
 
 
-def _compute_train_num_gpus(args) -> int:
-    """Number of training GPU slots the rollout segment may overlap (the train span)."""
-    if args.debug_rollout_only:
-        return 0
-    if args.critic_train_only:
-        return args.critic_num_gpus
-    # Critic-colocate folds the critic onto the actor GPUs, so the span is just A.
-    if args.critic_colocate or not args.use_critic:
-        return args.actor_num_gpus
-    return args.actor_num_gpus + args.critic_num_gpus
-
-
-def _compute_rollout_offset(args) -> int:
-    """Offset (in PG bundle slots) where rollout GPUs start."""
-    if args.debug_train_only or args.debug_rollout_only or args.rollout_colocate:
-        return 0
-    return _compute_train_num_gpus(args)
-
-
 def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     """Start rollout servers: one per model, each with its own router.
 
@@ -926,8 +843,8 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
     engine_offset = 0
 
     # Compute training GPU range for per-group offload decisions.
-    rollout_pg_offset = _compute_rollout_offset(args)
-    train_num_gpus = _compute_train_num_gpus(args)
+    train_num_gpus = train_span(args)
+    rollout_pg_offset = 0 if args.rollout_colocate else train_num_gpus
 
     for model_idx, model_cfg in enumerate(config.models):
         model_cfg.resolve(args)
@@ -977,7 +894,6 @@ def start_rollout_servers(args, pg) -> dict[str, RolloutServer]:
                 gpu_offset=gpu_offset,
                 sglang_overrides=overrides,
                 needs_offload=needs_offload,
-                model_path=overrides.get("model_path", args.hf_checkpoint),
                 router_ip=router_ip,
                 router_port=router_port,
             )

@@ -9,6 +9,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from .actor_group import RayTrainGroup
+from .utils import train_span
 
 logger = logging.getLogger(__name__)
 
@@ -90,31 +91,20 @@ def _placement_layout(args):
         rollout_offset = 0           if RC else train_span
         pg_total       = train_span  if RC else train_span + R
     """
-    A = args.actor_num_gpus
-    C = args.critic_num_gpus if args.use_critic else 0
     R = args.rollout_num_gpus
-
     if args.debug_rollout_only:
         return R, 0, 0
 
-    cc = args.critic_colocate
-    rc = args.rollout_colocate
-
-    if args.critic_train_only:
-        train_span = C
-        critic_offset = 0
-    elif cc or not args.use_critic:
-        train_span = A
-        critic_offset = 0
-    else:
-        train_span = A + C
-        critic_offset = A
+    span = train_span(args)
+    separate_critic = args.use_critic and not args.critic_colocate and not args.critic_train_only
+    critic_offset = args.actor_num_gpus if separate_critic else 0
 
     if args.debug_train_only:
-        return train_span, critic_offset, train_span
+        return span, critic_offset, span
 
-    rollout_offset = 0 if rc else train_span
-    pg_total = train_span if rc else train_span + R
+    rc = args.rollout_colocate
+    rollout_offset = 0 if rc else span
+    pg_total = span if rc else span + R
     return pg_total, critic_offset, rollout_offset
 
 

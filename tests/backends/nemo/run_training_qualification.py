@@ -611,13 +611,18 @@ def _train_actor(trainer: ActorNeMoTrainer, packs: list[dict]) -> tuple[dict, fl
 
 def _train_critic(trainer: CriticNeMoTrainer, pack: dict) -> tuple[dict, float]:
     trainer.optimizer.zero_grad(set_to_none=True)
-    global_sequences, _ = count_global_denominators(
+    global_sequences, global_tokens = count_global_denominators(
         [pack],
         trainer.dp_group,
         torch.device("cuda", torch.cuda.current_device()),
     )
     trainer._begin_gradient_accumulation()
-    metrics = trainer._train_microbatch(pack, is_final=True, global_sequences=global_sequences)
+    metrics = trainer._train_microbatch(
+        pack,
+        is_final=True,
+        global_sequences=global_sequences,
+        global_tokens=global_tokens,
+    )
     trainer._after_first_microbatch()
     grad_norm = trainer._optimizer_step()
     return metrics, grad_norm

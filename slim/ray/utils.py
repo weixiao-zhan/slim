@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ray/utils.py#L1
-import os
-
 import ray
 from slim.ray.ray_worker import RayWorker
 
@@ -27,18 +25,16 @@ NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
 ]
 
 
-def ray_noset_visible_devices(env_vars=os.environ):
-    return any(env_vars.get(env_var) for env_var in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST)
-
-
-def get_physical_gpu_id():
-    # Imported here: this runs on a GPU worker, while the driver imports this
-    # module only for Lock and the NOSET env-var list.
-    import torch
-
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
-    return str(props.uuid)
+def train_span(args) -> int:
+    """Number of placement-group bundles occupied by the actor and critic trainers."""
+    if args.debug_rollout_only:
+        return 0
+    if args.critic_train_only:
+        return args.critic_num_gpus
+    # Critic-colocate folds the critic onto the actor GPUs, so the span is just the actor's.
+    if args.critic_colocate or not args.use_critic:
+        return args.actor_num_gpus
+    return args.actor_num_gpus + args.critic_num_gpus
 
 
 @ray.remote
