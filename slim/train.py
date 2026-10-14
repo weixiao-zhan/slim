@@ -12,6 +12,8 @@ from slim.utils.misc import should_run_periodic_action
 
 def train_step(args, rollout_id, rollout_data_ref, actor_train_group, critic_train_group, advantage_estimator):
     """Compute training targets for one rollout and train the actor and critic on it."""
+    if args.debug_rollout_only:
+        return
     if not args.use_critic:
         train_episode_refs = ray.get(advantage_estimator.compute_training_targets.remote(rollout_data_ref))
         ray.get(actor_train_group.async_train(rollout_id, train_episode_refs))
