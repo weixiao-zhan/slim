@@ -16,6 +16,8 @@ fi
 
 NUM_GPUS="${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+# The local test cluster runs without Ray token auth so `ray start` and `ray job submit` agree.
+export RAY_AUTH_MODE="${RAY_AUTH_MODE:-disabled}"
 
 K() {
     echo $((1024 * $1))
