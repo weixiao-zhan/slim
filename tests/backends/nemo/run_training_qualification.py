@@ -155,6 +155,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr_warmup_iters=0,
         lr_wsd_decay_iters=None,
         lr_wsd_decay_style=None,
+        master_weight_dtype="fp32",
         mismatch_correction="none",
         nemo_dispatcher="torch",
         nemo_experts_backend="torch_mm",

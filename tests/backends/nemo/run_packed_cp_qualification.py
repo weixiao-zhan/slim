@@ -57,6 +57,7 @@ def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
         freeze_vision_tower=True,
         freeze_audio_tower=True,
         freeze_language_model=False,
+        master_weight_dtype="fp32",
     )
 
 
