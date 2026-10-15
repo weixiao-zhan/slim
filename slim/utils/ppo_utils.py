@@ -4,6 +4,8 @@
 # Adapt from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/models/utils.py
 # and https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ppo_utils/experience_maker.py
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
@@ -81,90 +83,118 @@ def compute_gspo_kl(
 
 
 @torch.compile(dynamic=True)
-def compute_ppo_clip_policy_loss(
-    ppo_kl: torch.Tensor,
+def compute_ppo_clip_surrogate_weight(
+    ratio: torch.Tensor,
     advantages: torch.Tensor,
     eps_clip: float,
     eps_clip_high: float,
     eps_clip_c: float | None = None,
 ):
-    ratio = (-ppo_kl).exp()
-    pg_losses1 = -ratio * advantages
-    pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
-    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
-    clipfrac = torch.gt(pg_losses2, pg_losses1).float()
-
+    # The clipped branch of the max is constant in r, so a clipped token carries no gradient.
+    positive = advantages > 0
+    clipped = torch.where(positive, ratio > 1 + eps_clip_high, ratio < 1 - eps_clip) & (advantages != 0)
+    kept = ~clipped
     if eps_clip_c is not None:
         assert (
             eps_clip_c > 1.0
         ), f"The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0, but get the value: {eps_clip_c}."
-        pg_losses3 = -eps_clip_c * advantages
-        clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-        pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    else:
-        pg_losses = clip_pg_losses1
-
-    return pg_losses, clipfrac
+        # Dual clip caps the loss of a negative advantage at -eps_clip_c * A.
+        kept = kept & (positive | (ratio <= eps_clip_c))
+    return ratio * kept, clipped.float()
 
 
 @torch.compile(dynamic=True)
-def compute_is_policy_loss(
-    ppo_kl: torch.Tensor,
-    advantages: torch.Tensor,
-):
-    ratio = (-ppo_kl).exp()
-    pg_losses = -ratio * advantages
-    clipfrac = torch.zeros_like(pg_losses)
-    return pg_losses, clipfrac
-
-
-@torch.compile(dynamic=True)
-def compute_tis_policy_loss(
-    ppo_kl: torch.Tensor,
-    advantages: torch.Tensor,
+def compute_tis_surrogate_weight(
+    ratio: torch.Tensor,
     eps_clip: float,
     eps_clip_high: float,
 ):
-    ratio = (-ppo_kl).exp()
-    clipped_ratio = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
-    pg_losses = -clipped_ratio * advantages
-    clipfrac = ((ratio < 1 - eps_clip) | (ratio > 1 + eps_clip_high)).float()
-    return pg_losses, clipfrac
+    # The clamp has no gradient outside its range, so a clipped token carries none.
+    kept = (ratio >= 1 - eps_clip) & (ratio <= 1 + eps_clip_high)
+    return ratio * kept, (~kept).float()
 
 
 @torch.compile(dynamic=True)
-def compute_cis_policy_loss(
-    ppo_kl: torch.Tensor,
-    log_probs: torch.Tensor,
-    advantages: torch.Tensor,
+def compute_cis_surrogate_weight(
+    ratio: torch.Tensor,
     eps_clip: float,
     eps_clip_high: float,
 ):
-    ratio = (-ppo_kl).exp()
-    weight = ratio.clamp(1 - eps_clip, 1 + eps_clip_high).detach()
-    pg_losses = -weight * advantages * log_probs
-    clipfrac = ((ratio < 1 - eps_clip) | (ratio > 1 + eps_clip_high)).float()
-    return pg_losses, clipfrac
+    weights = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
+    if eps_clip == 0 and eps_clip_high == 0:
+        # The clamp pins the weight to 1: plain REINFORCE, with no token clipped.
+        return weights, torch.zeros_like(ratio)
+    return weights, ((ratio < 1 - eps_clip) | (ratio > 1 + eps_clip_high)).float()
 
 
-def compute_policy_loss(
-    ppo_kl: torch.Tensor,
-    log_probs: torch.Tensor,
+def compute_surrogate_weight(
+    ratio: torch.Tensor,
     advantages: torch.Tensor,
     eps_clip: float,
     eps_clip_high: float,
     policy_surrogate: str,
     eps_clip_c: float | None = None,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Detached weight $w(r, A)$ of each token's score, and whether the token is clipped.
+
+    Every surrogate has the gradient $-A w \nabla \log p$, so the policy loss is
+    $-A \operatorname{sg}[w] \log p$. `ppo_clip` and `tis` differentiate the ratio,
+    and $\nabla r = r \nabla \log p$ makes their weight $r$ where the ratio is not
+    clipped and $0$ where it is. `ratio` and `advantages` broadcast, so the same call
+    weighs the sampled token `[T]` and the sampler top-K `[T, K]`.
+    """
+    ratio = ratio.detach()
     if policy_surrogate == "ppo_clip":
-        return compute_ppo_clip_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, eps_clip_c)
+        return compute_ppo_clip_surrogate_weight(ratio, advantages, eps_clip, eps_clip_high, eps_clip_c)
     if policy_surrogate == "is":
-        return compute_is_policy_loss(ppo_kl, advantages)
+        return ratio, torch.zeros_like(ratio)
     if policy_surrogate == "tis":
-        return compute_tis_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high)
+        return compute_tis_surrogate_weight(ratio, eps_clip, eps_clip_high)
     if policy_surrogate == "cis":
-        return compute_cis_policy_loss(ppo_kl, log_probs, advantages, eps_clip, eps_clip_high)
+        return compute_cis_surrogate_weight(ratio, eps_clip, eps_clip_high)
     raise ValueError(f"Unsupported policy_surrogate: {policy_surrogate}")
+
+
+@torch.compile(dynamic=True)
+def compute_score_centering_loss(
+    topk_log_probs: torch.Tensor,
+    rollout_topk_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    surrogate_weight: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+    mass_floor: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""Per-token additive term that removes the sampler-expected score from the policy gradient.
+
+    Score centering (Marek & Ryabinin, arXiv 2609.20807) uses the sampler's top-$k$
+    tokens $H$ with log probabilities $\log q_v$ and models the tail with the trainer's
+    shape, $\hat q_v = \rho p_v$:
+
+    $$L_t = A_t \sum_{v \in H} \operatorname{sg}[q_v w_v - \alpha p_v] \log p_v$$
+
+    $$\rho = \frac{1 - \sum_H q_v}{1 - \sum_H p_v}$$
+
+    $$\alpha = \rho w(1/\rho, A_t)$$
+
+    $w_v = w(p_v / q_v, A_t)$ is the surrogate's weight. `surrogate_weight(ratio, advantages)`
+    is `compute_surrogate_weight` with the clip range bound, the same $w$ that weighs the
+    sampled token. Added to the policy loss, the update becomes $A (w_x s_x - \mathbb{E}_{\hat q}[w s])$.
+
+    Returns the per-token term, the sampler top-K mass $\sum_H q_v$, and $\rho$.
+    """
+    trainer_topk_log_probs = topk_log_probs.detach()
+    trainer_topk = trainer_topk_log_probs.exp()
+    sampler_topk = rollout_topk_log_probs.exp()
+    topk_mass = sampler_topk.sum(dim=-1)
+    rho = (1 - topk_mass).clamp_min(mass_floor) / (1 - trainer_topk.sum(dim=-1)).clamp_min(mass_floor)
+    # SGLang reports an underflowed sampler probability as the float32 minimum. Capping the
+    # exponent keeps its ratio finite, and its zero sampler mass then zeroes its term.
+    topk_ratio = (trainer_topk_log_probs - rollout_topk_log_probs).clamp(max=80).exp()
+    weights, _ = surrogate_weight(topk_ratio, advantages.unsqueeze(-1))
+    tail_weights, _ = surrogate_weight(rho.reciprocal(), advantages)
+    alpha = rho * tail_weights
+    coefficients = sampler_topk * weights - alpha.unsqueeze(-1) * trainer_topk
+    values = advantages * (coefficients * topk_log_probs).sum(dim=-1)
+    return values, topk_mass, rho
 
 
 def compute_value_loss(

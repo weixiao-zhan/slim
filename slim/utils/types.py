@@ -44,7 +44,9 @@ class Trajectory:
     token_ids: Any = field(default_factory=list)       # [int] → LongTensor
     loss_mask: Any | None = None                       # [int] → IntTensor
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
-    rollout_routed_experts: Any | None = None          # np.ndarray [prediction, layer, top_k] → IntTensor
+    rollout_topk_log_probs: Any | None = None          # np.ndarray [seq_len - 1, k] → FloatTensor
+    rollout_topk_token_ids: Any | None = None          # np.ndarray [seq_len - 1, k] → IntTensor
+    rollout_routed_experts: Any | None = None          # np.ndarray [seq_len - 1, layer, top_k] → IntTensor
     multimodal_inputs: Any | None = None               # dict[str, Tensor] → ObjectRef → dict[str, Tensor]
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
@@ -132,6 +134,18 @@ class Trajectory:
             self.rollout_log_probs,
             dtype=torch.float32,
             fill=0.0,
+        )
+        self.rollout_topk_log_probs = self._finalize_prediction_field(
+            "rollout_topk_log_probs",
+            self.rollout_topk_log_probs,
+            dtype=torch.float32,
+            fill=0.0,
+        )
+        self.rollout_topk_token_ids = self._finalize_prediction_field(
+            "rollout_topk_token_ids",
+            self.rollout_topk_token_ids,
+            dtype=torch.int32,
+            fill=0,
         )
         self.rollout_routed_experts = self._finalize_prediction_field(
             "rollout_routed_experts",

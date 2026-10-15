@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
@@ -165,12 +166,17 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
         prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
     edge_len = max(len(prompt_ids) - 1, 0)
-    return Trajectory(
+    trajectory = Trajectory(
         token_ids=prompt_ids,
         loss_mask=[0] * edge_len,
         rollout_log_probs=[0.0] * edge_len,
         multimodal_inputs=multimodal_inputs,
     )
+    if (top_k := state.args.use_score_centering) is not None:
+        # The top-K is K entries per token, so it lives in arrays rather than nested lists.
+        trajectory.rollout_topk_log_probs = np.zeros((edge_len, top_k), dtype=np.float32)
+        trajectory.rollout_topk_token_ids = np.zeros((edge_len, top_k), dtype=np.int32)
+    return trajectory
 
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
@@ -199,6 +205,8 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+    if args.use_score_centering is not None:
+        payload["top_logprobs_num"] = args.use_score_centering
     routed_experts_start_len = 0
     if state.routing_replay_shape is not None:
         # Expert capture is indexed by KV-cache slot, so a position reports the routing
@@ -244,9 +252,20 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     trajectory.token_ids.extend(new_tokens)
     trajectory.loss_mask.extend([1] * len(new_tokens))
     trajectory.rollout_log_probs.extend(new_log_probs)
+    if args.use_score_centering is not None:
+        # One row per generated token, [logprob, token_id, text] per top-K entry.
+        top_logprobs = meta_info["output_top_logprobs"]
+        topk_shape = (len(top_logprobs), args.use_score_centering)
+        log_probs = np.array([[entry[0] for entry in row] for row in top_logprobs], dtype=np.float32)
+        token_ids = np.array([[entry[1] for entry in row] for row in top_logprobs], dtype=np.int32)
+        trajectory.rollout_topk_log_probs = np.concatenate(
+            (trajectory.rollout_topk_log_probs, log_probs.reshape(topk_shape))
+        )
+        trajectory.rollout_topk_token_ids = np.concatenate(
+            (trajectory.rollout_topk_token_ids, token_ids.reshape(topk_shape))
+        )
 
     if state.routing_replay_shape is not None:
-        import numpy as np
         import pybase64
 
         num_layers, top_k = state.routing_replay_shape
