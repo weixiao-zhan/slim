@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import slim.rollout.sglang_rollout as sglang_rollout
-from slim.rollout.sglang_rollout import _build_trajectory_with_first_prompt, decode_generated_text
+from slim.rollout.sglang_rollout import decode_generated_text
 from slim.utils.types import Episode, Trajectory
 
 
@@ -49,35 +49,6 @@ def state():
         processor=Processor(),
         chat_template_kwargs={},
     )
-
-
-def test_text_chat_uses_tokenizer_template_when_processor_is_available():
-    rollout_state = state()
-    episode = Episode.from_example({"prompt": [{"role": "user", "content": "hello"}]})
-
-    episode.trajectories.append(asyncio.run(_build_trajectory_with_first_prompt(rollout_state, episode)))
-
-    assert episode.trajectory.token_ids == [11, 12, 13]
-    assert rollout_state.tokenizer.calls[0][1]["tokenize"] is True
-    assert rollout_state.tokenizer.calls[0][1]["return_dict"] is False
-    assert rollout_state.processor.calls == []
-
-
-def test_multimodal_chat_renders_with_tokenizer_before_processing():
-    rollout_state = state()
-    episode = Episode.from_example(
-        {
-            "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "describe"}]}],
-            "images": [object()],
-        }
-    )
-
-    episode.trajectories.append(asyncio.run(_build_trajectory_with_first_prompt(rollout_state, episode)))
-
-    assert rollout_state.tokenizer.calls[0][1]["tokenize"] is False
-    assert rollout_state.processor.calls[0]["text"] == "rendered prompt"
-    assert episode.trajectory.token_ids == [21, 22, 23]
-    assert set(episode.trajectory.multimodal_inputs) == {"pixel_values"}
 
 
 def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch):

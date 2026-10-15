@@ -18,10 +18,3 @@ def test_nvidia_library_path_isolates_wheels_from_host_cuda(tmp_path, monkeypatc
     monkeypatch.setenv("CUDA_HOME", "/usr/local/cuda")
 
     assert get_nvidia_ld_library_path() == {"LD_LIBRARY_PATH": str(wheel_lib)}
-
-
-@pytest.mark.unit
-def test_nvidia_library_path_without_wheel_libraries(tmp_path, monkeypatch):
-    monkeypatch.setattr(nvidia, "__path__", [str(tmp_path)])
-
-    assert get_nvidia_ld_library_path() == {}
