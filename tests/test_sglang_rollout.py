@@ -45,6 +45,7 @@ class Processor:
 
 def state():
     return SimpleNamespace(
+        args=SimpleNamespace(use_score_centering=None),
         tokenizer=Tokenizer(),
         processor=Processor(),
         chat_template_kwargs={},
@@ -79,6 +80,7 @@ def test_generate_handles_aborted_routing_replay_response(monkeypatch):
         router_policy="cache_aware",
         router_ip="127.0.0.1",
         router_port=30000,
+        use_score_centering=None,
     )
     rollout_state = SimpleNamespace(args=args, routing_replay_shape=(40, 8))
     episode = Episode.from_example({"prompt": "prompt"})

@@ -167,7 +167,7 @@ The worker owns the objects and lives for the run, and Ray keeps nested refs ali
 `AdvantageEstimator.compute_training_targets` then fetches and re-puts batches without moving any processor tensor.
 `--save-debug-rollout-data` resolves the refs inside the `dataclasses.asdict` output it saves, for both train and eval, so the live episodes keep their refs; `--load-debug-rollout-data` puts the loaded dicts back with `ray.put`.
 
-Token-aligned fields (`token_ids`, `loss_mask`, `rollout_log_probs`, `rollout_routed_experts`) stay inline, because source-token finalization and DP padding in `RolloutManager` read them.
+Token-aligned fields (`token_ids`, `loss_mask`, `rollout_log_probs`, `rollout_topk_log_probs`, `rollout_topk_token_ids`, `rollout_routed_experts`) stay inline, because source-token finalization and DP padding in `RolloutManager` read them.
 
 ### Eval
 

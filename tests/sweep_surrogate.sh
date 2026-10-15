@@ -47,8 +47,10 @@ COMBOS[ppo_clip]="1|0|--policy-surrogate ppo_clip --eps-clip 0.2 --eps-clip-high
 COMBOS[is]="1|0|--policy-surrogate is"
 COMBOS[tis]="1|0|--policy-surrogate tis --eps-clip 1 --eps-clip-high 1"
 COMBOS[cis]="1|0|--policy-surrogate cis --eps-clip 1 --eps-clip-high 1"
+COMBOS[sc]="1|0|--policy-surrogate cis --eps-clip 0 --eps-clip-high 0 --use-score-centering 32"
+COMBOS[cis_sc]="1|0|--policy-surrogate cis --eps-clip 1 --eps-clip-high 1 --use-score-centering 32"
 
-ORDER=(ppo_clip is tis cis)
+ORDER=(ppo_clip is tis cis sc cis_sc)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
 start_ray

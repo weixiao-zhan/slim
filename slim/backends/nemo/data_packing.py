@@ -22,6 +22,8 @@ SEQUENCE_FIELDS = frozenset(
         "advantages",
         "value_targets",
         "rollout_log_probs",
+        "rollout_topk_log_probs",
+        "rollout_topk_token_ids",
         "rollout_routed_experts",
         "actor_old_log_probs",
         "ref_log_probs",
@@ -114,6 +116,8 @@ def pack_sequences(
             ("advantages", torch.float32),
             ("value_targets", torch.float32),
             ("rollout_log_probs", torch.float32),
+            ("rollout_topk_log_probs", torch.float32),
+            ("rollout_topk_token_ids", torch.int32),
             ("rollout_routed_experts", torch.int32),
         ):
             value = _optional_source_field(trajectories, indices, name, dtype)

@@ -80,6 +80,9 @@ class SGLangChatModel(OpenAIModel):
         if episode.sampling_seed is not None:
             # The OpenAI endpoint spells the engine's `sampling_seed` as `seed`.
             params["seed"] = episode.sampling_seed
+        if state.args.use_score_centering is not None:
+            # Score centering reads the sampler top-K from `meta_info["output_top_logprobs"]`.
+            params["top_logprobs"] = state.args.use_score_centering
         if episode.has_multimodal:
             # Training reuses the tensors the engine ran, rather than reprocessing the media.
             params["return_processor_outputs"] = True
@@ -131,6 +134,18 @@ class SGLangChatModel(OpenAIModel):
             loss_mask=[0] * prompt_predictions + [1] * len(entries),
             rollout_log_probs=[0.0] * prompt_predictions + [entry[0] for entry in entries],
         )
+
+        if (top_k := self.state.args.use_score_centering) is not None:
+            # Inert rows for the prompt, then one row per generated token, as arrays.
+            top_logprobs = meta_info["output_top_logprobs"]
+            log_probs = np.array([[entry[0] for entry in row] for row in top_logprobs], dtype=np.float32)
+            token_ids = np.array([[entry[1] for entry in row] for row in top_logprobs], dtype=np.int32)
+            trajectory.rollout_topk_log_probs = np.concatenate(
+                (np.zeros((prompt_predictions, top_k), np.float32), log_probs.reshape(len(top_logprobs), top_k))
+            )
+            trajectory.rollout_topk_token_ids = np.concatenate(
+                (np.zeros((prompt_predictions, top_k), np.int32), token_ids.reshape(len(top_logprobs), top_k))
+            )
 
         if self.episode.has_multimodal:
             trajectory.multimodal_inputs = decode_tensor_envelopes(meta_info["processor_outputs"])

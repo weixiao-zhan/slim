@@ -20,6 +20,8 @@ LOSS_NORMALIZATION_UNITS = ("episode", "trajectory", "token")
 # Optional sequence fields a padding document must mirror when the real trajectories carry them.
 _OPTIONAL_FIELD_DTYPES = {
     "rollout_log_probs": torch.float32,
+    "rollout_topk_log_probs": torch.float32,
+    "rollout_topk_token_ids": torch.int32,
     "rollout_routed_experts": torch.int32,
 }
 

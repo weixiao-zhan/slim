@@ -175,6 +175,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         save=checkpoint_dir,
         start_rollout_id=0,
         use_rollout_routing_replay=cli.routing_replay,
+        use_score_centering=None,
         use_unbiased_kl=False,
         value_clip=0.2,
         weight_decay=0.0,

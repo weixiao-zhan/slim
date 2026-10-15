@@ -226,6 +226,7 @@ Request:
 | `image_data[0]` = `{"format": "processor_output", ...}` | processor tensors |
 | `sampling_params` | `temperature`, `max_new_tokens` from what is left of `episode.max_tokens`, and `sampling_seed` (`episode.sampling_seed`) under `--sglang-enable-deterministic-inference` |
 | `return_logprob: true` | gates `meta_info.output_token_logprobs` |
+| `top_logprobs_num` | `K` under `--use-score-centering K`; gates `meta_info.output_top_logprobs` |
 | `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; set the start to the number of tokens already recorded, so only record and append the latest user turn + model turn. Note the capture is keyed by KV-cache slot and earlier tokens' should not be re-read |
 
 Response:
@@ -233,6 +234,7 @@ Response:
 | Field | Location |
 |-------|----------|
 | output token ids and logprobs | `meta_info.output_token_logprobs[i]` = `[logprob, token_id, text]` |
+| sampler top-$K$ | `meta_info.output_top_logprobs[i]` = `K` rows of `[logprob, token_id, text]`, one entry per output token |
 | expert indices | `meta_info.routed_experts`, base64 int32, one row per prediction over `[routed_experts_start_len, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
 
 ### `/v1/chat/completions` fields
@@ -248,6 +250,7 @@ Request:
 | `stream: false` | every field below is unavailable when streaming |
 | `logprobs: true` | gates `choices[i].meta_info.output_token_logprobs` |
 | `return_prompt_token_ids: true` | gates `choices[i].prompt_token_ids` |
+| `top_logprobs` | `K` under `--use-score-centering K`; gates `choices[i].meta_info.output_top_logprobs` |
 | `return_meta_info: true` | gates `choices[i].meta_info`, and so every field in it |
 | `return_processor_outputs: true` | gates `choices[i].meta_info.processor_outputs` |
 | `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; always `0`, since one call is one whole trajectory |
@@ -259,6 +262,7 @@ Response:
 | generated message, finish reason | `choices[i].message` (`.content`, `.tool_calls`) and `choices[i].finish_reason`, OpenAI convention, consumed by the agent framework |
 | input token ids | `choices[i].prompt_token_ids` |
 | output token ids and logprobs | `choices[i].meta_info.output_token_logprobs[j]` = `[logprob, token_id, text]` |
+| sampler top-$K$ | `choices[i].meta_info.output_top_logprobs[j]` = `K` rows of `[logprob, token_id, text]` |
 | processor tensors | `choices[i].meta_info.processor_outputs` |
 | expert indices | `choices[i].meta_info.routed_experts`, base64 int32, one row per prediction over `[0, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
 

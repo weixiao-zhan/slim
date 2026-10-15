@@ -592,6 +592,17 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 help="Policy-gradient surrogate objective.",
             )
             parser.add_argument(
+                "--use-score-centering",
+                type=int,
+                default=None,
+                metavar="K",
+                help=(
+                    "Enable score centering with the sampler's top-K. The rollout records the "
+                    "sampler's top-K log probs per token, and the actor adds the centering term "
+                    "that cancels training-inference drift."
+                ),
+            )
+            parser.add_argument(
                 "--advantage-estimator",
                 type=str,
                 choices=[
@@ -1035,6 +1046,22 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
+def _validate_score_centering(args):
+    """Score centering pairs a sampler-relative per-token weight with sampler top-K log probs."""
+    if args.use_score_centering is None:
+        return
+    if args.use_score_centering < 1:
+        raise ValueError("--use-score-centering requires a positive top-K.")
+    if args.policy_surrogate == "is":
+        raise ValueError("--use-score-centering is exactly zero under --policy-surrogate is, where w(r) = r.")
+    if args.advantage_estimator == "gspo":
+        raise ValueError("--use-score-centering does not support the gspo sequence-level ratio.")
+    if args.loss_type == "custom_loss":
+        raise ValueError("--use-score-centering does not support --loss-type custom_loss.")
+    if args.old_logprob_source != "rollout":
+        raise ValueError("--use-score-centering requires --old-logprob-source rollout.")
+
+
 def slim_validate_args(args):
     if args.custom_config_path:
         with open(args.custom_config_path) as f:
@@ -1061,6 +1088,8 @@ def slim_validate_args(args):
 
     if args.mismatch_correction == "custom" and args.custom_mismatch_correction_function_path is None:
         raise ValueError("--mismatch-correction custom requires --custom-mismatch-correction-function-path.")
+
+    _validate_score_centering(args)
 
     if args.get_mismatch_metrics and args.old_logprob_source == "rollout":
         logger.info(

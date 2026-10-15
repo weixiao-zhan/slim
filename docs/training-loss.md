@@ -13,13 +13,13 @@ $\pi_\text{ref}$: frozen reference.
 
 The RL policy gradient objective writes:
 
-$$\nabla_\theta L_{\text{pg}} = \mathbb{E}_{y \sim \pi_\text{old}} \left[ \sum_{t=1}^{T} f(r_{i,t},\, \hat{A}_{i,t}) \cdot \nabla_\theta \log\pi_\theta(x_{i,t}) \right]$$
+$$\nabla_\theta L_{\text{pg}} = -\mathbb{E}_{x_i \sim \pi_\text{old}} \left[ \sum_{t=1}^{T} \hat{A}_{i,t} \cdot w(r_{i,t}, \hat{A}_{i,t}) \cdot \nabla_\theta \log\pi_\theta(x_{i,t}) \right]$$
 
 where $r_{i,t} = \pi_\theta(x_{i,t}) / \pi_\text{old}(x_{i,t})$ is the importance ratio.
 
 The two design axes are:
 1. **Advantage estimator** (`--advantage-estimator`): how $\hat{A}_{i,t}$ is computed from rewards.
-2. **Policy surrogate** (`--policy-surrogate`): the function $f(r_{i,t}, \hat{A}_{i,t})$ that combines the ratio and advantage (clipping, truncation, etc.).
+2. **Policy surrogate** (`--policy-surrogate`): the surrogate $J(r_{i,t}, \hat{A}_{i,t})$ that combines the ratio and advantage (clipping, truncation, etc.), and its weight $w(r_{i,t}, \hat{A}_{i,t})$.
 
 ## Advantage Estimators
 
@@ -72,34 +72,95 @@ The effect is that the surrogate's clipping operates on the overall sequence-lev
 
 ## Policy Surrogates
 
-`--policy-surrogate` selects the function $f(r_{i,t}, A_{i,t})$ from the overall objective.
+`--policy-surrogate` selects the surrogate $J(r, A)$.
+The naive loss $-J(r, A)$ sends the gradient through $r$.
+At the prefix $x_{i,<t}$, write $p = \pi_\theta$, $x = x_{i,t}$ for the sampled token, and $s_x = \nabla_\theta \log p_x$ for its score.
+The actor uses a detached loss with the same gradient, because $\nabla r = r s_x$:
+
+$$L_t = -A_t \text{sg}[w_x] \log p_x$$
+
+$$A w = r \frac{\partial J}{\partial r}$$
+
+$w_x = w(r, A_t)$ is the detached weight, so the gradient is $-A_t w_x s_x$.
+`pg_loss` logs this form, so its value is not $-J$.
+A token in the clipped region of `ppo_clip` or `tis` has $\partial J / \partial r = 0$, so its weight is $0$.
+$\text{clip}(r)$ is short for $\text{clip}(r, 1-\varepsilon, 1+\varepsilon_\text{high})$:
+
+| Surrogate | $J(r, A)$ | $w(r, A)$ |
+|---|---|---|
+| `ppo_clip`, $A > 0$ | $\min(rA, \text{clip}(r) A)$ | $r \cdot \mathbf{1}[r \le 1+\varepsilon_\text{high}]$ |
+| `ppo_clip`, $A < 0$ | $\min(rA, \text{clip}(r) A)$ | $r \cdot \mathbf{1}[r \ge 1-\varepsilon]$, and also $r \le \varepsilon_c$ under dual-clip |
+| `is` | $rA$ | $r$ |
+| `tis` | $\text{clip}(r) A$ | $r \cdot \mathbf{1}[1-\varepsilon \le r \le 1+\varepsilon_\text{high}]$ |
+| `cis` | — | $\text{clip}(r)$ |
+
+Under `gspo`, $r$ is the sequence-level ratio, and the sequence mean of $\log\pi_\theta$ replaces $\log p_x$.
 
 ### `ppo_clip` (default)
 
-$$f(r_{i,t}, A_{i,t}) = \max\big(-r_{i,t} \cdot A_{i,t},\ -\text{clip}(r_{i,t},\ 1-\varepsilon,\ 1+\varepsilon_\text{high}) \cdot A_{i,t}\big)$$
-
 Set $\varepsilon$ with `--eps-clip` (default 0.2) and $\varepsilon_\text{high}$ with `--eps-clip-high` (defaults to `--eps-clip`).
-Optional dual-clip via `--eps-clip-c` (must be > 1.0): when $A_{i,t} < 0$, an additional lower bound $-\varepsilon_c \cdot A_{i,t}$ is applied.
+Optional dual-clip via `--eps-clip-c` (must be > 1.0): when $A < 0$, $J$ becomes $\max(J, \varepsilon_c A)$.
 
 ### `is`
 
-Plain importance sampling:
-
-$$f(r_{i,t}, A_{i,t}) = -r_{i,t} \cdot A_{i,t}$$
+Plain importance sampling.
 
 ### `tis`
 
-Truncated importance sampling: the ratio is clamped before multiplication:
-
-$$f(r_{i,t}, A_{i,t}) = -\text{clip}(r_{i,t},\ 1-\varepsilon,\ 1+\varepsilon_\text{high}) \cdot A_{i,t}$$
+Truncated importance sampling: the ratio is clamped before multiplication.
 
 ### `cis`
 
 Clipped importance sampling.
-When $r_{i,t}$ is in the clipped region of `ppo_clip` and `tis`, the gradient is exactly zero, silently drop the tokens.
-`cis` avoids this by detaching the clamped ratio so gradient flows through $\log\pi_\theta$ rather than through $r$:
+When $r$ is in the clipped region of `ppo_clip` and `tis`, the weight is exactly zero, so these surrogates silently drop the token.
+`cis` clamps the weight itself, so the token keeps a gradient through $\log\pi_\theta$ with a bounded weight.
+It has no standard $J$, and $w$ defines it.
 
-$$f(r_{i,t}, A_{i,t}) = -\text{sg}\big[\text{clip}(r_{i,t},\ 1-\varepsilon,\ 1+\varepsilon_\text{high})\big] \cdot A_{i,t} \cdot \log\pi_\theta(x_{i,t})$$
+`--eps-clip 0 --eps-clip-high 0` pins the weight to $1$, which is plain REINFORCE, $-A_t \log p_x$, with no token counted as clipped.
+
+## Score Centering
+
+`--use-score-centering K` enables score centering ([Marek & Ryabinin, arXiv 2609.20807](https://arxiv.org/abs/2609.20807)) with the sampler's top-$K$.
+Write $q = \pi_\text{rollout}$ at the same prefix, and $s_v = \nabla_\theta \log p_v$ for each token $v$ in the vocabulary.
+The expected per-token update splits into a drift term and a signal term, with $\bar s = \sum_v q_v s_v$:
+
+$$\mathbb{E}_q[A s_x] = \mathbb{E}_q[A] \bar s + \mathrm{Cov}_q(A, s_x)$$
+
+On-policy $\bar s = 0$.
+Under rollout-trainer mismatch $\bar s \ne 0$, and the drift term distills $p$ toward $q$ whatever the rewards are.
+Group centering does not remove it, because the advantage mean at one prefix is not zero.
+Score centering subtracts the sampler-expected weighted score.
+It adds one term to the [detached loss](#policy-surrogates), so $w_x s_x$ becomes $w_x s_x - \mathbb{E}_{\hat q}[w s]$, and $A_t$ is a fixed value:
+
+$$L_t = -A_t \text{sg}[w_x] \log p_x + A_t \sum_v \text{sg}[\hat q_v w_v] \log p_v$$
+
+$w_v = w(p_v / q_v, A_t)$ is the surrogate weight, and it must be relative to the sampler.
+The rollout records the sampler's top-$K$ tokens $H$, and the tail takes the trainer's shape, $\hat q_v = \rho p_v$ for $v \notin H$:
+
+$$\rho = \frac{1 - \sum_H q_v}{1 - \sum_H p_v}$$
+
+A tail token has the ratio $1/\rho$, so its weight is the constant $w(1/\rho, A_t)$.
+Because $\sum_v p_v s_v = 0$, the tail folds into the top-$K$, with $\alpha = \rho w(1/\rho, A_t)$:
+
+$$L_t = \underbrace{-A_t \text{sg}[w_x] \log p_x}_{\text{surrogate}} + A_t \sum_{v \in H} \text{sg}[q_v w_v - \alpha p_v] \log p_v$$
+
+| Setting | $w(r)$ | In the paper | Use |
+|---|---|---|---|
+| `cis --eps-clip 0 --eps-clip-high 0` | $1$ | SC | Score centering alone, for a mismatch that does not grow within a rollout, such as a quantized sampler. |
+| e.g. `cis --eps-clip 1 --eps-clip-high 1` | $\min(r, 2)$ | TIS + SC | Score centering with truncated IS, for staleness from several optimizer steps per rollout. |
+| e.g. `tis --eps-clip 0.5 --eps-clip-high 4` | $r \cdot \mathbf{1}[0.5 \le r \le 5]$ | MIS + SC | Score centering with masked IS, for staleness or weight noise. |
+| `ppo_clip` | $r$ where the token is not clipped for the sign of $A_t$, else $0$ | Not tested | |
+
+`is` has $w(r) = r$, which makes the correction exactly zero, so `--use-score-centering` rejects it.
+`gspo` replaces the per-token ratio with one per sequence, so it has no weight per top-$K$ token.
+`--use-score-centering` also requires `--old-logprob-source rollout`, so that the ratio is $p / q$.
+
+The actor reads $\log p$ at the label and at the top-$K$ ids in one fused pass over the logits, without a `[seq_len, vocab]` log-softmax.
+The top-$K$ travels as `rollout_topk_log_probs` and `rollout_topk_token_ids`, each `[T, K]` (see [Data Layout](data-layout.md)), so the cost is $8K$ bytes per token; $K = 32$ is 256 bytes.
+SGLang reports $q$ after temperature scaling and before top-$p$ and top-$k$ truncation, so keep top-$p = 1$ and top-$k = -1$ for $q$ to be the sampling distribution.
+
+`train/actor/score_centering/topk_mass` logs $\sum_H q_v$, the share of sampler mass that the top-$K$ covers, and `train/actor/score_centering/rho` logs $\rho$.
+The paper reproduces its setup with `--loss-normalization-unit token` and `--disable-group-advantage-std-normalization`.
 
 ## Mismatch Correction
 
@@ -174,6 +235,7 @@ Choosing `trajectory` weights a 50-call attempt 50 times as heavily as a single-
 |------|---------|-------------|
 | `--advantage-estimator` | `grpo` | `grpo`, `gspo`, `ppo_gae` |
 | `--policy-surrogate` | `ppo_clip` | `ppo_clip`, `is`, `tis`, `cis` |
+| `--use-score-centering` | `None` | Top-$K$ size; enables score centering |
 | `--eps-clip` | `0.2` | PPO clip lower bound |
 | `--eps-clip-high` | `None` | PPO clip upper bound (defaults to `--eps-clip`) |
 | `--eps-clip-c` | `None` | Dual-clip lower bound (> 1.0) |
