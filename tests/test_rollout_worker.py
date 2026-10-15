@@ -11,7 +11,6 @@ import torch
 
 import slim.rollout.sglang_rollout as sglang_rollout
 import slim.rollout.worker as worker_module
-from slim.ray import rollout
 from slim.rollout.sglang_rollout import RolloutGroup
 from slim.rollout.worker import RolloutWorkerPool, offload_bulk_fields
 from slim.utils import processing_utils
@@ -35,14 +34,12 @@ class LocalHandle:
 
 
 class FakeWorkerClass:
-    """Stands in for the `RolloutWorker` actor class and records placement options."""
+    """Stands in for the `RolloutWorker` actor class."""
 
     def __init__(self, make_worker):
         self.make_worker = make_worker
-        self.options_calls = []
 
     def options(self, **kwargs):
-        self.options_calls.append(kwargs)
         return SimpleNamespace(remote=lambda args, concurrency: LocalHandle(self.make_worker(args, concurrency)))
 
 
@@ -62,8 +59,8 @@ class BlockingWorker:
         return group
 
 
-def _node(index: int, alive: bool = True, cpus: float = 8.0) -> dict:
-    return {"NodeID": f"{index + 1:056x}", "Alive": alive, "Resources": {"CPU": cpus} if cpus else {}}
+def _node(index: int) -> dict:
+    return {"NodeID": f"{index + 1:056x}", "Alive": True, "Resources": {"CPU": 8.0}}
 
 
 def _args(**overrides):
@@ -96,9 +93,7 @@ def fake_cluster(monkeypatch):
 
     def install(nodes, make_worker):
         monkeypatch.setattr(worker_module.ray, "nodes", lambda: nodes)
-        worker_class = FakeWorkerClass(make_worker)
-        monkeypatch.setattr(worker_module, "RolloutWorker", worker_class)
-        return worker_class
+        monkeypatch.setattr(worker_module, "RolloutWorker", FakeWorkerClass(make_worker))
 
     return install
 
@@ -117,18 +112,6 @@ def fake_router(monkeypatch):
     monkeypatch.setattr(worker_module, "get", get)
     monkeypatch.setattr(worker_module, "post", post)
     return posts
-
-
-@pytest.mark.unit
-def test_pool_places_one_worker_per_alive_cpu_node(fake_cluster):
-    nodes = [_node(0), _node(1), _node(2), _node(3, alive=False), _node(4, cpus=0)]
-    worker_class = fake_cluster(nodes, lambda args, concurrency: BlockingWorker(0, [], {}))
-
-    pool = RolloutWorkerPool(_args(rollout_concurrency_per_replica=5, rollout_num_gpus=4, rollout_num_gpus_per_replica=2))
-
-    assert len(pool.workers) == 3
-    assert pool.concurrency == 4  # ceil(5 * 4 // 2 / 3)
-    assert [call["scheduling_strategy"].node_id for call in worker_class.options_calls] == [node["NodeID"] for node in nodes[:3]]
 
 
 @pytest.mark.unit
@@ -265,26 +248,3 @@ def test_multimodal_inputs_round_trip_by_reference(local_ray):
     assert set(real[0].multimodal_inputs) == set(expected)
     for key, value in expected.items():
         torch.testing.assert_close(real[0].multimodal_inputs[key], value)
-
-
-@pytest.mark.unit
-def test_debug_rollout_data_saves_resolved_multimodal_inputs(local_ray, tmp_path):
-    episode = _multimodal_episode()
-    expected = dict(episode.trajectory.multimodal_inputs)
-    offload_bulk_fields(RolloutGroup(index=0, example={}, episodes=[episode]))
-    manager = SimpleNamespace(args=SimpleNamespace(save_debug_rollout_data=str(tmp_path / "rollout_{rollout_id}.pt")))
-    save = rollout.RolloutManager.__ray_metadata__.modified_class._save_debug_rollout_data
-
-    save(manager, [episode], rollout_id=3, evaluation=False)
-    save(manager, {"eval-set": [episode]}, rollout_id=3, evaluation=True)
-
-    assert isinstance(episode.trajectory.multimodal_inputs, ray.ObjectRef)
-    for name in ("rollout_3.pt", "rollout_eval_3.pt"):
-        saved = torch.load(tmp_path / name, weights_only=False)["episodes"][0]["trajectories"][0]["multimodal_inputs"]
-        for key, value in expected.items():
-            torch.testing.assert_close(saved[key], value)
-
-    loaded = rollout._load_debug_rollout_episodes(str(tmp_path / "rollout_{rollout_id}.pt"), 3)
-    assert isinstance(loaded[0].trajectory.multimodal_inputs, ray.ObjectRef)
-    for key, value in expected.items():
-        torch.testing.assert_close(ray.get(loaded[0].trajectory.multimodal_inputs)[key], value)

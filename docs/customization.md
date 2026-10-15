@@ -162,13 +162,11 @@ See [Endpoints and Tokenization Ownership](sglang-config.md#endpoints-and-tokeni
 
 ## Testing Custom Hooks
 
-Contract tests in `tests/plugin_contracts/` validate hook signatures and return types without GPU:
+Contract tests in `tests/plugin_contracts/` check, without GPU, how `generate_and_rm` dispatches to a custom generate function: a per-episode function takes precedence over `--custom-generate-function-path`, `evaluation` reaches functions that accept it, and every trajectory is decoded from its own ids:
 
 ```bash
 pytest tests/plugin_contracts/ -v
 ```
-
-Override the implementation under test via env vars (e.g. `SLIME_CONTRACT_CUSTOM_GENERATE_FUNCTION_PATH=my_module.fn`) or CLI args when running test files directly.
 
 CI label: `run-ci-plugin-contracts`.
 

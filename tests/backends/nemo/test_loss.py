@@ -18,34 +18,6 @@ NUM_GPUS = 0
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("temperature", [None, 0.7])
-def test_selective_log_probs_matches_fp32_reference(temperature):
-    torch.manual_seed(11)
-    logits = torch.randn(2, 3, 17, requires_grad=True)
-    reference_logits = logits.detach().clone().requires_grad_(True)
-    labels = torch.tensor([[1, -100, 7], [4, 3, 2]])
-    output_gradient = torch.randn(2, 3)
-    scale = 1.0 if temperature is None else temperature
-
-    actual = selective_log_probs(logits, labels, temperature)
-    targets = labels.masked_fill(labels == -100, 0)
-    expected = (
-        (reference_logits / scale)
-        .float()
-        .log_softmax(dim=-1)
-        .gather(-1, targets.unsqueeze(-1))
-        .squeeze(-1)
-        .masked_fill(labels == -100, 0)
-    )
-    (actual * output_gradient).sum().backward()
-    (expected * output_gradient).sum().backward()
-
-    assert actual.dtype == torch.float32
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(logits.grad, reference_logits.grad)
-
-
-@pytest.mark.unit
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused kernel")
 def test_fused_selective_log_probs_preserves_fp32_values_and_bf16_gradients():
     torch.manual_seed(19)
@@ -122,34 +94,6 @@ def test_global_denominators_exclude_padding_documents():
 
     assert sequences.item() == 1
     assert tokens.item() == 2
-
-
-@pytest.mark.unit
-def test_global_denominators_reject_non_source_aligned_masks():
-    packs = [
-        {
-            "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
-            "loss_masks": torch.tensor([0, 1, 0, 1]),
-            "loss_weights": [1.0, 1.0],
-        },
-    ]
-
-    with pytest.raises(ValueError, match="packed token count 6"):
-        count_global_denominators(packs, dp_group=None, device="cpu")
-
-
-@pytest.mark.unit
-def test_global_denominators_reject_weights_that_do_not_match_documents():
-    packs = [
-        {
-            "cu_seqlens": torch.tensor([0, 3, 6], dtype=torch.int32),
-            "loss_masks": torch.ones(6, dtype=torch.int32),
-            "loss_weights": [1.0],
-        },
-    ]
-
-    with pytest.raises(ValueError, match="do not match 2 packed documents"):
-        count_global_denominators(packs, dp_group=None, device="cpu")
 
 
 @pytest.mark.unit

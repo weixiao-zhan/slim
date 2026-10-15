@@ -1,7 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import io
 import logging
 
 import pybase64
@@ -27,16 +26,6 @@ def load_processor(name_or_path: str, **kwargs):
         proc = None
 
     return proc
-
-
-def pil_to_data_url(image) -> str:
-    """Encode a PIL image as a PNG data URL."""
-    buffer = io.BytesIO()
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image.save(buffer, format="PNG")
-    image_base64 = pybase64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{image_base64}"
 
 
 def encode_tensor_to_b64_envelope(value) -> dict:

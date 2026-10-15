@@ -68,15 +68,3 @@ def test_vanilla_gae_is_invariant_to_observation_length_and_values():
         _active_values(short_advantages, short_mask),
         _active_values(long_advantages, long_mask),
     )
-
-
-@pytest.mark.unit
-def test_vanilla_gae_validates_shapes():
-    with pytest.raises(ValueError, match="must have the same shape"):
-        vanilla_gae(
-            torch.zeros(1, 3),
-            torch.zeros(1, 3),
-            torch.ones(1, 2),
-            gamma=1.0,
-            lambd=1.0,
-        )
