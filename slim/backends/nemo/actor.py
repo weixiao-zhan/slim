@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import random
@@ -83,8 +84,11 @@ class ActorNeMoTrainer(NeMoTrainer):
         clear_memory()
         dist.barrier(group=get_gloo_group())
 
+        # The frozen reference has no optimizer, so no master weights: it keeps the checkpoint's dtype.
+        ref_args = copy.copy(self.args)
+        ref_args.master_weight_dtype = "auto"
         ref_model = build_model(
-            self.args,
+            ref_args,
             checkpoint_path,
             self.distributed_setup,
             routing_replay=False,

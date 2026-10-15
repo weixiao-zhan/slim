@@ -12,6 +12,7 @@ import ray
 import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
 from sglang.srt.utils import MultiprocessingSerializer
@@ -30,12 +31,38 @@ def _full_tensor(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
     return tensor
 
 
+def _compute_dtypes(model: torch.nn.Module) -> dict[str, torch.dtype]:
+    """The dtype FSDP2 gathers each parameter in for the forward, by parameter name.
+
+    A parameter computes in the policy of its nearest FSDP unit: bf16 for the bulk of the
+    fp32 master weights, fp32 for units that must compute in fp32. FSDP2 keeps the policy in
+    its private state, which AutoModel reads the same way.
+    """
+    unit_dtypes = {
+        prefix: module._get_fsdp_state()._mp_policy.param_dtype
+        for prefix, module in model.named_modules()
+        if isinstance(module, FSDPModule)
+    }
+    dtypes = {}
+    # Tied weights, such as `lm_head` sharing the embedding, appear under every name in the state dict.
+    for name, _ in model.named_parameters(remove_duplicate=False):
+        parts = name.split(".")
+        for depth in range(len(parts) - 1, -1, -1):
+            prefix = ".".join(parts[:depth])
+            if prefix in unit_dtypes:
+                if unit_dtypes[prefix] is not None:
+                    dtypes[name] = unit_dtypes[prefix]
+                break
+    return dtypes
+
+
 class UpdateWeight(abc.ABC):
     def __init__(self, args: Namespace, model: torch.nn.Module, quantizer=None) -> None:
         self.args = args
         self.model = model
         self.quantizer = quantizer
         self.state_dict_adapter = model.state_dict_adapter
+        self.compute_dtypes = _compute_dtypes(model)
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -54,6 +81,9 @@ class UpdateWeight(abc.ABC):
             if name.endswith("_extra_state"):
                 continue
 
+            # The engine runs what the trainer computes with, gathered in that dtype.
+            if name in self.compute_dtypes:
+                state_tensor = state_tensor.to(self.compute_dtypes[name])
             tensor = _full_tensor(state_tensor, device)
             converted = self.state_dict_adapter.convert_single_tensor_to_hf(
                 name,

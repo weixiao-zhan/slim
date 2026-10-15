@@ -87,6 +87,8 @@ def build_model(
 
     register_qwen3_5_moe_parallel_strategy()
     kwargs = {
+        # AdamW keeps no master copy, so the stored weights are the master weights.
+        "torch_dtype": torch.float32 if args.master_weight_dtype == "fp32" else "auto",
         "distributed_setup": distributed_setup,
         "backend": build_backend_config(args),
         "attn_implementation": "sdpa",
