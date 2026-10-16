@@ -141,11 +141,12 @@ def _score_centering_gradient(
     logits, label, topk_ids, sampler_log_probs, advantage, eps_clip=0.0, policy_surrogate="cis"
 ):
     """Gradient of the score-centered policy loss of one token with respect to its logits."""
-    logits = logits.detach().clone().requires_grad_(True)
-    columns = torch.cat((torch.tensor([label]), topk_ids))
-    all_log_probs = selective_log_probs(logits.unsqueeze(0), columns.unsqueeze(0))[0]
+    logits = logits.detach().cuda().requires_grad_(True)
+    topk_ids, sampler_log_probs = topk_ids.cuda(), sampler_log_probs.cuda()
+    scored_token_ids = torch.cat((torch.tensor([label], device="cuda"), topk_ids))
+    all_log_probs = selective_log_probs(logits.unsqueeze(0), scored_token_ids.unsqueeze(0))[0]
     log_prob, topk_log_probs = all_log_probs[0], all_log_probs[1:]
-    advantage = torch.tensor(advantage)
+    advantage = torch.tensor(advantage, device="cuda")
     surrogate_weight = _surrogate_weight(policy_surrogate, eps_clip, eps_clip)
     weight, _ = surrogate_weight((log_prob - sampler_log_probs[label]).exp(), advantage)
     policy_loss = -advantage * weight * log_prob
@@ -156,10 +157,11 @@ def _score_centering_gradient(
         surrogate_weight,
     )
     (policy_loss + values).backward()
-    return logits.grad, topk_mass, rho
+    return logits.grad.cpu(), topk_mass.cpu(), rho.cpu()
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused kernel")
 def test_full_vocabulary_score_centering_steps_toward_the_sampled_token_from_the_sampler():
     torch.manual_seed(29)
     vocab = 11
@@ -177,6 +179,7 @@ def test_full_vocabulary_score_centering_steps_toward_the_sampled_token_from_the
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused kernel")
 @pytest.mark.parametrize(
     ("policy_surrogate", "eps_clip", "advantage"),
     [
@@ -279,6 +282,7 @@ def test_score_centering_stays_finite_when_the_sampler_reports_an_underflowed_pr
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the fused kernel")
 def test_policy_loss_adds_score_centering_and_reports_topk_statistics():
     torch.manual_seed(43)
     vocab = 7
@@ -297,34 +301,34 @@ def test_policy_loss_adds_score_centering_and_reports_topk_statistics():
         kl_loss_coef=0.0,
     )
     trainer.cp_group = None
-    logits = torch.randn(1, 3, vocab, requires_grad=True)
-    sampler_log_probs = torch.randn(1, 3, vocab).log_softmax(dim=-1)
-    labels = torch.tensor([[2, 5, -100]])
+    logits = torch.randn(1, 3, vocab, device="cuda", requires_grad=True)
+    sampler_log_probs = torch.randn(1, 3, vocab, device="cuda").log_softmax(dim=-1)
+    labels = torch.tensor([[2, 5, -100]], device="cuda")
     fields = {
         "labels": labels,
-        "loss_masks": torch.tensor([[1.0, 1.0, 0.0]]),
-        "document_ids": torch.ones(1, 3, dtype=torch.long),
+        "loss_masks": torch.tensor([[1.0, 1.0, 0.0]], device="cuda"),
+        "document_ids": torch.ones(1, 3, dtype=torch.long, device="cuda"),
         "rollout_log_probs": sampler_log_probs.gather(-1, labels.clamp_min(0).unsqueeze(-1)).squeeze(-1),
         "rollout_topk_log_probs": sampler_log_probs,
-        "rollout_topk_token_ids": torch.arange(vocab).expand(1, 3, vocab),
-        "advantages": torch.tensor([[0.5, -1.0, 0.0]]),
+        "rollout_topk_token_ids": torch.arange(vocab, device="cuda").expand(1, 3, vocab),
+        "advantages": torch.tensor([[0.5, -1.0, 0.0]], device="cuda"),
     }
 
     loss, metrics = trainer._policy_loss(
         logits,
         fields,
         num_documents=1,
-        global_sequences=torch.tensor(1.0),
-        global_tokens=torch.tensor(2.0),
-        loss_weights=torch.ones(1),
+        global_sequences=torch.tensor(1.0, device="cuda"),
+        global_tokens=torch.tensor(2.0, device="cuda"),
+        loss_weights=torch.ones(1, device="cuda"),
     )
     loss.backward()
 
     sampled = torch.nn.functional.one_hot(labels.clamp_min(0), vocab)
     expected = -fields["advantages"].unsqueeze(-1) * (sampled - sampler_log_probs.exp()) / 2
     torch.testing.assert_close(logits.grad, expected * fields["loss_masks"].unsqueeze(-1))
-    torch.testing.assert_close(metrics["score_centering/topk_mass"], torch.tensor(1.0))
-    torch.testing.assert_close(metrics["score_centering/rho"], torch.tensor(1.0))
+    torch.testing.assert_close(metrics["score_centering/topk_mass"], torch.tensor(1.0, device="cuda"))
+    torch.testing.assert_close(metrics["score_centering/rho"], torch.tensor(1.0, device="cuda"))
 
 
 @pytest.mark.unit

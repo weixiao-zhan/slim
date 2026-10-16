@@ -167,17 +167,11 @@ def selective_log_probs(
     if logits.shape[:-1] != labels.shape[:-1]:
         raise ValueError(f"logits and labels shapes do not align: {logits.shape} and {labels.shape}")
 
-    if logits.is_cuda:
-        flat_logits = logits.reshape(-1, logits.shape[-1])
-        if not flat_logits.is_contiguous():
-            flat_logits = flat_logits.contiguous()
-        flat_labels = labels.reshape(-1, labels.shape[-1]).long().contiguous()
-        selected = _SelectiveLogProbs.apply(flat_logits, flat_labels, temperature).reshape(labels.shape)
-    else:
-        logits = logits / temperature
-        valid = labels[..., :1] != -100
-        targets = labels.masked_fill(~valid, 0).long()
-        selected = logits.float().log_softmax(dim=-1).gather(-1, targets).masked_fill(~valid, 0)
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    if not flat_logits.is_contiguous():
+        flat_logits = flat_logits.contiguous()
+    flat_labels = labels.reshape(-1, labels.shape[-1]).long().contiguous()
+    selected = _SelectiveLogProbs.apply(flat_logits, flat_labels, temperature).reshape(labels.shape)
     return selected.squeeze(-1) if single_label else selected
 
 
