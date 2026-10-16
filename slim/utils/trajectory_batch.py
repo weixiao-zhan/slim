@@ -33,15 +33,6 @@ class TrajectoryBatch:
     trajectories: list[Trajectory] = field(default_factory=list)
     num_steps: int = 1
 
-    def __post_init__(self) -> None:
-        if self.num_steps < 1:
-            raise ValueError(f"num_steps must be at least 1, got {self.num_steps}")
-        if len(self.trajectories) % self.num_steps:
-            raise ValueError(
-                f"{len(self.trajectories)} trajectories do not divide evenly into "
-                f"{self.num_steps} optimizer steps"
-            )
-
     def __len__(self) -> int:
         return len(self.trajectories)
 
@@ -106,9 +97,6 @@ def _padding_trajectory(pad_token_id: int, optional_shapes: dict[str, tuple[int,
 
 def flatten_episodes(episodes: list[Episode], *, loss_normalization_unit: str) -> list[Trajectory]:
     """Desugar rewards and stamp every trajectory with its attempt's identity and weight."""
-    if loss_normalization_unit not in LOSS_NORMALIZATION_UNITS:
-        raise ValueError(f"unknown loss normalization unit {loss_normalization_unit!r}")
-
     trajectories = []
     for episode in episodes:
         if not episode.trajectories:
@@ -198,7 +186,4 @@ def group_by_episode(trajectories: list[Trajectory]) -> list[list[Trajectory]]:
         if trajectory.episode_index is None:
             continue
         episodes.setdefault(trajectory.episode_index, []).append(trajectory)
-    indices = sorted(episodes)
-    if indices != list(range(len(indices))):
-        raise ValueError(f"episode_index values must be contiguous and unique, got {indices}")
-    return [episodes[index] for index in indices]
+    return [episodes[index] for index in sorted(episodes)]

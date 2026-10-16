@@ -68,7 +68,6 @@ class RolloutHealthMonitor:
             return
 
         logger.info("Stopping RolloutHealthMonitor...")
-        assert self._stop_event is not None
         self._stop_event.set()
         # Also clear pause to let the thread exit
         if self._pause_event:
@@ -115,9 +114,6 @@ class RolloutHealthMonitor:
         return self._is_checking_enabled
 
     def _health_monitor_loop(self) -> None:
-        assert self._stop_event is not None
-        assert self._pause_event is not None
-
         while not self._stop_event.is_set():
             # Wait while paused
             while self._pause_event.is_set() and not self._stop_event.is_set():

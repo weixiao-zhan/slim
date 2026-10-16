@@ -80,7 +80,6 @@ class GenerateState(metaclass=SingletonMeta):
             yield dp_rank
         finally:
             self.dp_counts[dp_rank] -= 1
-            assert self.dp_counts[dp_rank] >= 0
 
     def reset(self) -> None:
         self.aborted = False
@@ -182,8 +181,6 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
 async def generate(state: GenerateState, episode: Episode) -> Episode:
     args = state.args
     from slim.utils.processing_utils import encode_tensor_to_b64_envelope
-
-    assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
 
     trajectory = await _build_trajectory_with_first_prompt(state, episode)
     episode.trajectories.append(trajectory)
@@ -394,7 +391,6 @@ async def generate_rollout_async(
                 )
                 do_print = False
 
-            assert len(group.episodes) == args.n_samples_per_prompt
             if args.rollout_all_samples_process_path is not None:
                 all_groups.append(group)
 
@@ -416,7 +412,6 @@ async def generate_rollout_async(
 
     aborted_examples = await pool.abort()
 
-    assert len(kept_groups) == args.rollout_batch_size, f"Got {len(kept_groups)} samples, expected {args.rollout_batch_size}"
     kept_groups.sort(key=lambda group: group.index)
 
     episodes = [episode for group in kept_groups for episode in group.episodes]

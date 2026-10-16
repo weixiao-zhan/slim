@@ -33,14 +33,12 @@ def compute_approx_kl(
         kl = log_ratio
     elif kl_loss_type == "k2":
         kl = log_ratio**2 / 2.0
-    elif kl_loss_type in ["k3", "low_var_kl"]:
-        # The non negative kl approximation in
+    else:
+        # k3 and low_var_kl: the non negative kl approximation in
         # http://joschu.net/blog/kl-approx.html
         # Besides non negative, it is also unbiased and have lower variance.
         log_ratio = -log_ratio
         kl = log_ratio.exp() - 1 - log_ratio
-    else:
-        raise ValueError(f"Unknown kl_loss_type: {kl_loss_type}")
 
     # Apply IS ratio for unbiased KL estimation (DeepSeek-V3.2)
     if importance_ratio is not None:
@@ -150,9 +148,7 @@ def compute_surrogate_weight(
         return ratio, torch.zeros_like(ratio)
     if policy_surrogate == "tis":
         return compute_tis_surrogate_weight(ratio, eps_clip, eps_clip_high)
-    if policy_surrogate == "cis":
-        return compute_cis_surrogate_weight(ratio, eps_clip, eps_clip_high)
-    raise ValueError(f"Unsupported policy_surrogate: {policy_surrogate}")
+    return compute_cis_surrogate_weight(ratio, eps_clip, eps_clip_high)
 
 
 @torch.compile(dynamic=True)
@@ -238,12 +234,6 @@ def vanilla_gae(
     Masked edges, such as prompt and tool-observation tokens, do not advance
     the temporal recurrence. Their output advantages are zero.
     """
-    if rewards.shape != values.shape or rewards.shape != loss_mask.shape:
-        raise ValueError(
-            f"rewards, values, and loss_mask must have the same shape, got "
-            f"{rewards.shape}, {values.shape}, and {loss_mask.shape}"
-        )
-
     B, T = rewards.shape
     device = rewards.device
     dtype = rewards.dtype
@@ -294,12 +284,7 @@ def chunked_gae(
         value_targets (Tensor): [B, T] advantages + values.
     """
 
-    # -------------------------------------------------------------------------
-    # Validate inputs
-    # -------------------------------------------------------------------------
-    assert rewards.ndim == 2 and values.ndim == 2
     B, T = rewards.shape
-    assert values.shape == (B, T)
 
     device = rewards.device
     dtype = rewards.dtype

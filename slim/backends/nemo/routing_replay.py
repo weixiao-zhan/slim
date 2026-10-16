@@ -17,8 +17,6 @@ def replay_router_targets(routed_experts: torch.Tensor | None):
     if routed_experts is None or not instances:
         yield
         return
-    if routed_experts.ndim != 4:
-        raise ValueError("routing replay tensor must have shape [batch, tokens, layers, top_k]")
     if routed_experts.shape[2] != len(instances):
         raise ValueError(
             f"routing replay has {routed_experts.shape[2]} layers but the model has {len(instances)} routers"

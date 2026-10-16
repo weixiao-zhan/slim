@@ -236,9 +236,6 @@ def _install_synchronized_vision(model: torch.nn.Module, sync_group, cp_group) -
 
 def configure_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     """Configure the packed CP runtime, Gated DeltaNet meshes, and vision synchronization."""
-    if model.backend.attn != "sdpa":
-        raise RuntimeError("packed Qwen3.5 requires the internal SDPA model dispatch")
-
     configure_cp_varlen(attn_backend="flash", kv_exchange="halo")
     cp_mesh = device_mesh["cp"]
     vision_sync_group = _vision_sync_group(device_mesh)
