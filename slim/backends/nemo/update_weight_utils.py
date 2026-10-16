@@ -12,6 +12,7 @@ import ray
 import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import _CHECKPOINT_PREFIX
 from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 
@@ -36,7 +37,8 @@ def _compute_dtypes(model: torch.nn.Module) -> dict[str, torch.dtype]:
 
     A parameter computes in the policy of its nearest FSDP unit: bf16 for the bulk of the
     fp32 master weights, fp32 for units that must compute in fp32. FSDP2 keeps the policy in
-    its private state, which AutoModel reads the same way.
+    its private state, which AutoModel reads the same way. The names are the state dict's,
+    which drop the activation checkpoint wrapper that `named_parameters` keeps.
     """
     unit_dtypes = {
         prefix: module._get_fsdp_state()._mp_policy.param_dtype
@@ -51,7 +53,7 @@ def _compute_dtypes(model: torch.nn.Module) -> dict[str, torch.dtype]:
             prefix = ".".join(parts[:depth])
             if prefix in unit_dtypes:
                 if unit_dtypes[prefix] is not None:
-                    dtypes[name] = unit_dtypes[prefix]
+                    dtypes[name.replace(_CHECKPOINT_PREFIX, "")] = unit_dtypes[prefix]
                 break
     return dtypes
 
