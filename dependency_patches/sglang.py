@@ -51,7 +51,7 @@ def install_triton_configs(sglang_dir: Path) -> None:
     )
     _install_configs(
         repo_root / "tools" / "triton_fp8_configs",
-        sglang_dir / "srt" / "layers" / "quantization" / "configs",
+        sglang_dir / "kernels" / "ops" / "quantization" / "configs",
         "Triton FP8 GEMM",
     )
 
