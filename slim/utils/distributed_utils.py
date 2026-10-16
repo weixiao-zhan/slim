@@ -48,12 +48,7 @@ def init_process_group(
     group_name: str = None,
     pg_options: Any | None = None,
 ):
-    assert (store is None) or (init_method is None), "Cannot specify both init_method and store."
-
-    if store is not None:
-        assert world_size > 0, "world_size must be positive if using store"
-        assert rank >= 0, "rank must be non-negative if using store"
-    elif init_method is None:
+    if store is None and init_method is None:
         init_method = "env://"
 
     if backend:

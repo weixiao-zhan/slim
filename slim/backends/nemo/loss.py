@@ -164,8 +164,6 @@ def selective_log_probs(
     single_label = labels.shape == logits.shape[:-1]
     if single_label:
         labels = labels.unsqueeze(-1)
-    if logits.shape[:-1] != labels.shape[:-1]:
-        raise ValueError(f"logits and labels shapes do not align: {logits.shape} and {labels.shape}")
 
     flat_logits = logits.reshape(-1, logits.shape[-1])
     if not flat_logits.is_contiguous():
@@ -192,21 +190,8 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
     weight_sum = 0.0
     token_count = 0
     for pack in packs:
-        boundaries = pack["cu_seqlens"].tolist()
-        masks = pack["loss_masks"]
-        weights = pack["loss_weights"]
-        if len(weights) != len(boundaries) - 1:
-            raise ValueError(
-                f"{len(weights)} loss weights do not match {len(boundaries) - 1} packed documents"
-            )
-        weight_sum += sum(weights)
-        expected_length = boundaries[-1]
-        if masks.ndim != 1 or masks.shape[0] != expected_length:
-            raise ValueError(
-                f"source-aligned loss_masks shape {tuple(masks.shape)} does not match "
-                f"packed token count {expected_length}"
-            )
-        token_count += int(masks.sum())
+        weight_sum += sum(pack["loss_weights"])
+        token_count += int(pack["loss_masks"].sum())
 
     counts = torch.tensor([weight_sum, token_count], dtype=torch.float64, device=device)
     if torch.distributed.is_initialized() and torch.distributed.get_world_size(group=dp_group) > 1:

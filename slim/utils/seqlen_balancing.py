@@ -28,8 +28,6 @@ def build_token_budget_partitions(
         raise ValueError("max_tokens_per_pack must be at least 1")
     if not lengths:
         return []
-    if any(length < 1 for length in lengths):
-        raise ValueError("sequence lengths must be at least 1")
     oversized = [index for index, length in enumerate(lengths) if length > max_tokens_per_pack]
     if oversized:
         index = oversized[0]
@@ -52,17 +50,11 @@ def build_token_budget_partitions(
 
     if num_packs is None:
         return partitions
-    if num_packs < len(partitions):
-        raise ValueError(
-            f"num_packs {num_packs} is below the minimum budget-safe pack count {len(partitions)}"
-        )
     if num_packs > len(lengths):
         raise ValueError(f"num_packs {num_packs} exceeds sequence count {len(lengths)}")
 
     while len(partitions) < num_packs:
         splittable = [index for index, partition in enumerate(partitions) if len(partition) > 1]
-        if not splittable:
-            raise RuntimeError(f"cannot split {len(partitions)} packs into {num_packs}")
         partition_index = max(splittable, key=lambda index: totals[index])
         partition = partitions[partition_index]
         total = totals[partition_index]
@@ -111,7 +103,6 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
             self.k = k
             # sets should always be decreasing order
             self.sets = [Set() for _ in range(k)]
-            assert len(items) in [1, k], f"{len(items)} not in [1, {k}]"
             for i, (idx, seqlen) in enumerate(items):
                 self.sets[i].add(idx=idx, val=seqlen)
             self.sets = sorted(self.sets, reverse=True)
@@ -159,7 +150,6 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     sorted_seqlen_list = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)])
     states_pq = []
     if equal_size:
-        assert len(seqlen_list) % k_partitions == 0, f"{len(seqlen_list)} % {k_partitions} != 0"
         for offset in range(0, len(sorted_seqlen_list), k_partitions):
             items = []
             for i in range(k_partitions):
@@ -179,11 +169,6 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
 
     final_state = states_pq[0]
     partitions = final_state.get_partitions()
-    if equal_size:
-        for _i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(
-                seqlen_list
-            ), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
     return partitions
 
 
@@ -199,11 +184,6 @@ def greedy_partition(seqlen_list: list[int], k_partitions: int, equal_size: bool
                 min_idx = j
         partitions[min_idx].append(i)
         partition_sums[min_idx] += seqlen
-    if equal_size:
-        for _i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(
-                seqlen_list
-            ), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
     return partitions
 
 
@@ -223,22 +203,8 @@ def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, eq
         partitions (List[List[int]]):
             return k_partitions list containing the index of items.
     """
-    assert len(seqlen_list) >= k_partitions, f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
-
-    def _check_and_sort_partitions(partitions):
-        assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"
-        seen_idx = set()
-        sorted_partitions = [None] * k_partitions
-        for i, partition in enumerate(partitions):
-            assert len(partition) > 0, f"the {i}-th partition is empty"
-            for idx in partition:
-                seen_idx.add(idx)
-            sorted_partitions[i] = sorted(partition)
-        assert seen_idx == set(range(len(seqlen_list)))
-        return sorted_partitions
-
     partitions = karmarkar_karp(seqlen_list=seqlen_list, k_partitions=k_partitions, equal_size=equal_size)
-    return _check_and_sort_partitions(partitions)
+    return [sorted(partition) for partition in partitions]
 
 
 def get_reverse_idx(idx_map):

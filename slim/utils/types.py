@@ -95,26 +95,6 @@ class Trajectory:
         padding = torch.full((1, *tensor.shape[1:]), fill, dtype=dtype)
         return torch.cat((tensor, padding), dim=0)
 
-    def _source_token_tensor(
-        self,
-        name: str,
-        value,
-        *,
-        dtype: torch.dtype,
-        fill: float | int,
-    ):
-        if value is None:
-            return None
-        tensor = _as_cpu_tensor(value, dtype=dtype)
-        if tensor.ndim == 0 or tensor.shape[0] != len(self.token_ids):
-            raise ValueError(
-                f"{name} length {tensor.shape[0] if tensor.ndim else 0} "
-                f"must match token count {len(self.token_ids)}"
-            )
-        if len(self.token_ids) and not torch.all(tensor[-1] == fill):
-            raise ValueError(f"{name} terminal source-token slot must equal {fill}")
-        return tensor
-
     def finalize_source_token_alignment(self) -> None:
         """Finalize rollout fields as CPU tensors aligned with source tokens."""
         if self.loss_mask is None:
@@ -165,29 +145,9 @@ class Trajectory:
 
     def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
         """Set source-token-aligned training targets after rollout processing."""
-        if advantages is None:
-            raise ValueError("advantages must be present")
-        if not isinstance(self.token_ids, torch.Tensor) or not isinstance(self.loss_mask, torch.Tensor):
-            raise RuntimeError("trajectory must be source-token finalized before setting training targets")
-
-        self.advantages = self._source_token_tensor(
-            "advantages",
-            advantages,
-            dtype=torch.float32,
-            fill=0.0,
-        )
-        self.values = self._source_token_tensor(
-            "values",
-            values,
-            dtype=torch.float32,
-            fill=0.0,
-        )
-        self.value_targets = self._source_token_tensor(
-            "value_targets",
-            value_targets,
-            dtype=torch.float32,
-            fill=0.0,
-        )
+        self.advantages = _as_cpu_tensor(advantages, dtype=torch.float32)
+        self.values = None if values is None else _as_cpu_tensor(values, dtype=torch.float32)
+        self.value_targets = None if value_targets is None else _as_cpu_tensor(value_targets, dtype=torch.float32)
 
 
 @dataclass

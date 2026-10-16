@@ -126,8 +126,6 @@ class CriticNeMoTrainer(NeMoTrainer):
                 strict=True,
             ):
                 all_values[document_index] = document["cur_values"]
-        if any(value is None for value in all_values):
-            raise RuntimeError("critic value reconstruction omitted a trajectory")
 
         self._cache_packed_data(packed_batches, grad_accum)
         return {

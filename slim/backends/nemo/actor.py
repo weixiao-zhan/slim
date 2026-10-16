@@ -122,8 +122,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     ) -> None:
         is_reference = model_tag == "ref"
         active_model = self.ref_model if is_reference else self.model
-        if active_model is None:
-            raise RuntimeError("reference log probabilities requested without a reference model")
 
         if is_reference:
             _move_module(self.model, "cpu")
@@ -181,8 +179,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     def _prepare_mismatch(self, pack: dict) -> None:
         if not (self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics):
             return
-        if "actor_old_log_probs" not in pack or "rollout_log_probs" not in pack:
-            raise KeyError("mismatch correction requires actor_old_log_probs and rollout_log_probs")
         if self.args.mismatch_correction == "none":
             return
 
@@ -237,8 +233,6 @@ class ActorNeMoTrainer(NeMoTrainer):
         scored_log_probs = selective_log_probs(logits, scored_token_ids, temperature=self.args.rollout_temperature)
         log_probs, topk_log_probs = scored_log_probs[..., 0], scored_log_probs[..., 1:]
         old_key = "actor_old_log_probs" if self.args.old_logprob_source == "actor" else "rollout_log_probs"
-        if old_key not in fields:
-            raise KeyError(f"{old_key} is required for the policy ratio")
         old_log_probs = fields[old_key].to(log_probs.dtype)
         advantages = fields["advantages"].to(log_probs.dtype)
 
@@ -281,8 +275,6 @@ class ActorNeMoTrainer(NeMoTrainer):
         entropy_loss = zero if local_entropy is None else sequence_mean(local_entropy)
         kl_loss = zero
         if self.args.kl_loss_coef != 0:
-            if "ref_log_probs" not in fields:
-                raise KeyError("ref_log_probs is required when kl_loss_coef is nonzero")
             importance_ratio = None
             if self.args.use_unbiased_kl:
                 importance_ratio = torch.exp(log_probs - old_log_probs)

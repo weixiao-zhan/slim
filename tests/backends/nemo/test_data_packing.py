@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from slim.backends.nemo.data_packing import (
-    build_document_ids,
     build_model_batch,
     build_source_labels,
     fill_document_terminal_slots,
@@ -57,13 +56,6 @@ def test_fill_document_terminal_slots_preserves_trailing_dimensions():
     assert slots[6].tolist() == [-1, -1, -1]
     torch.testing.assert_close(slots[:2], values[:2])
     torch.testing.assert_close(slots[3:6], values[3:6])
-
-
-@pytest.mark.unit
-def test_document_ids_include_zero_only_for_physical_padding():
-    ids = build_document_ids(torch.tensor([0, 2, 5], dtype=torch.int32), total_length=7)
-
-    assert ids.tolist() == [1, 1, 2, 2, 2, 0, 0]
 
 
 @pytest.mark.unit

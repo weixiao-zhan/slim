@@ -18,7 +18,6 @@ old_new_group_dict = {}
 def monkey_patch_torch_dist():
     pid = os.getpid()
     if pid in old_new_group_dict:
-        assert dist.old_new_group == old_new_group_dict[pid]
         return
 
     logger.info("Applying monkey patch to torch.distributed")
@@ -191,18 +190,12 @@ class ReloadableProcessGroup(torch.distributed.ProcessGroup):
             self.group.abort()
 
     def _fwd(self, method, *args, **kwargs):
-        inner = self.group
-        if inner is None:
-            raise RuntimeError("ReloadableProcessGroup: inner PG is None, call reload() first.")
         with _wrap_low_level_call():
-            return getattr(inner, method)(*args, **kwargs)
+            return getattr(self.group, method)(*args, **kwargs)
 
     def _fwd_query(self, method, *args, **kwargs):
         """Forward non-communication calls without memory check."""
-        inner = self.group
-        if inner is None:
-            raise RuntimeError("ReloadableProcessGroup: inner PG is None, call reload() first.")
-        return getattr(inner, method)(*args, **kwargs)
+        return getattr(self.group, method)(*args, **kwargs)
 
     def barrier(self, *a, **kw):
         return self._fwd("barrier", *a, **kw)

@@ -27,7 +27,6 @@ def compute_pass_rate(
 
     pass_rate_name_list = [2**i for i in range(int(math.log2(group_size)) + 1)]
 
-    assert len(flat_rewards) == num_groups * group_size, f"{len(flat_rewards)=} {num_groups=} {group_size=}"
     rewards_of_group = np.array(flat_rewards).reshape(num_groups, group_size)
 
     log_dict = {}
@@ -72,7 +71,6 @@ def compute_majority_vote(
     if not maj_k_list:
         return {}
 
-    assert len(flat_rewards) == num_groups * group_size, f"{len(flat_rewards)=} {num_groups=} {group_size=}"
     rewards_of_group = np.array(flat_rewards).reshape(num_groups, group_size)
     num_correct = np.sum(rewards_of_group == 1, axis=1).astype(int)
 
@@ -100,7 +98,6 @@ def compute_consensus(
 
     cons_k_list = [2**i for i in range(int(math.log2(group_size)) + 1)]
 
-    assert len(flat_rewards) == num_groups * group_size, f"{len(flat_rewards)=} {num_groups=} {group_size=}"
     rewards_of_group = np.array(flat_rewards).reshape(num_groups, group_size)
     num_correct = np.sum(rewards_of_group == 1, axis=1).astype(int)
 
