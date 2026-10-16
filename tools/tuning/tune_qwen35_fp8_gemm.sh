@@ -22,8 +22,8 @@
 #
 # Which models to tune is selected by the first arg (default: all):
 #   bash tools/tuning/tune_qwen35_fp8_gemm.sh 4b      # just 4B's shapes
-#   bash tools/tuning/tune_qwen35_fp8_gemm.sh all     # union across 4B/9B/27B/35B-A3B
-# Accepts 4b | 9b | 27b | 35b | all (matched against each shape's "model:" tag below).
+#   bash tools/tuning/tune_qwen35_fp8_gemm.sh all     # union across 0.8B/4B/9B/27B/35B-A3B
+# Accepts 0.8b | 4b | 9b | 27b | 35b | all (matched against each shape's "model:" tag below).
 #
 # Batch-size grid is trimmed to what an RL rollout actually hits (decode small-M +
 # prefill chunks); the upstream default (18 sizes up to 4096) re-runs the full 1280-
@@ -42,11 +42,17 @@ BATCH_SIZES="${BATCH_SIZES:-1 8 16 32 64 128 256 512 1024 2048}"
 # "model:N K" so a model subset can be selected without a second array. Tuning dedups by
 # (N,K) below, so shapes shared between models are tuned once even when MODEL_SET=all.
 # Per-model arch params (head_dim=256, attn_output_gate doubles Q):
+#   0.8B:    H=1024 I=3584  nh=8  nkv=2 key_dim=2048 value_dim=2048
 #   4B:      H=2560 I=9216  nh=16 nkv=4 key_dim=2048 value_dim=4096
 #   9B:      H=4096 I=12288 nh=16 nkv=4 value_dim=4096
 #   27B:     H=5120 I=17408 nh=24 nkv=4 value_dim=6144
 #   35B-A3B: H=2048 nh=16 nkv=2 value_dim=4096 shared_I=512  (routed experts -> fused-MoE)
 TAGGED_SHAPES=(
+  "0.8b:5120 1024"   # qkv_proj
+  "0.8b:1024 2048"   # o_proj (== linear_attn out_proj)
+  "0.8b:7168 1024"   # gate_up_proj
+  "0.8b:1024 3584"   # down_proj
+  "0.8b:8192 1024"   # linear_attn in_proj_qkvz
   "4b:10240 2560"    # qkv_proj
   "4b:2560 4096"     # o_proj (== linear_attn out_proj)
   "4b:18432 2560"    # gate_up_proj

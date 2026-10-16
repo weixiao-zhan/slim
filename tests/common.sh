@@ -103,5 +103,5 @@ wandb_args() {
         echo ""
         return
     fi
-    echo "--use-wandb --wandb-project slim --wandb-group $group_name --wandb-key '$WANDB_API_KEY' --disable-wandb-random-suffix"
+    echo "--use-wandb --wandb-project slim --wandb-group $group_name --wandb-key $WANDB_API_KEY --disable-wandb-random-suffix"
 }

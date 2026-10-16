@@ -23,7 +23,9 @@ COMMON_ARGS="
 
     --rollout-num-gpus-per-replica 1
     --sglang-mem-fraction-static 0.7
-    --sglang-mamba-radix-cache-strategy extra_buffer
+    --sglang-mamba-ssm-dtype float32
+    --sglang-mamba-radix-cache-strategy extra_buffer_lazy
+    --sglang-max-mamba-cache-size 512
     --sglang-page-size 64
     --rollout-colocate
 
@@ -45,10 +47,10 @@ COMMON_ARGS="
 declare -A COMBOS
 COMBOS[ppo_clip]="1|0|--policy-surrogate ppo_clip --eps-clip 0.2 --eps-clip-high 0.28"
 COMBOS[is]="1|0|--policy-surrogate is"
-COMBOS[tis]="1|0|--policy-surrogate tis --eps-clip 1 --eps-clip-high 1"
-COMBOS[cis]="1|0|--policy-surrogate cis --eps-clip 1 --eps-clip-high 1"
-COMBOS[sc]="1|0|--policy-surrogate cis --eps-clip 0 --eps-clip-high 0 --use-score-centering 32"
-COMBOS[cis_sc]="1|0|--policy-surrogate cis --eps-clip 1 --eps-clip-high 1 --use-score-centering 32"
+COMBOS[tis]="1|0|--policy-surrogate tis --eps-clip 0.2 --eps-clip-high 0.28"
+COMBOS[cis]="1|0|--policy-surrogate cis --eps-clip 0.2 --eps-clip-high 0.28"
+COMBOS[sc]="1|0|--policy-surrogate cis --eps-clip 0 --eps-clip-high 0 --use-score-centering 31"
+COMBOS[cis_sc]="1|0|--policy-surrogate cis --eps-clip 0.2 --eps-clip-high 0.28 --use-score-centering 31"
 
 ORDER=(ppo_clip is tis cis sc cis_sc)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
