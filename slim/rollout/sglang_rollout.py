@@ -180,7 +180,7 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
     args = state.args
-    from slim.utils.processing_utils import encode_tensor_to_b64_envelope
+    from slim.utils.processing_utils import decode_tensor_envelopes, encode_tensor_to_b64_envelope
 
     trajectory = await _build_trajectory_with_first_prompt(state, episode)
     episode.trajectories.append(trajectory)
@@ -243,36 +243,29 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if episode.status == Episode.Status.ABORTED:
         return episode
 
-    new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
-    new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
+    # The per-token arrays arrive as tensor envelopes, one row per generated token.
+    output_logprobs = decode_tensor_envelopes(meta_info["output_token_logprobs"])
+    new_tokens = output_logprobs["token_ids"].tolist()
 
     trajectory.token_ids.extend(new_tokens)
     trajectory.loss_mask.extend([1] * len(new_tokens))
-    trajectory.rollout_log_probs.extend(new_log_probs)
+    trajectory.rollout_log_probs.extend(output_logprobs["logprobs"].tolist())
     if args.use_score_centering is not None:
-        # One row per generated token, [logprob, token_id, text] per top-K entry.
-        top_logprobs = meta_info["output_top_logprobs"]
-        topk_shape = (len(top_logprobs), args.use_score_centering)
-        log_probs = np.array([[entry[0] for entry in row] for row in top_logprobs], dtype=np.float32)
-        token_ids = np.array([[entry[1] for entry in row] for row in top_logprobs], dtype=np.int32)
+        top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
         trajectory.rollout_topk_log_probs = np.concatenate(
-            (trajectory.rollout_topk_log_probs, log_probs.reshape(topk_shape))
+            (trajectory.rollout_topk_log_probs, top_logprobs["logprobs"].numpy())
         )
         trajectory.rollout_topk_token_ids = np.concatenate(
-            (trajectory.rollout_topk_token_ids, token_ids.reshape(topk_shape))
+            (trajectory.rollout_topk_token_ids, top_logprobs["token_ids"].numpy())
         )
 
     if state.routing_replay_shape is not None:
-        import pybase64
-
         num_layers, top_k = state.routing_replay_shape
         # The response covers [start_len, seqlen - 1), one row per prediction.
         prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
-        def _decode_routed_experts(raw: str):
-            # pybase64 decode + numpy copy both release the GIL.
-            arr = np.frombuffer(pybase64.b64decode(raw.encode("ascii")), dtype=np.int32).copy()
-            return arr.reshape(prediction_count, num_layers, top_k)
+        def _decode_routed_experts(envelope: dict):
+            return decode_tensor_envelopes(envelope).numpy().reshape(prediction_count, num_layers, top_k)
 
         fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
         trajectory.rollout_routed_experts = (

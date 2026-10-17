@@ -24,7 +24,6 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 import numpy as np
-import pybase64
 from openai.types.chat import ChatCompletion
 from strands import Agent
 from strands.models.openai import OpenAIModel
@@ -126,33 +125,34 @@ class SGLangChatModel(OpenAIModel):
 
     def _record_trajectory(self, choice: Any) -> None:
         """Keep one call's prompt and generation as a standalone trajectory."""
+        # The per-token arrays arrive in meta_info as tensor envelopes.
         meta_info = choice.meta_info
-        entries = meta_info["output_token_logprobs"]  # [logprob, token_id, text]
-        prompt_predictions = len(choice.prompt_token_ids) - 1
+        prompt_token_ids = decode_tensor_envelopes(meta_info["prompt_token_ids"]).tolist()
+        output_logprobs = decode_tensor_envelopes(meta_info["output_token_logprobs"])
+        output_token_ids = output_logprobs["token_ids"].tolist()
+        prompt_predictions = len(prompt_token_ids) - 1
         trajectory = Trajectory(
-            token_ids=choice.prompt_token_ids + [entry[1] for entry in entries],
-            loss_mask=[0] * prompt_predictions + [1] * len(entries),
-            rollout_log_probs=[0.0] * prompt_predictions + [entry[0] for entry in entries],
+            token_ids=prompt_token_ids + output_token_ids,
+            loss_mask=[0] * prompt_predictions + [1] * len(output_token_ids),
+            rollout_log_probs=[0.0] * prompt_predictions + output_logprobs["logprobs"].tolist(),
         )
 
         if (top_k := self.state.args.use_score_centering) is not None:
-            # Inert rows for the prompt, then one row per generated token, as arrays.
-            top_logprobs = meta_info["output_top_logprobs"]
-            log_probs = np.array([[entry[0] for entry in row] for row in top_logprobs], dtype=np.float32)
-            token_ids = np.array([[entry[1] for entry in row] for row in top_logprobs], dtype=np.int32)
+            # Inert rows for the prompt, then one row per generated token.
+            top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
             trajectory.rollout_topk_log_probs = np.concatenate(
-                (np.zeros((prompt_predictions, top_k), np.float32), log_probs.reshape(len(top_logprobs), top_k))
+                (np.zeros((prompt_predictions, top_k), np.float32), top_logprobs["logprobs"].numpy())
             )
             trajectory.rollout_topk_token_ids = np.concatenate(
-                (np.zeros((prompt_predictions, top_k), np.int32), token_ids.reshape(len(top_logprobs), top_k))
+                (np.zeros((prompt_predictions, top_k), np.int32), top_logprobs["token_ids"].numpy())
             )
 
         if self.episode.has_multimodal:
             trajectory.multimodal_inputs = decode_tensor_envelopes(meta_info["processor_outputs"])
 
         if self.state.routing_replay_shape is not None:
-            experts = np.frombuffer(pybase64.b64decode(meta_info["routed_experts"]), dtype=np.int32)
-            trajectory.rollout_routed_experts = experts.copy().reshape(-1, *self.state.routing_replay_shape)
+            experts = decode_tensor_envelopes(meta_info["routed_experts"]).numpy()
+            trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.routing_replay_shape)
 
         self.finish_reason = choice.finish_reason
         self.episode.trajectories.append(trajectory)
