@@ -17,6 +17,8 @@ $$\nabla_\theta L_{\text{pg}} = -\mathbb{E}_{x_i \sim \pi_\text{old}} \left[ \su
 
 where $r_{i,t} = \pi_\theta(x_{i,t}) / \pi_\text{old}(x_{i,t})$ is the importance ratio.
 
+Only positions with a nonzero `loss_mask` enter the loss, so the actor projects only those through the LM head: the logits are `[loss tokens, vocab]`, and the recomputed $\log\pi_\text{old}$ and $\log\pi_\text{ref}$ are zero elsewhere.
+
 The two design axes are:
 1. **Advantage estimator** (`--advantage-estimator`): how $\hat{A}_{i,t}$ is computed from rewards.
 2. **Policy surrogate** (`--policy-surrogate`): the surrogate $J(r_{i,t}, \hat{A}_{i,t})$ that combines the ratio and advantage (clipping, truncation, etc.), and its weight $w(r_{i,t}, \hat{A}_{i,t})$.
@@ -191,7 +193,7 @@ The estimator type (`--kl-loss-type`) selects among `k1` ($\rho$), `k2` ($\rho^2
 
 $$L_\text{total} = L_\text{pg} - \alpha_\text{ent} \cdot H(\pi_\theta)$$
 
-Entropy calculation requires realizing full `[seq_len, vocab]` which consumes significant amount of GRAM. Only computed when $\alpha_\text{ent} \ne 0$.
+Entropy calculation realizes fp32 copies of the `[loss tokens, vocab]` logits, which consumes significant amount of GRAM. Only computed when $\alpha_\text{ent} \ne 0$.
 
 ## Critic Value Loss
 

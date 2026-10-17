@@ -23,7 +23,6 @@ def _selective_log_probs_forward_kernel(
     num_labels,
     temperature,
     WRITE_GRADIENT: tl.constexpr,
-    IGNORE_INDEX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     LABEL_BLOCK_SIZE: tl.constexpr,
 ):
@@ -34,14 +33,6 @@ def _selective_log_probs_forward_kernel(
     label_columns = tl.arange(0, LABEL_BLOCK_SIZE)
     label_mask = label_columns < num_labels
     target = tl.load(labels)
-
-    if target == IGNORE_INDEX:
-        tl.store(output + label_columns, 0.0, mask=label_mask)
-        if WRITE_GRADIENT:
-            for start in range(0, num_columns, BLOCK_SIZE):
-                columns = start + tl.arange(0, BLOCK_SIZE)
-                tl.store(logits + columns, 0.0, mask=columns < num_columns)
-        return
 
     row_max = float("-inf")
     denominator = 0.0
@@ -112,7 +103,6 @@ class _SelectiveLogProbs(torch.autograd.Function):
             num_labels,
             temperature,
             WRITE_GRADIENT=write_gradient,
-            IGNORE_INDEX=-100,
             BLOCK_SIZE=_LOGPROB_BLOCK_SIZE,
             LABEL_BLOCK_SIZE=triton.next_power_of_2(num_labels),
             num_warps=32,
@@ -126,8 +116,6 @@ class _SelectiveLogProbs(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_gradient: torch.Tensor):
         gradient, labels = ctx.saved_tensors
-        valid = labels[:, :1] != -100
-        output_gradient = output_gradient * valid
         _scale_log_probs_gradient_kernel[(gradient.shape[0],)](
             gradient,
             output_gradient.sum(dim=1).contiguous(),
@@ -137,7 +125,6 @@ class _SelectiveLogProbs(torch.autograd.Function):
         )
         if labels.shape[1] > 1:
             extra_gradient = output_gradient[:, 1:] / ctx.temperature
-            labels = labels.masked_fill(~valid, 0)
             # A column at the label adds $(1_x - 1_x)/\tau = 0$. Adding and subtracting it
             # instead would cancel in bf16 and bury the small gradient of a confident label.
             extra_gradient = extra_gradient.masked_fill(labels[:, 1:] == labels[:, :1], 0)
@@ -155,8 +142,7 @@ def selective_log_probs(
 
     `labels` either matches `logits.shape[:-1]` or adds a trailing column dimension
     whose first column is the target and whose other columns are extra vocabulary
-    ids read from the same softmax. A row whose target is -100 returns zeros in
-    every column.
+    ids read from the same softmax.
     """
     temperature = 1.0 if temperature is None else temperature
     if temperature <= 0:

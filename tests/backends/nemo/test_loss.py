@@ -27,18 +27,11 @@ def test_fused_selective_log_probs_preserves_fp32_values_and_bf16_gradients():
     torch.manual_seed(19)
     logits = torch.randn(2, 3, 251, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     reference_logits = logits.detach().clone().requires_grad_(True)
-    labels = torch.tensor([[1, -100, 7], [4, 3, 2]], device="cuda")
+    labels = torch.tensor([[1, 5, 7], [4, 3, 2]], device="cuda")
     output_gradient = torch.randn(2, 3, device="cuda")
 
     actual = selective_log_probs(logits, labels, temperature=0.7)
-    targets = labels.masked_fill(labels == -100, 0)
-    expected = (
-        (reference_logits.float() / 0.7)
-        .log_softmax(dim=-1)
-        .gather(-1, targets.unsqueeze(-1))
-        .squeeze(-1)
-        .masked_fill(labels == -100, 0)
-    )
+    expected = (reference_logits.float() / 0.7).log_softmax(dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
     (actual * output_gradient).sum().backward()
     (expected * output_gradient).sum().backward()
 
@@ -47,22 +40,12 @@ def test_fused_selective_log_probs_preserves_fp32_values_and_bf16_gradients():
     torch.testing.assert_close(logits.grad, reference_logits.grad, atol=2e-2, rtol=1e-2)
 
 
-def _reference_column_log_probs(logits, columns, temperature):
-    valid = columns[..., :1] != -100
-    return (
-        (logits.float() / temperature)
-        .log_softmax(dim=-1)
-        .gather(-1, columns.masked_fill(~valid, 0))
-        .masked_fill(~valid, 0)
-    )
-
-
 def _topk_columns(device):
-    labels = torch.tensor([[1, -100, 7], [4, 3, 2]], device=device)
+    labels = torch.tensor([[1, 5, 7], [4, 3, 2]], device=device)
     # The top-K repeats an id and contains the label, as a sampler top-K usually does.
     topk = torch.tensor(
         [
-            [[1, 5, 5], [0, 0, 0], [7, 2, 9]],
+            [[1, 5, 5], [6, 5, 0], [7, 2, 9]],
             [[4, 0, 8], [3, 6, 1], [2, 2, 11]],
         ],
         device=device,
@@ -80,7 +63,7 @@ def test_fused_selective_log_probs_reads_extra_columns_from_one_softmax():
     output_gradient = torch.randn(2, 3, 4, device="cuda")
 
     actual = selective_log_probs(logits, columns, temperature=0.7)
-    expected = _reference_column_log_probs(reference_logits, columns, 0.7)
+    expected = (reference_logits.float() / 0.7).log_softmax(dim=-1).gather(-1, columns)
     (actual * output_gradient).sum().backward()
     (expected * output_gradient).sum().backward()
 
@@ -301,17 +284,18 @@ def test_policy_loss_adds_score_centering_and_reports_topk_statistics():
         kl_loss_coef=0.0,
     )
     trainer.cp_group = None
-    logits = torch.randn(1, 3, vocab, device="cuda", requires_grad=True)
-    sampler_log_probs = torch.randn(1, 3, vocab, device="cuda").log_softmax(dim=-1)
-    labels = torch.tensor([[2, 5, -100]], device="cuda")
+    # The trainer passes the fields at the loss positions only.
+    logits = torch.randn(1, 2, vocab, device="cuda", requires_grad=True)
+    sampler_log_probs = torch.randn(1, 2, vocab, device="cuda").log_softmax(dim=-1)
+    labels = torch.tensor([[2, 5]], device="cuda")
     fields = {
         "labels": labels,
-        "loss_masks": torch.tensor([[1.0, 1.0, 0.0]], device="cuda"),
-        "document_ids": torch.ones(1, 3, dtype=torch.long, device="cuda"),
-        "rollout_log_probs": sampler_log_probs.gather(-1, labels.clamp_min(0).unsqueeze(-1)).squeeze(-1),
+        "loss_masks": torch.ones(1, 2, device="cuda"),
+        "document_ids": torch.ones(1, 2, dtype=torch.long, device="cuda"),
+        "rollout_log_probs": sampler_log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1),
         "rollout_topk_log_probs": sampler_log_probs,
-        "rollout_topk_token_ids": torch.arange(vocab, device="cuda").expand(1, 3, vocab),
-        "advantages": torch.tensor([[0.5, -1.0, 0.0]], device="cuda"),
+        "rollout_topk_token_ids": torch.arange(vocab, device="cuda").expand(1, 2, vocab),
+        "advantages": torch.tensor([[0.5, -1.0]], device="cuda"),
     }
 
     loss, metrics = trainer._policy_loss(
@@ -324,9 +308,9 @@ def test_policy_loss_adds_score_centering_and_reports_topk_statistics():
     )
     loss.backward()
 
-    sampled = torch.nn.functional.one_hot(labels.clamp_min(0), vocab)
+    sampled = torch.nn.functional.one_hot(labels, vocab)
     expected = -fields["advantages"].unsqueeze(-1) * (sampled - sampler_log_probs.exp()) / 2
-    torch.testing.assert_close(logits.grad, expected * fields["loss_masks"].unsqueeze(-1))
+    torch.testing.assert_close(logits.grad, expected)
     torch.testing.assert_close(metrics["score_centering/topk_mass"], torch.tensor(1.0, device="cuda"))
     torch.testing.assert_close(metrics["score_centering/rho"], torch.tensor(1.0, device="cuda"))
 
