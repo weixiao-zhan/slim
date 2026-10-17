@@ -29,7 +29,6 @@ from .base import NeMoTrainer, _move_module
 from .checkpoint import is_hf_checkpoint
 from .data_packing import (
     SEQUENCE_FIELDS,
-    fill_document_terminal_slots,
     unpack_sequences,
 )
 from .packed_cp_forward import prepare_forward
@@ -144,17 +143,13 @@ class ActorNeMoTrainer(NeMoTrainer):
                     replay_enabled = not is_reference and self.args.use_rollout_routing_replay
                     targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
                     with prepared.context_factory(), replay_router_targets(targets):
-                        output = active_model(**prepared.model_batch)
+                        output = active_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
                         local_log_probs = selective_log_probs(
                             output.logits,
-                            prepared.fields["labels"],
+                            prepared.fields["labels"][:, prepared.loss_positions],
                             temperature=self.args.rollout_temperature,
                         )
-                    full_log_probs = prepared.gather(local_log_probs, fill=0)
-                    pack[store_key] = fill_document_terminal_slots(
-                        full_log_probs.squeeze(0),
-                        pack["cu_seqlens"],
-                    ).detach().cpu()
+                    pack[store_key] = prepared.gather(prepared.scatter_loss_values(local_log_probs)).squeeze(0).cpu()
         finally:
             if is_reference:
                 active_model.eval()
@@ -313,15 +308,9 @@ class ActorNeMoTrainer(NeMoTrainer):
         local_entropy: torch.Tensor | None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         full_pack = dict(pack)
-        full_pack["cur_log_probs"] = fill_document_terminal_slots(
-            prepared.gather(local_log_probs, fill=0).squeeze(0),
-            pack["cu_seqlens"],
-        )
+        full_pack["cur_log_probs"] = prepared.gather(prepared.scatter_loss_values(local_log_probs)).squeeze(0)
         if local_entropy is not None:
-            full_pack["entropy"] = fill_document_terminal_slots(
-                prepared.gather(local_entropy, fill=0).squeeze(0),
-                pack["cu_seqlens"],
-            )
+            full_pack["entropy"] = prepared.gather(prepared.scatter_loss_values(local_entropy)).squeeze(0)
         batches = unpack_sequences(full_pack)
         device = local_log_probs.device
         for batch in batches:
@@ -363,21 +352,22 @@ class ActorNeMoTrainer(NeMoTrainer):
             prepared.context_factory(),
             replay_router_targets(targets),
         ):
-            output = self.model(**prepared.model_batch)
+            output = self.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
             if self.args.loss_type == "custom_loss":
                 local_entropy = None
                 if self.args.entropy_coef != 0:
                     local_entropy = entropy_from_logits(output.logits)
                 local_log_probs = selective_log_probs(
                     output.logits,
-                    prepared.fields["labels"],
+                    prepared.fields["labels"][:, prepared.loss_positions],
                     temperature=self.args.rollout_temperature,
                 )
                 loss, metrics = self._custom_loss(pack, prepared, local_log_probs, local_entropy)
             else:
+                # The logits cover only the loss positions, so the loss reads its fields there too.
                 loss, metrics = self._policy_loss(
                     output.logits,
-                    prepared.fields,
+                    {name: value[:, prepared.loss_positions] for name, value in prepared.fields.items()},
                     num_documents=pack["cu_seqlens"].numel() - 1,
                     global_sequences=global_sequences,
                     global_tokens=global_tokens,

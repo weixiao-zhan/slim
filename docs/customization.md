@@ -126,6 +126,7 @@ Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 `unpacked_batches` is the per-document list from `unpack_sequences`, one entry per
 trajectory; each dict carries the raw `reward`, `loss_weights`, `cur_log_probs`,
 `advantages`, `loss_masks`, and the old/ref log-probs when available.
+The log-probs and `entropy` are computed only where `loss_masks` is nonzero and are zero elsewhere.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
 a dict of scalar tensors logged under `train/`.
