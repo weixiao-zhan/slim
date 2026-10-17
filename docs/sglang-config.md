@@ -233,9 +233,11 @@ Response:
 
 | Field | Location |
 |-------|----------|
-| output token ids and logprobs | `meta_info.output_token_logprobs[i]` = `[logprob, token_id, text]` |
-| sampler top-$K$ | `meta_info.output_top_logprobs[i]` = `K` rows of `[logprob, token_id, text]`, one entry per output token |
-| expert indices | `meta_info.routed_experts`, base64 int32, one row per prediction over `[routed_experts_start_len, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
+| output token ids and logprobs | `meta_info.output_token_logprobs` = `{"logprobs": float32 [T], "token_ids": int32 [T]}` |
+| sampler top-$K$ | `meta_info.output_top_logprobs` = `{"logprobs": float32 [T, K], "token_ids": int32 [T, K]}`, one row per output token |
+| expert indices | `meta_info.routed_experts`, int32, one row per prediction over `[routed_experts_start_len, seqlen - 1)`, reshaped to `[prediction, num_layers, top_k]` |
+
+Every array is a [tensor envelope](#tensor-envelope).
 
 ### `/v1/chat/completions` fields
 
@@ -249,7 +251,7 @@ Request:
 | `chat_template_kwargs` | `--apply-chat-template-kwargs`, e.g. `enable_thinking`, `preserve_thinking`; |
 | `stream: false` | every field below is unavailable when streaming |
 | `logprobs: true` | gates `choices[i].meta_info.output_token_logprobs` |
-| `return_prompt_token_ids: true` | gates `choices[i].prompt_token_ids` |
+| `return_prompt_token_ids: true` | gates `choices[i].meta_info.prompt_token_ids` |
 | `top_logprobs` | `K` under `--use-score-centering K`; gates `choices[i].meta_info.output_top_logprobs` |
 | `return_meta_info: true` | gates `choices[i].meta_info`, and so every field in it |
 | `return_processor_outputs: true` | gates `choices[i].meta_info.processor_outputs` |
@@ -260,18 +262,21 @@ Response:
 | Field | Location |
 |-------|----------|
 | generated message, finish reason | `choices[i].message` (`.content`, `.tool_calls`) and `choices[i].finish_reason`, OpenAI convention, consumed by the agent framework |
-| input token ids | `choices[i].prompt_token_ids` |
-| output token ids and logprobs | `choices[i].meta_info.output_token_logprobs[j]` = `[logprob, token_id, text]` |
-| sampler top-$K$ | `choices[i].meta_info.output_top_logprobs[j]` = `K` rows of `[logprob, token_id, text]` |
+| input token ids | `choices[i].meta_info.prompt_token_ids`, int32 `[P]` |
+| output token ids and logprobs | `choices[i].meta_info.output_token_logprobs` = `{"logprobs": float32 [T], "token_ids": int32 [T]}` |
+| sampler top-$K$ | `choices[i].meta_info.output_top_logprobs` = `{"logprobs": float32 [T, K], "token_ids": int32 [T, K]}` |
 | processor tensors | `choices[i].meta_info.processor_outputs` |
-| expert indices | `choices[i].meta_info.routed_experts`, base64 int32, one row per prediction over `[0, seqlen - 1)`, shaped `[prediction, num_layers, top_k]` |
+| expert indices | `choices[i].meta_info.routed_experts`, int32, one row per prediction over `[0, seqlen - 1)`, reshaped to `[prediction, num_layers, top_k]` |
+
+Every array is a [tensor envelope](#tensor-envelope). The OpenAI `choices[i].logprobs` and
+`choices[i].prompt_token_ids` stay empty: slim reads `meta_info` only.
 
 Prompt positions carry no logprobs; `logprob_start_len` is fixed at `-1` and is not a request field.
 
 ### Tensor envelope
 
-Processor tensors travel as JSON in both directions, so each one is a base64 envelope of its raw
-bytes:
+Processor tensors travel as JSON in both directions, and the per-token arrays of `meta_info` come
+back the same way, so each one is a base64 envelope of its raw bytes:
 
 ```json
 {"__tensor__": true, "dtype": "float32", "shape": [256, 1536], "data": "<base64>"}
@@ -280,6 +285,11 @@ bytes:
 Field names match what `AutoProcessor` returns (`pixel_values`, `pixel_values_videos`,
 `input_features`, `image_grid_thw`, ...). `slim/utils/processing_utils.py` owns the codec for both
 directions; `patch_dependencies.py` wires SGLang's call sites to it rather than restating it.
+
+Upstream SGLang returns the logprobs as one JSON list per token, and the top-$K$ as $K$ of them.
+Building and serializing those lists runs on the engine's HTTP process, and on a long generation
+it blocks the process for longer than a health check waits. Streaming requests keep the upstream
+lists.
 
 ### Router passthrough
 
