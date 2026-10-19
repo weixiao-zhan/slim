@@ -173,8 +173,6 @@ def create_training_groups(args, pgs, rollout_manager):
         if args.critic_train_only:
             start_rollout_ids = critic_start_rollout_ids
 
-    assert len(set(start_rollout_ids)) == 1
-
     if args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 

@@ -30,6 +30,9 @@ class NeMoArgs:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1e-8
+    # Storage dtype of the trained models' weights. AdamW updates them in place with no master
+    # copy; FSDP2 computes in bf16 either way, and `auto` keeps the checkpoint's dtype.
+    master_weight_dtype: Literal["fp32", "auto"] = "fp32"
 
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1

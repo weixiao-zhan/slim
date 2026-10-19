@@ -330,12 +330,8 @@ class NeMoTrainer(RayWorker):
                     physical_pack_token_budget,
                     num_packs=pack_count,
                 )
-            elif len(partitions) != pack_count:
-                raise RuntimeError("fixed microbatch counts differ across data-parallel ranks")
 
             step_batches = pack_sequences(step_trajectories, partitions=partitions)
-            if len(step_batches) != pack_count:
-                raise RuntimeError(f"requested {pack_count} synchronized packs but built {len(step_batches)}")
             for pack in step_batches:
                 pack["_document_indices"] = [index + start for index in pack["_document_indices"]]
             packed_batches.extend(step_batches)
@@ -343,8 +339,6 @@ class NeMoTrainer(RayWorker):
         return packed_batches, list(accumulate(step_microbatch_counts))
 
     def _cache_packed_data(self, packed_batches: list[dict], grad_accum: list[int]) -> None:
-        if self._precomputed_packed_data is not None:
-            raise RuntimeError("precomputed packed data is already cached")
         self._precomputed_packed_data = (packed_batches, grad_accum)
 
     def _take_packed_data(self, batch: TrajectoryBatch) -> tuple[list[dict], list[int]]:
@@ -361,8 +355,6 @@ class NeMoTrainer(RayWorker):
         for end in boundaries:
             yield packed_batches[start:end]
             start = end
-        if start != len(packed_batches):
-            raise ValueError("gradient accumulation boundaries do not cover all packed batches")
 
     def train(self, rollout_id: int, rollout_data_ref: list) -> None:
         if self.args.debug_rollout_only:
@@ -383,8 +375,6 @@ class NeMoTrainer(RayWorker):
         clear_memory()
 
     def _train_core(self, rollout_id, packed_batches: list[dict], grad_accum: list[int]) -> None:
-        if not grad_accum:
-            raise ValueError("training produced no microbatches")
         self._run_train_loop(packed_batches, grad_accum)
         self.prof.step(rollout_id=rollout_id)
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=None)

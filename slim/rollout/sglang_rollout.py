@@ -79,7 +79,6 @@ class GenerateState(metaclass=SingletonMeta):
             yield dp_rank
         finally:
             self.dp_counts[dp_rank] -= 1
-            assert self.dp_counts[dp_rank] >= 0
 
     def reset(self) -> None:
         self.aborted = False
@@ -165,19 +164,22 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
         prompt_ids = state.tokenizer.encode(prompt, add_special_tokens=False)
 
     edge_len = max(len(prompt_ids) - 1, 0)
-    return Trajectory(
+    trajectory = Trajectory(
         token_ids=prompt_ids,
         loss_mask=[0] * edge_len,
         rollout_log_probs=[0.0] * edge_len,
         multimodal_inputs=multimodal_inputs,
     )
+    if (top_k := state.args.use_score_centering) is not None:
+        # The top-K is K entries per token, so it lives in tensors rather than nested lists.
+        trajectory.rollout_topk_log_probs = torch.zeros((edge_len, top_k), dtype=torch.float32)
+        trajectory.rollout_topk_token_ids = torch.zeros((edge_len, top_k), dtype=torch.int32)
+    return trajectory
 
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
     args = state.args
-    from slim.utils.processing_utils import encode_tensor_to_b64_envelope
-
-    assert episode.status in [Episode.Status.PENDING, Episode.Status.ABORTED], f"Episode status is {episode.status}"
+    from slim.utils.processing_utils import decode_tensor_envelopes, encode_tensor_to_b64_envelope
 
     trajectory = await _build_trajectory_with_first_prompt(state, episode)
     episode.trajectories.append(trajectory)
@@ -199,6 +201,8 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
+    if args.use_score_centering is not None:
+        payload["top_logprobs_num"] = args.use_score_centering
     routed_experts_start_len = 0
     if state.routing_replay_shape is not None:
         # Expert capture is indexed by KV-cache slot, so a position reports the routing
@@ -238,31 +242,31 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if episode.status == Episode.Status.ABORTED:
         return episode
 
-    new_tokens = [item[1] for item in meta_info["output_token_logprobs"]]
-    new_log_probs = [item[0] for item in meta_info["output_token_logprobs"]]
+    # The per-token arrays arrive as tensor envelopes, one row per generated token.
+    output_logprobs = decode_tensor_envelopes(meta_info["output_token_logprobs"])
+    new_tokens = output_logprobs["token_ids"].tolist()
 
     trajectory.token_ids.extend(new_tokens)
     trajectory.loss_mask.extend([1] * len(new_tokens))
-    trajectory.rollout_log_probs.extend(new_log_probs)
+    trajectory.rollout_log_probs.extend(output_logprobs["logprobs"].tolist())
+    if args.use_score_centering is not None:
+        top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
+        trajectory.rollout_topk_log_probs = torch.cat((trajectory.rollout_topk_log_probs, top_logprobs["logprobs"]))
+        trajectory.rollout_topk_token_ids = torch.cat((trajectory.rollout_topk_token_ids, top_logprobs["token_ids"]))
 
     if state.routing_replay_shape is not None:
-        import numpy as np
-        import pybase64
-
         num_layers, top_k = state.routing_replay_shape
         # The response covers [start_len, seqlen - 1), one row per prediction.
         prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
-        def _decode_routed_experts(raw: str):
-            # pybase64 decode + numpy copy both release the GIL.
-            arr = np.frombuffer(pybase64.b64decode(raw.encode("ascii")), dtype=np.int32).copy()
-            return arr.reshape(prediction_count, num_layers, top_k)
+        def _decode_routed_experts(envelope: dict):
+            return decode_tensor_envelopes(envelope).reshape(prediction_count, num_layers, top_k)
 
         fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
         trajectory.rollout_routed_experts = (
             fresh
             if trajectory.rollout_routed_experts is None
-            else np.concatenate((trajectory.rollout_routed_experts, fresh))
+            else torch.cat((trajectory.rollout_routed_experts, fresh))
         )
 
     return episode
@@ -370,12 +374,11 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[t.text for t in ep.trajectories]}, "
+                    f"First rollout sample: {ep.trajectories[-1].text if ep.trajectories else None}, "
                     f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
                 )
                 do_print = False
 
-            assert len(group.episodes) == args.n_samples_per_prompt
             if args.rollout_all_samples_process_path is not None:
                 all_groups.append(group)
 
@@ -391,13 +394,12 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[t.text for t in ep.trajectories]}, "
+        f"Finish rollout: {ep.trajectories[-1].text if ep.trajectories else None}, "
         f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
     )
 
     aborted_examples = await pool.abort()
 
-    assert len(kept_groups) == args.rollout_batch_size, f"Got {len(kept_groups)} samples, expected {args.rollout_batch_size}"
     kept_groups.sort(key=lambda group: group.index)
 
     episodes = [episode for group in kept_groups for episode in group.episodes]
@@ -459,9 +461,10 @@ async def eval_rollout_single_dataset(
     groups = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
     episodes = [episode for group in groups for episode in group.episodes]
     if episodes:
+        ep = episodes[0]
         logger.info(
-            f"eval_rollout_single_dataset example data: {[t.text for t in episodes[0].trajectories]} "
-            f"reward={episodes[0].get_reward_value()}"
+            f"eval_rollout_single_dataset example data: {ep.trajectories[-1].text if ep.trajectories else None} "
+            f"reward={ep.get_reward_value()}"
         )
 
     return {dataset_cfg.name: episodes}

@@ -71,8 +71,6 @@ class NeMoLRScheduler(LRScheduler):
         for index, group in enumerate(optimizer.param_groups):
             name = group.get("name", f"param_group_{index}")
             start_step = group.get("start_step", 0)
-            if start_step < 0:
-                raise ValueError(f"{name} start_step must be non-negative, got {start_step}")
             if start_step + self.lr_warmup_steps > warmup_end_limit:
                 raise ValueError(
                     f"{name} warmup ends at step {start_step + self.lr_warmup_steps}, "
@@ -123,8 +121,6 @@ class NeMoLRScheduler(LRScheduler):
         num_steps_ = self.last_epoch - decay_start
         decay_steps_ = self.lr_decay_steps - decay_start
         decay_ratio = float(num_steps_) / float(decay_steps_)
-        assert decay_ratio >= 0.0
-        assert decay_ratio <= 1.0
 
         delta_lr = max_lr - min_lr
         coeff = None

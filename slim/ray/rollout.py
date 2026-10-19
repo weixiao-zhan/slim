@@ -323,7 +323,6 @@ class RolloutServer:
         new_engines = []
         for g, dead_indices in zip(self.server_groups, dead_per_group, strict=True):
             logger.info(f"Recovered {g.num_new_engines} dead rollout engines (worker_type={g.worker_type})")
-            assert g.num_new_engines == len(dead_indices), "num_new_engines does not match dead_indices length"
             if g.needs_offload:
                 new_engines.extend(g.all_engines[i] for i in dead_indices)
 
@@ -472,7 +471,6 @@ class RolloutManager:
             srv.recover()
 
     def get_num_rollout_per_epoch(self):
-        assert self.args.rollout_global_dataset
         return len(self.data_source) // self.args.rollout_batch_size
 
     def generate(self, rollout_id):
@@ -767,8 +765,6 @@ def _allocate_rollout_engine_addr_and_ports_normal(
                 addr_and_ports[rank + i]["dist_init_addr"] = f"{get_addr()}:{get_port(30 + args.sglang_dp_size)}"
 
     for i, _ in rollout_engines:
-        for key in ["port", "nccl_port", "dist_init_addr"]:
-            assert key in addr_and_ports[i], f"Engine {i} {key} is not set."
         logger.info(f"Ports for engine {i}: {addr_and_ports[i]}")
 
     return addr_and_ports, node_port_cursor

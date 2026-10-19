@@ -1,9 +1,9 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import io
 import logging
 
+import numpy as np
 import pybase64
 import torch
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
@@ -29,20 +29,11 @@ def load_processor(name_or_path: str, **kwargs):
     return proc
 
 
-def pil_to_data_url(image) -> str:
-    """Encode a PIL image as a PNG data URL."""
-    buffer = io.BytesIO()
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image.save(buffer, format="PNG")
-    image_base64 = pybase64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{image_base64}"
-
-
 def encode_tensor_to_b64_envelope(value) -> dict:
     """Encode a CPU tensor as a JSON-safe base64 envelope."""
     tensor = value.detach().cpu().contiguous()
-    raw = tensor.view(torch.uint8).numpy().tobytes()
+    # An empty tensor has stride 0, which `view` rejects.
+    raw = tensor.view(torch.uint8).numpy() if tensor.numel() else b""
     return {
         "__tensor__": True,
         "dtype": str(tensor.dtype).removeprefix("torch."),
@@ -51,10 +42,24 @@ def encode_tensor_to_b64_envelope(value) -> dict:
     }
 
 
+def encode_array_to_b64_envelope(values, dtype: type[np.number], columns: int | None = None) -> dict:
+    """Encode a list, or a list of equal-length rows, of numbers as a tensor envelope.
+
+    ``columns`` fixes the row width, so that no rows still encode as ``[0, columns]``.
+    """
+    array = np.asarray(values, dtype=dtype)
+    if columns is not None:
+        array = array.reshape(-1, columns)
+    return encode_tensor_to_b64_envelope(torch.from_numpy(array))
+
+
 def decode_tensor_from_b64_envelope(value: dict) -> torch.Tensor:
     """Decode a tensor produced by ``encode_tensor_to_b64_envelope``."""
     raw = pybase64.b64decode(value["data"], validate=True)
     dtype = getattr(torch, value["dtype"])
+    if not raw:
+        # `torch.frombuffer` rejects an empty buffer.
+        return torch.empty(value["shape"], dtype=dtype)
     return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(value["shape"])
 
 

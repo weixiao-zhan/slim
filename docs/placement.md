@@ -115,6 +115,7 @@ On-policy RL syncs model weights from the FSDP actor to the SGLang rollout engin
 Slim treats each engine as an opaque unit of `rollout_num_gpus_per_replica` GPUs.
 How the engine internally splits those GPUs (TP/PP/DP/EP) is configured via sglang args and is transparent to the weight update path; the sglang engine discards any param slice it does not need.
 The NeMo state-dict adapter converts each tensor to its Hugging Face name and layout before transport.
+Each tensor is first cast to the dtype FSDP2 computes it in, so the all-gather and the engine carry the weights the forward uses: BF16 for the bulk of the fp32 master weights, and fp32 for units that compute in fp32, such as Qwen3.5's Gated DeltaNet holders.
 
 ![Weight sync paths](images/WeightSync.png)
 

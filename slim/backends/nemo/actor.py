@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import random
+from functools import partial
 
 import ray
 import torch
@@ -19,7 +21,7 @@ from slim.utils.data import process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.memory_utils import clear_memory
 from slim.utils.misc import load_function
-from slim.utils.ppo_utils import compute_approx_kl, compute_policy_loss
+from slim.utils.ppo_utils import compute_approx_kl, compute_score_centering_loss, compute_surrogate_weight
 from slim.utils.quant import Quantizer
 from slim.utils.timer import Timer, timer
 
@@ -27,7 +29,6 @@ from .base import NeMoTrainer, _move_module
 from .checkpoint import is_hf_checkpoint
 from .data_packing import (
     SEQUENCE_FIELDS,
-    fill_document_terminal_slots,
     unpack_sequences,
 )
 from .packed_cp_forward import prepare_forward
@@ -83,8 +84,11 @@ class ActorNeMoTrainer(NeMoTrainer):
         clear_memory()
         dist.barrier(group=get_gloo_group())
 
+        # The frozen reference has no optimizer, so no master weights: it keeps the checkpoint's dtype.
+        ref_args = copy.copy(self.args)
+        ref_args.master_weight_dtype = "auto"
         ref_model = build_model(
-            self.args,
+            ref_args,
             checkpoint_path,
             self.distributed_setup,
             routing_replay=False,
@@ -117,8 +121,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     ) -> None:
         is_reference = model_tag == "ref"
         active_model = self.ref_model if is_reference else self.model
-        if active_model is None:
-            raise RuntimeError("reference log probabilities requested without a reference model")
 
         if is_reference:
             _move_module(self.model, "cpu")
@@ -141,17 +143,13 @@ class ActorNeMoTrainer(NeMoTrainer):
                     replay_enabled = not is_reference and self.args.use_rollout_routing_replay
                     targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
                     with prepared.context_factory(), replay_router_targets(targets):
-                        output = active_model(**prepared.model_batch)
+                        output = active_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
                         local_log_probs = selective_log_probs(
                             output.logits,
-                            prepared.fields["labels"],
+                            prepared.fields["labels"][:, prepared.loss_positions],
                             temperature=self.args.rollout_temperature,
                         )
-                    full_log_probs = prepared.gather(local_log_probs, fill=0)
-                    pack[store_key] = fill_document_terminal_slots(
-                        full_log_probs.squeeze(0),
-                        pack["cu_seqlens"],
-                    ).detach().cpu()
+                    pack[store_key] = prepared.gather(prepared.scatter_loss_values(local_log_probs)).squeeze(0).cpu()
         finally:
             if is_reference:
                 active_model.eval()
@@ -176,8 +174,6 @@ class ActorNeMoTrainer(NeMoTrainer):
     def _prepare_mismatch(self, pack: dict) -> None:
         if not (self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics):
             return
-        if "actor_old_log_probs" not in pack or "rollout_log_probs" not in pack:
-            raise KeyError("mismatch correction requires actor_old_log_probs and rollout_log_probs")
         if self.args.mismatch_correction == "none":
             return
 
@@ -209,91 +205,71 @@ class ActorNeMoTrainer(NeMoTrainer):
         global_tokens: torch.Tensor,
         loss_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        labels = fields["labels"]
         mask = fields["loss_masks"].to(torch.float32)
         document_ids = fields["document_ids"]
+
+        def sequence_mean(values, value_mask=mask):
+            return reduce_weighted_sequence_mean(
+                values, value_mask, document_ids, num_documents, global_sequences, self.cp_group, loss_weights
+            )
+
+        def policy_mean(values, value_mask=mask):
+            # `--loss-normalization-unit token` denominates the policy terms in tokens.
+            if self.args.loss_normalization_unit == "token":
+                return reduce_token_mean(values, value_mask, global_tokens)
+            return sequence_mean(values, value_mask)
+
+        # Read everything the loss needs from the logits in one fused pass, after the entropy:
+        # the kernel overwrites the logits with their gradient.
         local_entropy = entropy_from_logits(logits) if self.args.entropy_coef != 0 else None
-        log_probs = selective_log_probs(logits, labels, temperature=self.args.rollout_temperature)
+        scored_token_ids = fields["labels"].unsqueeze(-1)
+        if self.args.use_score_centering is not None:
+            scored_token_ids = torch.cat((scored_token_ids, fields["rollout_topk_token_ids"].long()), dim=-1)
+        scored_log_probs = selective_log_probs(logits, scored_token_ids, temperature=self.args.rollout_temperature)
+        log_probs, topk_log_probs = scored_log_probs[..., 0], scored_log_probs[..., 1:]
         old_key = "actor_old_log_probs" if self.args.old_logprob_source == "actor" else "rollout_log_probs"
-        if old_key not in fields:
-            raise KeyError(f"{old_key} is required for the policy ratio")
         old_log_probs = fields[old_key].to(log_probs.dtype)
         advantages = fields["advantages"].to(log_probs.dtype)
 
-        policy_log_ratio = old_log_probs - log_probs
+        score, old_score = log_probs, old_log_probs
         if self.args.advantage_estimator == "gspo":
-            policy_log_ratio = sequence_mean_at_tokens(
-                policy_log_ratio,
-                mask,
-                document_ids,
-                num_documents,
-                self.cp_group,
-            )
+            # GSPO weighs the sequence-mean score by the sequence-level ratio.
+            score = sequence_mean_at_tokens(log_probs, mask, document_ids, num_documents, self.cp_group)
+            old_score = sequence_mean_at_tokens(old_log_probs, mask, document_ids, num_documents, self.cp_group)
+        policy_log_ratio = old_score - score
 
-        pg_values, clip_values = compute_policy_loss(
-            policy_log_ratio,
-            log_probs,
-            advantages,
-            self.args.eps_clip,
-            self.args.eps_clip_high,
-            self.args.policy_surrogate,
-            self.args.eps_clip_c,
+        # The detached surrogate, $-A \operatorname{sg}[w_x] \log p_x$.
+        surrogate_weight = partial(
+            compute_surrogate_weight,
+            eps_clip=self.args.eps_clip,
+            eps_clip_high=self.args.eps_clip_high,
+            policy_surrogate=self.args.policy_surrogate,
+            eps_clip_c=self.args.eps_clip_c,
         )
+        weights, clipped = surrogate_weight((-policy_log_ratio).exp(), advantages)
+        pg_values = -advantages * weights * score
+        # Per-token diagnostics, logged as their weighted sequence mean.
+        sequence_metrics = {}
+        if self.args.use_score_centering is not None:
+            # Score centering adds $A \sum_{v \in H} \operatorname{sg}[q_v w_v - \alpha p_v] \log p_v$.
+            correction, topk_mass, rho = compute_score_centering_loss(
+                topk_log_probs,
+                fields["rollout_topk_log_probs"].to(topk_log_probs.dtype),
+                advantages,
+                surrogate_weight,
+            )
+            pg_values = pg_values + correction
+            sequence_metrics["score_centering/topk_mass"] = topk_mass
+            sequence_metrics["score_centering/rho"] = rho
         effective_mask = fields.get("mismatch_masks", mask).to(mask.dtype)
         if "mismatch_weights" in fields:
             pg_values = pg_values * fields["mismatch_weights"].to(pg_values.dtype)
-        pg_kl_values = torch.exp(-policy_log_ratio) + policy_log_ratio - 1
-
-        if self.args.loss_normalization_unit == "token":
-            pg_loss = reduce_token_mean(pg_values, effective_mask, global_tokens)
-            pg_clipfrac = reduce_token_mean(clip_values, mask, global_tokens)
-            pg_kl_k3 = reduce_token_mean(pg_kl_values, mask, global_tokens)
-        else:
-            pg_loss = reduce_weighted_sequence_mean(
-                pg_values,
-                effective_mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
-            pg_clipfrac = reduce_weighted_sequence_mean(
-                clip_values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
-            pg_kl_k3 = reduce_weighted_sequence_mean(
-                pg_kl_values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
+        pg_loss = policy_mean(pg_values, effective_mask)
 
         zero = logits.new_zeros((), dtype=torch.float32)
-        entropy_loss = zero
-        if local_entropy is not None:
-            entropy_loss = reduce_weighted_sequence_mean(
-                local_entropy,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
-
+        entropy_loss = zero if local_entropy is None else sequence_mean(local_entropy)
         kl_loss = zero
         if self.args.kl_loss_coef != 0:
-            if "ref_log_probs" not in fields:
-                raise KeyError("ref_log_probs is required when kl_loss_coef is nonzero")
             importance_ratio = None
             if self.args.use_unbiased_kl:
                 importance_ratio = torch.exp(log_probs - old_log_probs)
@@ -303,58 +279,25 @@ class ActorNeMoTrainer(NeMoTrainer):
                 kl_loss_type=self.args.kl_loss_type,
                 importance_ratio=importance_ratio,
             )
-            kl_loss = reduce_weighted_sequence_mean(
-                kl_values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
+            kl_loss = sequence_mean(kl_values)
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss + self.args.kl_loss_coef * kl_loss
         metrics = {
             "loss": loss.detach(),
             "pg_loss": pg_loss.detach(),
-            "pg_clipfrac": pg_clipfrac.detach(),
-            "pg_kl_k3": pg_kl_k3.detach(),
+            "pg_clipfrac": policy_mean(clipped).detach(),
+            "pg_kl_k3": policy_mean(torch.exp(-policy_log_ratio) + policy_log_ratio - 1).detach(),
             "entropy_loss": entropy_loss.detach(),
         }
         if self.args.kl_loss_coef != 0:
             metrics["kl_loss"] = kl_loss.detach()
         if "actor_old_log_probs" in fields and "rollout_log_probs" in fields:
             mismatch_ratio = fields["actor_old_log_probs"] - fields["rollout_log_probs"]
-            metrics["mismatch/kl_k3"] = reduce_weighted_sequence_mean(
-                torch.exp(mismatch_ratio) - mismatch_ratio - 1,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            ).detach()
-            metrics["mismatch/log_prob_abs_diff"] = reduce_weighted_sequence_mean(
-                mismatch_ratio.abs(),
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            ).detach()
-        for name, values in fields.items():
-            if not name.startswith("mismatch/"):
-                continue
-            metrics[name] = reduce_weighted_sequence_mean(
-                values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            ).detach()
+            sequence_metrics["mismatch/kl_k3"] = torch.exp(mismatch_ratio) - mismatch_ratio - 1
+            sequence_metrics["mismatch/log_prob_abs_diff"] = mismatch_ratio.abs()
+        sequence_metrics.update((name, values) for name, values in fields.items() if name.startswith("mismatch/"))
+        for name, values in sequence_metrics.items():
+            metrics[name] = sequence_mean(values).detach()
         return loss, metrics
 
     def _custom_loss(
@@ -365,15 +308,9 @@ class ActorNeMoTrainer(NeMoTrainer):
         local_entropy: torch.Tensor | None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         full_pack = dict(pack)
-        full_pack["cur_log_probs"] = fill_document_terminal_slots(
-            prepared.gather(local_log_probs, fill=0).squeeze(0),
-            pack["cu_seqlens"],
-        )
+        full_pack["cur_log_probs"] = prepared.gather(prepared.scatter_loss_values(local_log_probs)).squeeze(0)
         if local_entropy is not None:
-            full_pack["entropy"] = fill_document_terminal_slots(
-                prepared.gather(local_entropy, fill=0).squeeze(0),
-                pack["cu_seqlens"],
-            )
+            full_pack["entropy"] = prepared.gather(prepared.scatter_loss_values(local_entropy)).squeeze(0)
         batches = unpack_sequences(full_pack)
         device = local_log_probs.device
         for batch in batches:
@@ -415,21 +352,22 @@ class ActorNeMoTrainer(NeMoTrainer):
             prepared.context_factory(),
             replay_router_targets(targets),
         ):
-            output = self.model(**prepared.model_batch)
+            output = self.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
             if self.args.loss_type == "custom_loss":
                 local_entropy = None
                 if self.args.entropy_coef != 0:
                     local_entropy = entropy_from_logits(output.logits)
                 local_log_probs = selective_log_probs(
                     output.logits,
-                    prepared.fields["labels"],
+                    prepared.fields["labels"][:, prepared.loss_positions],
                     temperature=self.args.rollout_temperature,
                 )
                 loss, metrics = self._custom_loss(pack, prepared, local_log_probs, local_entropy)
             else:
+                # The logits cover only the loss positions, so the loss reads its fields there too.
                 loss, metrics = self._policy_loss(
                     output.logits,
-                    prepared.fields,
+                    {name: value[:, prepared.loss_positions] for name, value in prepared.fields.items()},
                     num_documents=pack["cu_seqlens"].numel() - 1,
                     global_sequences=global_sequences,
                     global_tokens=global_tokens,

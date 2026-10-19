@@ -49,7 +49,9 @@ if [[ ! -f "$FIRST_ROLLOUT_CAPTURE" || "${NEMO_GRAD_NORM_REGENERATE_ROLLOUT:-0}"
         --rollout-num-gpus-per-replica 2
         --sglang-mem-fraction-static 0.7
         --sglang-attention-backend fa3
-        --sglang-mamba-radix-cache-strategy extra_buffer
+        --sglang-mamba-ssm-dtype float32
+        --sglang-mamba-radix-cache-strategy extra_buffer_lazy
+        --sglang-max-mamba-cache-size 512
         --sglang-page-size 64
 
         --hf-checkpoint $MODEL_DIR

@@ -27,11 +27,11 @@ from tqdm import tqdm
 
 mp.set_start_method("spawn", force=True)
 
-from sglang.srt.layers.quantization.fp8_kernel import (
+from sglang.kernels.ops.quantization.fp8_kernel import (
     _w8a8_block_fp8_matmul,
     _w8a8_block_fp8_matmul_unrolledx4,
 )
-from sglang.srt.layers.quantization.int8_kernel import _w8a8_block_int8_matmul
+from sglang.kernels.ops.quantization.int8_kernel import _w8a8_block_int8_matmul
 from sglang.srt.utils import (
     get_device,
     get_device_core_count,
@@ -381,14 +381,8 @@ def tune_on_gpu(args_dict):
     input_type = args.input_type
 
     search_space = get_configs_compute_bound()
-    # sglang's block-FP8 GEMM requires BLOCK_SIZE_K >= the quant block_k (it steps the
-    # per-block weight scale once per BLOCK_SIZE_K, so a smaller tile would read a partial
-    # scale). At load it CLAMPS any tuned BLOCK_SIZE_K < block_k up to block_k — which
-    # means a config tuned with a smaller K tile is NOT what actually runs. Filter those
-    # out here (BLOCK_SIZE_K >= block_k) so the tuned config matches the executed kernel.
-    # (The old `block_k % BLOCK_SIZE_K == 0` test let BLOCK_SIZE_K=64 through for block_k=128.)
     search_space = [
-        config for config in search_space if config["BLOCK_SIZE_K"] >= block_k
+        config for config in search_space if block_k % config["BLOCK_SIZE_K"] == 0
     ]
 
     start = time.perf_counter()
@@ -527,7 +521,9 @@ if __name__ == "__main__":
     parser.add_argument("--block-k", type=int, default=128)
     parser.add_argument("--batch-sizes", nargs="+", type=int, required=False)
     parser.add_argument(
-        "--save-path", type=str, default="python/sglang/srt/layers/quantization/configs"
+        "--save-path",
+        type=str,
+        default="python/sglang/kernels/ops/quantization/configs",
     )
     args = parser.parse_args()
 
