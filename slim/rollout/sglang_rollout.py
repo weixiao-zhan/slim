@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import torch
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
@@ -172,9 +171,9 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
         multimodal_inputs=multimodal_inputs,
     )
     if (top_k := state.args.use_score_centering) is not None:
-        # The top-K is K entries per token, so it lives in arrays rather than nested lists.
-        trajectory.rollout_topk_log_probs = np.zeros((edge_len, top_k), dtype=np.float32)
-        trajectory.rollout_topk_token_ids = np.zeros((edge_len, top_k), dtype=np.int32)
+        # The top-K is K entries per token, so it lives in tensors rather than nested lists.
+        trajectory.rollout_topk_log_probs = torch.zeros((edge_len, top_k), dtype=torch.float32)
+        trajectory.rollout_topk_token_ids = torch.zeros((edge_len, top_k), dtype=torch.int32)
     return trajectory
 
 
@@ -252,12 +251,8 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     trajectory.rollout_log_probs.extend(output_logprobs["logprobs"].tolist())
     if args.use_score_centering is not None:
         top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
-        trajectory.rollout_topk_log_probs = np.concatenate(
-            (trajectory.rollout_topk_log_probs, top_logprobs["logprobs"].numpy())
-        )
-        trajectory.rollout_topk_token_ids = np.concatenate(
-            (trajectory.rollout_topk_token_ids, top_logprobs["token_ids"].numpy())
-        )
+        trajectory.rollout_topk_log_probs = torch.cat((trajectory.rollout_topk_log_probs, top_logprobs["logprobs"]))
+        trajectory.rollout_topk_token_ids = torch.cat((trajectory.rollout_topk_token_ids, top_logprobs["token_ids"]))
 
     if state.routing_replay_shape is not None:
         num_layers, top_k = state.routing_replay_shape
@@ -265,13 +260,13 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
         def _decode_routed_experts(envelope: dict):
-            return decode_tensor_envelopes(envelope).numpy().reshape(prediction_count, num_layers, top_k)
+            return decode_tensor_envelopes(envelope).reshape(prediction_count, num_layers, top_k)
 
         fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
         trajectory.rollout_routed_experts = (
             fresh
             if trajectory.rollout_routed_experts is None
-            else np.concatenate((trajectory.rollout_routed_experts, fresh))
+            else torch.cat((trajectory.rollout_routed_experts, fresh))
         )
 
     return episode
@@ -379,7 +374,7 @@ async def generate_rollout_async(
             if do_print:
                 ep = group.episodes[0]
                 logger.info(
-                    f"First rollout sample: {[t.text for t in ep.trajectories]}, "
+                    f"First rollout sample: {ep.trajectories[-1].text if ep.trajectories else None}, "
                     f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
                 )
                 do_print = False
@@ -399,7 +394,7 @@ async def generate_rollout_async(
     pbar.close()
     ep = kept_groups[-1].episodes[0]
     logger.info(
-        f"Finish rollout: {[t.text for t in ep.trajectories]}, "
+        f"Finish rollout: {ep.trajectories[-1].text if ep.trajectories else None}, "
         f"label: {ep.example.get('label')}, reward: {ep.get_reward_value()}",
     )
 
@@ -466,9 +461,10 @@ async def eval_rollout_single_dataset(
     groups = await atqdm.gather(*tasks, desc=f"Eval {dataset_cfg.name}")
     episodes = [episode for group in groups for episode in group.episodes]
     if episodes:
+        ep = episodes[0]
         logger.info(
-            f"eval_rollout_single_dataset example data: {[t.text for t in episodes[0].trajectories]} "
-            f"reward={episodes[0].get_reward_value()}"
+            f"eval_rollout_single_dataset example data: {ep.trajectories[-1].text if ep.trajectories else None} "
+            f"reward={ep.get_reward_value()}"
         )
 
     return {dataset_cfg.name: episodes}

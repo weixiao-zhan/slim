@@ -126,7 +126,7 @@ class SglangConfig:
         sglang:
           - name: actor
             model_path: /path/to/actor
-            update_weights: true          # receives training weight updates (default)
+            update_weights: true          # receives training weight updates
             num_gpus_per_replica: 2
             server_groups:
               - worker_type: prefill
@@ -177,7 +177,7 @@ class SglangConfig:
                     model_path=m.get("model_path"),
                     num_gpus_per_replica=m.get("num_gpus_per_replica"),
                     server_groups=groups,
-                    update_weights=m.get("update_weights", True),
+                    update_weights=m.get("update_weights"),
                 )
             )
         return SglangConfig(models=models)

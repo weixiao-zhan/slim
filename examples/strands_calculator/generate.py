@@ -23,7 +23,7 @@ import io
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import numpy as np
+import torch
 from openai.types.chat import ChatCompletion
 from strands import Agent
 from strands.models.openai import OpenAIModel
@@ -140,18 +140,18 @@ class SGLangChatModel(OpenAIModel):
         if (top_k := self.state.args.use_score_centering) is not None:
             # Inert rows for the prompt, then one row per generated token.
             top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
-            trajectory.rollout_topk_log_probs = np.concatenate(
-                (np.zeros((prompt_predictions, top_k), np.float32), top_logprobs["logprobs"].numpy())
+            trajectory.rollout_topk_log_probs = torch.cat(
+                (torch.zeros((prompt_predictions, top_k), dtype=torch.float32), top_logprobs["logprobs"])
             )
-            trajectory.rollout_topk_token_ids = np.concatenate(
-                (np.zeros((prompt_predictions, top_k), np.int32), top_logprobs["token_ids"].numpy())
+            trajectory.rollout_topk_token_ids = torch.cat(
+                (torch.zeros((prompt_predictions, top_k), dtype=torch.int32), top_logprobs["token_ids"])
             )
 
         if self.episode.has_multimodal:
             trajectory.multimodal_inputs = decode_tensor_envelopes(meta_info["processor_outputs"])
 
         if self.state.routing_replay_shape is not None:
-            experts = decode_tensor_envelopes(meta_info["routed_experts"]).numpy()
+            experts = decode_tensor_envelopes(meta_info["routed_experts"])
             trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.routing_replay_shape)
 
         self.finish_reason = choice.finish_reason
