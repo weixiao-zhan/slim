@@ -32,7 +32,8 @@ def load_processor(name_or_path: str, **kwargs):
 def encode_tensor_to_b64_envelope(value) -> dict:
     """Encode a CPU tensor as a JSON-safe base64 envelope."""
     tensor = value.detach().cpu().contiguous()
-    raw = tensor.view(torch.uint8).numpy().tobytes()
+    # An empty tensor has stride 0, which `view` rejects.
+    raw = tensor.view(torch.uint8).numpy() if tensor.numel() else b""
     return {
         "__tensor__": True,
         "dtype": str(tensor.dtype).removeprefix("torch."),

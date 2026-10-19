@@ -44,9 +44,9 @@ class Trajectory:
     token_ids: Any = field(default_factory=list)       # [int] → LongTensor
     loss_mask: Any | None = None                       # [int] → IntTensor
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
-    rollout_topk_log_probs: Any | None = None          # np.ndarray [seq_len - 1, k] → FloatTensor
-    rollout_topk_token_ids: Any | None = None          # np.ndarray [seq_len - 1, k] → IntTensor
-    rollout_routed_experts: Any | None = None          # np.ndarray [seq_len - 1, layer, top_k] → IntTensor
+    rollout_topk_log_probs: Any | None = None          # FloatTensor [seq_len - 1, k]
+    rollout_topk_token_ids: Any | None = None          # IntTensor [seq_len - 1, k]
+    rollout_routed_experts: Any | None = None          # IntTensor [seq_len - 1, layer, top_k]
     multimodal_inputs: Any | None = None               # dict[str, Tensor] → ObjectRef → dict[str, Tensor]
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)
