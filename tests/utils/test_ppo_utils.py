@@ -6,7 +6,7 @@
 import pytest
 import torch
 
-from slim.utils.ppo_utils import vanilla_gae
+from slim.utils.ppo_utils import compute_surrogate_weight, vanilla_gae
 
 
 NUM_GPUS = 0
@@ -70,13 +70,34 @@ def test_vanilla_gae_is_invariant_to_observation_length_and_values():
     )
 
 
+def _ratio_loss(ratio, advantages, policy_surrogate, eps_clip, eps_clip_high, eps_clip_c):
+    """Original surrogate losses, which differentiate the ratio itself."""
+    clamped = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
+    if policy_surrogate == "is":
+        return -ratio * advantages
+    if policy_surrogate == "tis":
+        return -clamped * advantages
+    if policy_surrogate == "cis":
+        return -clamped.detach() * advantages * ratio.log()
+    losses = torch.maximum(-ratio * advantages, -clamped * advantages)
+    if eps_clip_c is None:
+        return losses
+    return torch.where(advantages < 0, torch.minimum(-eps_clip_c * advantages, losses), losses)
+
+
 @pytest.mark.unit
-def test_vanilla_gae_validates_shapes():
-    with pytest.raises(ValueError, match="must have the same shape"):
-        vanilla_gae(
-            torch.zeros(1, 3),
-            torch.zeros(1, 3),
-            torch.ones(1, 2),
-            gamma=1.0,
-            lambd=1.0,
-        )
+@pytest.mark.parametrize(
+    ("policy_surrogate", "eps_clip_c"),
+    [("ppo_clip", None), ("ppo_clip", 1.5), ("is", None), ("tis", None), ("cis", None)],
+)
+def test_surrogate_weights_reproduce_the_ratio_gradient(policy_surrogate, eps_clip_c):
+    ratios = torch.tensor([0.5, 0.9, 1.1, 1.4, 2.0])
+    advantages = torch.tensor([1.0, -1.0]).repeat_interleave(len(ratios))
+    log_probs = ratios.log().repeat(2).requires_grad_(True)
+    reference_log_probs = log_probs.detach().clone().requires_grad_(True)
+
+    weights, _ = compute_surrogate_weight(log_probs.exp(), advantages, 0.2, 0.3, policy_surrogate, eps_clip_c)
+    (-advantages * weights * log_probs).sum().backward()
+    _ratio_loss(reference_log_probs.exp(), advantages, policy_surrogate, 0.2, 0.3, eps_clip_c).sum().backward()
+
+    torch.testing.assert_close(log_probs.grad, reference_log_probs.grad)

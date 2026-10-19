@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 
 import torch
 from nemo_automodel.components.distributed.blockdiag_cp import make_cp_blockdiag_batch_and_ctx
@@ -31,6 +31,15 @@ class PreparedForward:
     model_batch: dict
     fields: dict[str, torch.Tensor]
     sharder: object
+
+    @cached_property
+    def loss_positions(self) -> torch.Tensor:
+        """Local positions with a nonzero loss mask, the only predictions a policy loss reads."""
+        return self.fields["loss_masks"][0].nonzero().squeeze(-1)
+
+    def scatter_loss_values(self, values: torch.Tensor) -> torch.Tensor:
+        """Scatter one value per `loss_positions` entry into the local sequence, zero elsewhere."""
+        return values.new_zeros(self.fields["loss_masks"].shape).index_copy(1, self.loss_positions, values)
 
     def gather(self, tensor: torch.Tensor, *, fill=0) -> torch.Tensor:
         return self.sharder.gather_token_tensor(tensor, seq_dim=1, trim=True, fill=fill)

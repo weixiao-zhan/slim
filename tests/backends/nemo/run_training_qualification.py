@@ -155,6 +155,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr_warmup_iters=0,
         lr_wsd_decay_iters=None,
         lr_wsd_decay_style=None,
+        master_weight_dtype="fp32",
         mismatch_correction="none",
         nemo_dispatcher="torch",
         nemo_experts_backend="torch_mm",
@@ -174,6 +175,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         save=checkpoint_dir,
         start_rollout_id=0,
         use_rollout_routing_replay=cli.routing_replay,
+        use_score_centering=None,
         use_unbiased_kl=False,
         value_clip=0.2,
         weight_decay=0.0,
@@ -540,8 +542,8 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
     replay_count = len(RouterReplay.instances())
     if replay_count:
         with torch.no_grad(), RouterReplay.record(), prepared.context_factory():
-            output = trainer.model(**prepared.model_batch)
-            local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
+            output = trainer.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+            local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"][:, prepared.loss_positions])
         recorded = RouterReplay.collect()
         local_routes = torch.stack(recorded, dim=1).unsqueeze(0)
         full_routes = prepared.gather(local_routes, fill=0)
@@ -551,18 +553,11 @@ def _record_actor_inputs(trainer: ActorNeMoTrainer, pack: dict) -> tuple[torch.T
         ).to(device="cpu", dtype=torch.int32)
     else:
         with torch.no_grad(), prepared.context_factory():
-            output = trainer.model(**prepared.model_batch)
-            local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"])
-    full_log_probs = prepared.gather(local_log_probs, fill=0)
-    pack["rollout_log_probs"] = (
-        fill_document_terminal_slots(
-            full_log_probs.squeeze(0),
-            pack["cu_seqlens"],
-        )
-        .detach()
-        .cpu()
-    )
-    return full_log_probs.detach().cpu(), replay_count
+            output = trainer.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+            local_log_probs = selective_log_probs(output.logits, prepared.fields["labels"][:, prepared.loss_positions])
+    full_log_probs = prepared.gather(prepared.scatter_loss_values(local_log_probs))
+    pack["rollout_log_probs"] = full_log_probs.squeeze(0).cpu()
+    return full_log_probs.cpu(), replay_count
 
 
 def _install_replay_counters() -> list[int]:
@@ -767,9 +762,9 @@ def _write_actor_score_artifact(cli: argparse.Namespace, trainer: ActorNeMoTrain
     prepared = prepare_forward(trainer.model, trainer.device_mesh, pack, padding_token_id=0)
     trainer.model.eval()
     with torch.no_grad(), prepared.context_factory():
-        model_output = trainer.model(**prepared.model_batch)
-        local_log_probs = selective_log_probs(model_output.logits, prepared.fields["labels"])
-    log_probs = prepared.gather(local_log_probs, fill=0).cpu()
+        model_output = trainer.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        local_log_probs = selective_log_probs(model_output.logits, prepared.fields["labels"][:, prepared.loss_positions])
+    log_probs = prepared.gather(prepared.scatter_loss_values(local_log_probs)).cpu()
     if dist.get_rank() == 0:
         torch.save(
             {
@@ -781,10 +776,7 @@ def _write_actor_score_artifact(cli: argparse.Namespace, trainer: ActorNeMoTrain
                         strict=True,
                     )
                 ],
-                "log_probs": fill_document_terminal_slots(
-                    log_probs.squeeze(0),
-                    pack["cu_seqlens"],
-                ),
+                "log_probs": log_probs.squeeze(0),
                 "consolidated_checkpoint": str(cli.checkpoint_dir / "iter_0000004/model/consolidated"),
             },
             output.with_suffix(".score.pt"),

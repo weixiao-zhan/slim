@@ -44,6 +44,8 @@ and `Episode.get_reward_value()` returns one scalar whichever level carries the 
 | `token_ids` | `list[int]` or `LongTensor [T]` | Full token sequence of this trajectory (prompt + generated) |
 | `loss_mask` | `list[int]` or `IntTensor [T]` | Source-token mask; 0 for prompt and terminal positions, 1 for generated predictions |
 | `rollout_log_probs` | `list[float]` or `FloatTensor [T]` | Source-token-aligned log-probabilities under the rollout policy |
+| `rollout_topk_log_probs` | `FloatTensor [T, K] \| None` | Source-token-aligned sampler top-$K$ log-probabilities, under `--use-score-centering K` |
+| `rollout_topk_token_ids` | `IntTensor [T, K] \| None` | Token ids of `rollout_topk_log_probs`, in the same order |
 | `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| None` | Source-token-aligned MoE expert indices recorded during rollout |
 | `multimodal_inputs` | `dict[str, Tensor] \| ObjectRef \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.); an `ObjectRef` between the rollout worker and `process_rollout_data`, see [Multimodal Input Lifecycle](#multimodal-input-lifecycle) |
 | `reward` | `float \| None` | Raw scalar reward for this trajectory |
@@ -87,7 +89,7 @@ as new tokens arrive.
 
 ### Source-Token Alignment
 
-During generation, `loss_mask`, `rollout_log_probs`, and `rollout_routed_experts` are
+During generation, `loss_mask`, `rollout_log_probs`, `rollout_topk_log_probs`, `rollout_topk_token_ids`, and `rollout_routed_experts` are
 temporary Python or NumPy values with length `len(token_ids) - 1`.
 `trajectory.finalize_source_token_alignment()` appends one neutral terminal slot and
 converts the sequence fields to CPU tensors with length `len(token_ids)`.

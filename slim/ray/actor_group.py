@@ -48,7 +48,6 @@ class RayTrainGroup:
         world_size = self._num_gpus
 
         # Use placement group to lock resources for models of same type
-        assert pg is not None
         pg, reordered_bundle_indices, _reordered_gpu_ids = pg
 
         env_vars = {

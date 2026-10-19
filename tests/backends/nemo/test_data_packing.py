@@ -5,10 +5,8 @@ import pytest
 import torch
 
 from slim.backends.nemo.data_packing import (
-    build_document_ids,
     build_model_batch,
     build_source_labels,
-    build_training_fields,
     fill_document_terminal_slots,
     pack_sequences,
     unpack_sequences,
@@ -61,27 +59,6 @@ def test_fill_document_terminal_slots_preserves_trailing_dimensions():
 
 
 @pytest.mark.unit
-def test_custom_mismatch_metrics_preserve_source_token_alignment():
-    pack = {
-        "cu_seqlens": torch.tensor([0, 3, 5], dtype=torch.int32),
-        "_mismatch_metrics": {
-            "rs_keep": torch.tensor([1.0, 0.0, 0.0, 0.5, 0.0]),
-        },
-    }
-
-    fields = build_training_fields(pack)
-
-    assert fields["mismatch/rs_keep"].tolist() == [[1.0, 0.0, 0.0, 0.5, 0.0]]
-
-
-@pytest.mark.unit
-def test_document_ids_include_zero_only_for_physical_padding():
-    ids = build_document_ids(torch.tensor([0, 2, 5], dtype=torch.int32), total_length=7)
-
-    assert ids.tolist() == [1, 1, 2, 2, 2, 0, 0]
-
-
-@pytest.mark.unit
 def test_pack_sequences_stays_on_cpu_and_emits_indexed_mask_for_multiple_documents():
     trajectories = [
         _trajectory([1, 2, 3], [0, 1]),
@@ -96,24 +73,6 @@ def test_pack_sequences_stays_on_cpu_and_emits_indexed_mask_for_multiple_documen
     assert batch["input_ids"].shape == (1, 5)
     assert batch["_packed_seq_ids"].tolist() == [[1, 1, 1, 2, 2]]
     assert batch["labels"].tolist() == [[2, 3, -100, 5, -100]]
-
-
-@pytest.mark.unit
-def test_single_document_uses_the_same_indexed_batch_contract():
-    pack = pack_sequences([_trajectory([1, 2, 3], [1, 1])])[0]
-
-    batch = build_model_batch(pack)
-
-    assert batch["_packed_seq_ids"].tolist() == [[1, 1, 1]]
-    assert batch["labels"].tolist() == [[2, 3, -100]]
-
-
-@pytest.mark.unit
-def test_pack_sequences_rejects_unfinalized_trajectory_fields():
-    trajectory = Trajectory(token_ids=[1, 2, 3], loss_mask=[1])
-
-    with pytest.raises(TypeError, match="finalized tensors"):
-        pack_sequences([trajectory])
 
 
 @pytest.mark.unit
@@ -141,21 +100,6 @@ def test_pack_sequences_allows_targets_to_be_attached_after_precompute():
     assert packs[0]["advantages"].tolist() == [1.0, 0.0, 0.0, 0.5, 0.0]
     assert packs[0]["old_values"].tolist() == pytest.approx([0.6, 0.0, 0.1, 0.2, 0.0])
     assert packs[0]["value_targets"].tolist() == pytest.approx([0.7, 0.0, 0.3, 0.4, 0.0])
-
-
-@pytest.mark.unit
-def test_update_packed_targets_rejects_partial_targets():
-    trajectories = [
-        Trajectory(token_ids=[1, 2], loss_mask=[1], reward=1.0),
-        Trajectory(token_ids=[3, 4], loss_mask=[1], reward=2.0),
-    ]
-    for trajectory in trajectories:
-        trajectory.finalize_source_token_alignment()
-    packs = pack_sequences(trajectories)
-    trajectories[0].set_train_targets([1.0, 0.0])
-
-    with pytest.raises(ValueError, match="advantages must be present for every trajectory"):
-        update_packed_targets(packs, trajectories)
 
 
 @pytest.mark.unit

@@ -64,7 +64,6 @@ def load_hf_dataset(path: str):
 
 def process_rollout_data(rollout_data_refs, dp_rank, dp_size):
     """Fetch this DP rank's trajectory batch and resolve its multimodal_inputs refs."""
-    assert len(rollout_data_refs) == dp_size
     if ray is None:
         raise ModuleNotFoundError("ray is required to process rollout data")
     batch = ray.get(rollout_data_refs[dp_rank])

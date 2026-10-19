@@ -26,6 +26,49 @@ def patch_automodel_optional_transformer_engine(parallelizer: Path) -> bool:
     )
 
 
+def patch_automodel_fsdp2_single_gpu(fsdp2: Path) -> None:
+    """Shard with FSDP2 at every world size, so one GPU computes under the mixed-precision policy."""
+    single_gpu_skip = """        if get_world_size_safe() == 1 or self.device_mesh.size() == 1:
+            logger.info("World size or FSDP mesh size is 1, skipping parallelization.")
+            if self.activation_checkpointing:
+                if is_selective_activation_checkpointing(self.activation_checkpointing):
+                    # Selective AC works on a plain model (no FSDP required), so
+                    # honor it on a single GPU instead of silently falling back
+                    # to full HF gradient checkpointing.
+                    apply_selective_activation_checkpointing(
+                        model,
+                        enable_compile=self.enable_compile,
+                        activation_checkpointing_scope=self.activation_checkpointing_scope,
+                    )
+                else:
+                    layer_groups = _extract_model_layer_groups(model)
+                    layers, ac_scopes = _filter_layer_groups_for_activation_checkpointing(
+                        layer_groups,
+                        self.activation_checkpointing_scope,
+                    )
+                    if _should_use_hf_native_gradient_checkpointing(
+                        model,
+                        layer_groups,
+                        ac_scopes,
+                        enable_compile=self.enable_compile,
+                    ):
+                        model.gradient_checkpointing_enable()
+                    else:
+                        apply_submodule_checkpointing(layers, detect_kv_sharing_and_maybe_disable_cache(model))
+            return model
+
+        if self.config.patch_is_packed_sequence:
+"""
+    always_shard = """        # The mixed-precision policy lives in FSDP2, so a single GPU shards as well.
+        if self.config.patch_is_packed_sequence:
+"""
+    patch_file(
+        fsdp2,
+        [(single_gpu_skip, always_shard)],
+        log_reason="AutoModel FSDP2 at every world size",
+    )
+
+
 def patch_automodel_blockdiag_cp1(batch: Path, exchange: Path) -> None:
     """Use AutoModel's block-diagonal batch context at every CP degree."""
     cp1_noop = """    from contextlib import nullcontext
@@ -288,8 +331,10 @@ def apply() -> None:
     parallelizer = automodel_dir / "components" / "moe" / "parallelizer.py"
     blockdiag_dir = automodel_dir / "components" / "distributed" / "blockdiag_cp"
     batch, exchange = blockdiag_dir / "batch.py", blockdiag_dir / "exchange.py"
+    fsdp2 = automodel_dir / "components" / "distributed" / "fsdp2.py"
     patch_automodel_optional_transformer_engine(parallelizer)
+    patch_automodel_fsdp2_single_gpu(fsdp2)
     patch_automodel_blockdiag_cp1(batch, exchange)
     model_files = patch_qwen3_5_packed_cp(automodel_dir)
-    for path in (parallelizer, batch, exchange, *model_files):
+    for path in (parallelizer, fsdp2, batch, exchange, *model_files):
         py_compile.compile(str(path), doraise=True)

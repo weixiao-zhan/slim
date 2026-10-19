@@ -20,22 +20,19 @@ def _selective_log_probs_forward_kernel(
     labels,
     output,
     num_columns,
+    num_labels,
     temperature,
     WRITE_GRADIENT: tl.constexpr,
-    IGNORE_INDEX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    LABEL_BLOCK_SIZE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     logits += row * num_columns
-    target = tl.load(labels + row)
-
-    if target == IGNORE_INDEX:
-        tl.store(output + row, 0.0)
-        if WRITE_GRADIENT:
-            for start in range(0, num_columns, BLOCK_SIZE):
-                columns = start + tl.arange(0, BLOCK_SIZE)
-                tl.store(logits + columns, 0.0, mask=columns < num_columns)
-        return
+    labels += row * num_labels
+    output += row * num_labels
+    label_columns = tl.arange(0, LABEL_BLOCK_SIZE)
+    label_mask = label_columns < num_labels
+    target = tl.load(labels)
 
     row_max = float("-inf")
     denominator = 0.0
@@ -49,10 +46,13 @@ def _selective_log_probs_forward_kernel(
         row_max = new_max
 
     log_denominator = row_max + tl.log(denominator)
-    selected = tl.load(logits + target).to(tl.float32) / temperature
-    tl.store(output + row, selected - log_denominator)
+    targets = tl.load(labels + label_columns, mask=label_mask, other=0)
+    selected = tl.load(logits + targets, mask=label_mask, other=0.0).to(tl.float32) / temperature
+    tl.store(output + label_columns, selected - log_denominator, mask=label_mask)
 
     if WRITE_GRADIENT:
+        # The selected logits are gathered by a few threads; let them all land before any thread overwrites the row.
+        tl.debug_barrier()
         for start in range(0, num_columns, BLOCK_SIZE):
             columns = start + tl.arange(0, BLOCK_SIZE)
             values = tl.load(logits + columns, mask=columns < num_columns, other=float("-inf"))
@@ -79,38 +79,57 @@ def _scale_log_probs_gradient_kernel(
 
 
 class _SelectiveLogProbs(torch.autograd.Function):
+    r"""Fused log probabilities at a label and at extra columns of the same rows.
+
+    With logits $z$, temperature $\tau$, $p = \mathrm{softmax}(z/\tau)$, label $x$, and
+    $1_x$ the one-hot vector of $x$, the forward pass overwrites the logits
+    with $(1_x - p)/\tau$, the gradient $\nabla_z \log p_x$. For the extra
+    columns $v$ the backward pass reuses it through
+    $\nabla_z \log p_v = \nabla_z \log p_x + (1_v - 1_x)/\tau$, so one
+    stored row serves every column.
+    """
+
     @staticmethod
     def forward(ctx, logits: torch.Tensor, labels: torch.Tensor, temperature: float) -> torch.Tensor:
         rows, num_columns = logits.shape
-        output = torch.empty(rows, dtype=torch.float32, device=logits.device)
+        num_labels = labels.shape[1]
+        output = torch.empty(rows, num_labels, dtype=torch.float32, device=logits.device)
         write_gradient = logits.requires_grad
         _selective_log_probs_forward_kernel[(rows,)](
             logits,
             labels,
             output,
             num_columns,
+            num_labels,
             temperature,
             WRITE_GRADIENT=write_gradient,
-            IGNORE_INDEX=-100,
             BLOCK_SIZE=_LOGPROB_BLOCK_SIZE,
+            LABEL_BLOCK_SIZE=triton.next_power_of_2(num_labels),
             num_warps=32,
         )
         if write_gradient:
-            ctx.save_for_backward(logits.detach())
+            ctx.save_for_backward(logits.detach(), labels)
             ctx.num_columns = num_columns
+            ctx.temperature = temperature
         return output
 
     @staticmethod
     def backward(ctx, output_gradient: torch.Tensor):
-        (gradient,) = ctx.saved_tensors
-        output_gradient = output_gradient.contiguous()
+        gradient, labels = ctx.saved_tensors
         _scale_log_probs_gradient_kernel[(gradient.shape[0],)](
             gradient,
-            output_gradient,
+            output_gradient.sum(dim=1).contiguous(),
             ctx.num_columns,
             BLOCK_SIZE=_LOGPROB_BLOCK_SIZE,
             num_warps=32,
         )
+        if labels.shape[1] > 1:
+            extra_gradient = output_gradient[:, 1:] / ctx.temperature
+            # A column at the label adds $(1_x - 1_x)/\tau = 0$. Adding and subtracting it
+            # instead would cancel in bf16 and bury the small gradient of a confident label.
+            extra_gradient = extra_gradient.masked_fill(labels[:, 1:] == labels[:, :1], 0)
+            gradient.scatter_add_(1, labels[:, 1:], extra_gradient.to(gradient.dtype))
+            gradient.scatter_add_(1, labels[:, :1], -extra_gradient.sum(dim=1, keepdim=True).to(gradient.dtype))
         return gradient, None, None
 
 
@@ -119,25 +138,25 @@ def selective_log_probs(
     labels: torch.Tensor,
     temperature: float | None = None,
 ) -> torch.Tensor:
-    """Select source-aligned target log probabilities."""
+    """Select source-aligned target log probabilities.
+
+    `labels` either matches `logits.shape[:-1]` or adds a trailing column dimension
+    whose first column is the target and whose other columns are extra vocabulary
+    ids read from the same softmax.
+    """
     temperature = 1.0 if temperature is None else temperature
     if temperature <= 0:
         raise ValueError(f"temperature must be positive, got {temperature}")
-    if logits.shape[:-1] != labels.shape:
-        raise ValueError(f"logits and labels shapes do not align: {logits.shape} and {labels.shape}")
+    single_label = labels.shape == logits.shape[:-1]
+    if single_label:
+        labels = labels.unsqueeze(-1)
 
-    if logits.is_cuda:
-        flat_logits = logits.reshape(-1, logits.shape[-1])
-        if not flat_logits.is_contiguous():
-            flat_logits = flat_logits.contiguous()
-        flat_labels = labels.reshape(-1).contiguous()
-        return _SelectiveLogProbs.apply(flat_logits, flat_labels, temperature).reshape_as(labels)
-
-    logits = logits / temperature
-    valid = labels != -100
-    targets = labels.masked_fill(~valid, 0).long()
-    selected = logits.float().log_softmax(dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    return selected.masked_fill(~valid, 0)
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    if not flat_logits.is_contiguous():
+        flat_logits = flat_logits.contiguous()
+    flat_labels = labels.reshape(-1, labels.shape[-1]).long().contiguous()
+    selected = _SelectiveLogProbs.apply(flat_logits, flat_labels, temperature).reshape(labels.shape)
+    return selected.squeeze(-1) if single_label else selected
 
 
 def entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
@@ -157,21 +176,8 @@ def count_global_denominators(packs: list[dict], dp_group, device) -> tuple[torc
     weight_sum = 0.0
     token_count = 0
     for pack in packs:
-        boundaries = pack["cu_seqlens"].tolist()
-        masks = pack["loss_masks"]
-        weights = pack["loss_weights"]
-        if len(weights) != len(boundaries) - 1:
-            raise ValueError(
-                f"{len(weights)} loss weights do not match {len(boundaries) - 1} packed documents"
-            )
-        weight_sum += sum(weights)
-        expected_length = boundaries[-1]
-        if masks.ndim != 1 or masks.shape[0] != expected_length:
-            raise ValueError(
-                f"source-aligned loss_masks shape {tuple(masks.shape)} does not match "
-                f"packed token count {expected_length}"
-            )
-        token_count += int(masks.sum())
+        weight_sum += sum(pack["loss_weights"])
+        token_count += int(pack["loss_masks"].sum())
 
     counts = torch.tensor([weight_sum, token_count], dtype=torch.float64, device=device)
     if torch.distributed.is_initialized() and torch.distributed.get_world_size(group=dp_group) > 1:

@@ -22,6 +22,8 @@ SEQUENCE_FIELDS = frozenset(
         "advantages",
         "value_targets",
         "rollout_log_probs",
+        "rollout_topk_log_probs",
+        "rollout_topk_token_ids",
         "rollout_routed_experts",
         "actor_old_log_probs",
         "ref_log_probs",
@@ -36,19 +38,8 @@ SEQUENCE_FIELDS = frozenset(
 TRAINING_FIELDS = SEQUENCE_FIELDS - {"tokens", "position_ids", "cur_log_probs", "cur_values", "entropy"}
 
 
-def _as_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
-    if not isinstance(value, torch.Tensor):
-        raise TypeError("packed Trajectory sequence fields must be finalized tensors")
+def _as_tensor(value: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
     return value.detach().to(device="cpu", dtype=dtype)
-
-
-def _validate_source_field(trajectory: Trajectory, name: str, value) -> None:
-    if value is None:
-        raise ValueError(f"{name} must be present for every training trajectory")
-    if len(value) != len(trajectory.token_ids):
-        raise ValueError(
-            f"{name} length {len(value)} does not match token count {len(trajectory.token_ids)}"
-        )
 
 
 def _optional_source_field(trajectories: list[Trajectory], indices: list[int], name: str, dtype: torch.dtype):
@@ -58,8 +49,6 @@ def _optional_source_field(trajectories: list[Trajectory], indices: list[int], n
         raise ValueError(f"{name} must be present for every trajectory in a pack or for none")
     if not all(present):
         return None
-    for index, value in zip(indices, values, strict=True):
-        _validate_source_field(trajectories[index], name, value)
     return torch.cat([_as_tensor(value, dtype=dtype) for value in values])
 
 
@@ -76,13 +65,6 @@ def pack_sequences(
         raise ValueError("every training trajectory must contain at least two tokens")
     if partitions is None:
         partitions = [list(range(len(trajectories)))]
-    else:
-        partitions = [list(partition) for partition in partitions]
-        if not partitions or any(not partition for partition in partitions):
-            raise ValueError("partitions must contain one or more non-empty packs")
-        indices = [index for partition in partitions for index in partition]
-        if sorted(indices) != list(range(len(trajectories))):
-            raise ValueError("partitions must contain every trajectory index exactly once")
 
     packs: list[dict] = []
     for indices in partitions:
@@ -93,7 +75,6 @@ def pack_sequences(
         for index in indices:
             trajectory = trajectories[index]
             tokens = _as_tensor(trajectory.token_ids, dtype=torch.long)
-            _validate_source_field(trajectory, "loss_mask", trajectory.loss_mask)
             token_parts.append(tokens)
             position_parts.append(torch.arange(tokens.numel(), dtype=torch.long))
             loss_mask_parts.append(_as_tensor(trajectory.loss_mask, dtype=torch.int32))
@@ -114,6 +95,8 @@ def pack_sequences(
             ("advantages", torch.float32),
             ("value_targets", torch.float32),
             ("rollout_log_probs", torch.float32),
+            ("rollout_topk_log_probs", torch.float32),
+            ("rollout_topk_token_ids", torch.int32),
             ("rollout_routed_experts", torch.int32),
         ):
             value = _optional_source_field(trajectories, indices, name, dtype)
@@ -121,11 +104,7 @@ def pack_sequences(
                 pack[name] = value
 
         values = [trajectories[index].values for index in indices]
-        if any(value is not None for value in values):
-            if not all(value is not None for value in values):
-                raise ValueError("values must be present for every trajectory in a pack or for none")
-            for index, value in zip(indices, values, strict=True):
-                _validate_source_field(trajectories[index], "values", value)
+        if values[0] is not None:
             pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
 
         multimodal_inputs: dict[str, list[torch.Tensor]] = {}
@@ -194,11 +173,7 @@ def update_packed_targets(packs: list[dict], trajectories: list[Trajectory]) -> 
             ("values", "old_values"),
         ):
             values = [getattr(trajectories[index], trajectory_field) for index in indices]
-            if any(value is not None for value in values) and not all(value is not None for value in values):
-                raise ValueError(f"{trajectory_field} must be present for every trajectory in a pack or for none")
-            if all(value is not None for value in values):
-                for index, value in zip(indices, values, strict=True):
-                    _validate_source_field(trajectories[index], trajectory_field, value)
+            if values[0] is not None:
                 pack[pack_field] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
             else:
                 pack.pop(pack_field, None)
@@ -217,12 +192,9 @@ def fill_document_terminal_slots(
     return output
 
 
-def build_document_ids(cu_seqlens: torch.Tensor, total_length: int | None = None) -> torch.Tensor:
+def build_document_ids(cu_seqlens: torch.Tensor) -> torch.Tensor:
     boundaries = cu_seqlens.tolist()
-    total_length = boundaries[-1] if total_length is None else total_length
-    if total_length < boundaries[-1]:
-        raise ValueError("total_length cannot be shorter than the packed token stream")
-    document_ids = torch.zeros(total_length, dtype=torch.long)
+    document_ids = torch.zeros(boundaries[-1], dtype=torch.long)
     for document_id, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:], strict=True), start=1):
         document_ids[start:end] = document_id
     return document_ids

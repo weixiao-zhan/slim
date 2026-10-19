@@ -57,6 +57,7 @@ def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
         freeze_vision_tower=True,
         freeze_audio_tower=True,
         freeze_language_model=False,
+        master_weight_dtype="fp32",
     )
 
 
@@ -96,9 +97,9 @@ def _pack(first_document: list[int]) -> dict:
 def _forward_log_probs(model, device_mesh, pack: dict) -> tuple[torch.Tensor, object]:
     prepared = prepare_forward(model, device_mesh, pack, padding_token_id=0)
     with prepared.context_factory():
-        output = model(**prepared.model_batch)
-        local = selective_log_probs(output.logits, prepared.fields["labels"])
-    return prepared.gather(local, fill=0), prepared
+        output = model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        local = selective_log_probs(output.logits, prepared.fields["labels"][:, prepared.loss_positions])
+    return prepared.gather(prepared.scatter_loss_values(local)), prepared
 
 
 def _canonical_module_name(name: str) -> str:
@@ -263,13 +264,12 @@ def main() -> None:
     reset_cp_attn_fire_count()
     prepared = prepare_forward(model, device_mesh, baseline_pack, padding_token_id=0)
     with prepared.context_factory():
-        output = model(**prepared.model_batch)
-        local = selective_log_probs(output.logits, prepared.fields["labels"])
-        valid = prepared.fields["labels"] != -100
+        output = model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        local = selective_log_probs(output.logits, prepared.fields["labels"][:, prepared.loss_positions])
         valid_targets = baseline_pack["tokens"].numel() - baseline_pack["cu_seqlens"].numel() + 1
-        local_loss = -(local * valid).sum() / (valid_targets * topology.logical_dp_size)
+        local_loss = -local.sum() / (valid_targets * topology.logical_dp_size)
         (local_loss * world_size).backward()
-    full_log_probs = prepared.gather(local.detach(), fill=0).cpu()
+    full_log_probs = prepared.gather(prepared.scatter_loss_values(local.detach())).cpu()
     mean_loss = (-full_log_probs.sum() / valid_targets).item()
     gradient_name, gradient = _gradient_vector(model)
 

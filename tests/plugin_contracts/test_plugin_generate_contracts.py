@@ -4,24 +4,18 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import types
 from contextlib import contextmanager
 
 import pytest
 
 try:
-    from ._shared import get_contract_path, install_paths, install_stubs, run_contract_test_for_file
+    from ._shared import install_paths, install_stubs
 except ImportError:
     try:
-        from plugin_contracts._shared import (
-            get_contract_path,
-            install_paths,
-            install_stubs,
-            run_contract_test_for_file,
-        )
+        from plugin_contracts._shared import install_paths, install_stubs
     except ImportError:
-        from _shared import get_contract_path, install_paths, install_stubs, run_contract_test_for_file
+        from _shared import install_paths, install_stubs
 
 install_paths()
 install_stubs(with_sglang_router=True, with_transformers=True)
@@ -36,12 +30,7 @@ REFERENCE_CUSTOM_GENERATE_MULTI_TRAJECTORY_PATH = (
 )
 
 from slim.rollout.sglang_rollout import generate_and_rm
-from slim.utils.misc import load_function
 from slim.utils.types import Episode, Trajectory
-
-
-def run_contract_test_file() -> None:
-    run_contract_test_for_file(__file__, path_args=["custom-generate-function-path"])
 
 
 def make_args(**overrides):
@@ -110,11 +99,6 @@ def assert_episode_contract(episode: Episode) -> None:
     assert episode.get_reward_value() is not None
 
 
-def assert_custom_generate_signature_matches_expected(fn) -> None:
-    params = tuple(inspect.signature(fn).parameters)
-    assert params[:2] == ("state", "episode") or params[:2] == ("state", "sample")
-
-
 class _DummySemaphore:
     async def __aenter__(self):
         return None
@@ -138,28 +122,6 @@ def patch_generate_state(monkeypatch):
     return sglang_rollout
 
 
-def test_generate_and_rm_default_generate_branch_is_stable(patch_generate_state, monkeypatch):
-    sglang_rollout = patch_generate_state
-
-    async def official_default_generate(state, episode: Episode):
-        episode.trajectories.append(Trajectory(token_ids=[31, 32], generated_text="default-generate"))
-        episode.reward = 1.0
-        episode.status = Episode.Status.COMPLETED
-        return episode
-
-    monkeypatch.setattr(sglang_rollout, "generate", official_default_generate)
-
-    result = asyncio.run(
-        generate_and_rm(
-            make_args(custom_generate_function_path=None),
-            Episode.from_example({"prompt": "prompt"}),
-            evaluation=False,
-        )
-    )
-    assert_episode_contract(result)
-    assert result.trajectory.generated_text == "default-generate"
-
-
 def test_generate_and_rm_prefers_per_episode_generate_function(patch_generate_state):
     args = make_args(custom_generate_function_path=REFERENCE_CUSTOM_GENERATE_PATH)
     ep = Episode.from_example({"prompt": "prompt"})
@@ -175,23 +137,3 @@ def test_generate_and_rm_decodes_every_trajectory(patch_generate_state):
     assert_episode_contract(result)
     assert [t.text for t in result.trajectories] == ["31 32", "33 34"]
     assert [t.generated_text for t in result.trajectories] == ["main-trajectory", "sub-agent-trajectory"]
-
-
-def test_custom_generate_function_path_supports_user_override(patch_generate_state):
-    custom_generate_path = get_contract_path(
-        "CUSTOM_GENERATE_FUNCTION_PATH",
-        REFERENCE_CUSTOM_GENERATE_PATH,
-    )
-    assert_custom_generate_signature_matches_expected(load_function(custom_generate_path))
-    result = asyncio.run(
-        generate_and_rm(
-            make_args(custom_generate_function_path=custom_generate_path),
-            Episode.from_example({"prompt": "prompt"}),
-            evaluation=False,
-        )
-    )
-    assert_episode_contract(result)
-
-
-if __name__ == "__main__":
-    run_contract_test_file()

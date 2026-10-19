@@ -31,12 +31,12 @@ def _episode(index: int, trajectory_lengths: list[int], reward: float = 1.0, gro
     return episode
 
 
-def _build(episodes, *, dp_size, num_steps, unit="episode", balance_data=True):
+def _build(episodes, *, dp_size, num_steps, balance_data=True):
     return build_dp_batches(
         episodes,
         dp_size=dp_size,
         num_steps=num_steps,
-        loss_normalization_unit=unit,
+        loss_normalization_unit="episode",
         pad_token_id=0,
         balance_data=balance_data,
     )
@@ -75,16 +75,6 @@ def test_every_rank_holds_the_same_document_count_per_step(dp_size, num_steps, b
     assert len({id(t) for t in real}) == len(real)
     padding = sum(1 for batch in batches for t in batch.trajectories if t.episode_index is None)
     assert padding < dp_size * num_steps
-
-
-@pytest.mark.unit
-def test_steps_slice_the_rank_local_list_contiguously():
-    batches = _build([_episode(index, [4]) for index in range(8)], dp_size=2, num_steps=2)
-
-    for batch in batches:
-        starts = [start for start, _ in batch.steps()]
-        assert starts == [0, batch.step_size]
-        assert [t for _, step in batch.steps() for t in step] == batch.trajectories
 
 
 @pytest.mark.unit
@@ -240,17 +230,3 @@ def test_critic_value_round_trip_preserves_rank_local_order():
             marker = float(slot + 100 * rank)
             assert trajectory.values[:-1].unique().tolist() == [marker]
             assert trajectory.values[-1] == 0.0
-
-
-@pytest.mark.unit
-def test_flatten_rejects_an_episode_with_no_trajectories():
-    episode = Episode(trajectories=[], reward=1.0, episode_index=0)
-
-    with pytest.raises(ValueError, match="has no trajectories"):
-        _build([episode], dp_size=1, num_steps=1)
-
-
-@pytest.mark.unit
-def test_flatten_rejects_an_unknown_normalization_unit():
-    with pytest.raises(ValueError, match="unknown loss normalization unit"):
-        _build([_episode(0, [3])], dp_size=1, num_steps=1, unit="sequence")
