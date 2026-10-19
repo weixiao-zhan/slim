@@ -41,7 +41,6 @@ ARGS="
     --sglang-mamba-ssm-dtype float32
     --sglang-mamba-radix-cache-strategy extra_buffer_lazy
     --sglang-max-mamba-cache-size 128
-    --sglang-page-size 64
     --sglang-attention-backend fa3
     --sglang-load-format dummy
 

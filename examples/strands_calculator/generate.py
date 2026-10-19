@@ -38,14 +38,10 @@ from slim.utils.http_utils import post
 from slim.utils.processing_utils import decode_tensor_envelopes
 from slim.utils.types import Episode, Trajectory
 
-_MAX_AGENT_TURNS = 2
-_MAX_TOKENS_PER_TURN = 8 * 1024
-
 # How the engine ended the attempt's last call is what the attempt amounts to.
 _STATUS_BY_FINISH_REASON = {
     "stop": Episode.Status.COMPLETED,
     "length": Episode.Status.TRUNCATED,
-    "tool_calls": Episode.Status.TRUNCATED,  # the turn limit cut the tool loop short
 }
 
 
@@ -65,11 +61,10 @@ class SGLangChatModel(OpenAIModel):
 
     def __init__(self, state: GenerateState, episode: Episode) -> None:
         # Everything here is a `/v1/chat/completions` body field; Strands merges
-        # `params` into the request it builds. The engine owns tokenization, so it
-        # clamps the per-turn cap to the context left (slim always enables `allow_auto_truncate`).
+        # `params` into the request it builds. With no completion cap, each call may
+        # generate until the context is full.
         params: dict[str, Any] = {
             "temperature": state.args.rollout_temperature,
-            "max_completion_tokens": _MAX_TOKENS_PER_TURN,
             "chat_template_kwargs": state.chat_template_kwargs,
             # Token-in-token-out: keep the ids and logprobs the engine ran.
             "logprobs": True,
@@ -192,9 +187,9 @@ async def generate(state: GenerateState, episode: Episode, evaluation: bool = Fa
         callback_handler=None,
     )
     try:
-        await agent.invoke_async([{"role": "user", "content": content}], limits={"turns": _MAX_AGENT_TURNS})
+        await agent.invoke_async([{"role": "user", "content": content}])
     except MaxTokensReachedException:
-        # The engine stopped that call at the completion cap; it is already recorded.
+        # The engine stopped that call at the context limit; it is already recorded.
         pass
     except (_RequestAborted, EventLoopException) as error:
         cause = getattr(error, "original_exception", error)

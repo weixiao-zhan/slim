@@ -249,7 +249,6 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --sglang-mamba-ssm-dtype float32 \
   --sglang-mamba-radix-cache-strategy extra_buffer_lazy \
   --sglang-max-mamba-cache-size 512 \
-  --sglang-page-size 64 \
   --rollout-colocate \
   --actor-num-gpus 8 \
   --context-parallel-size 2 \

@@ -170,7 +170,6 @@ run: | # shell
     --sglang-mamba-ssm-dtype float32 \
     --sglang-mamba-radix-cache-strategy extra_buffer_lazy \
     --sglang-max-mamba-cache-size 256 \
-    --sglang-page-size 64 \
     --sglang-load-format dummy \
     \
     --actor-num-gpus $((SKYPILOT_NUM_NODES * SKYPILOT_NUM_GPUS_PER_NODE)) \
