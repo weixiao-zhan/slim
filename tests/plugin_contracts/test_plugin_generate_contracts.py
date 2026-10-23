@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import types
 from contextlib import contextmanager
 
 import pytest
@@ -53,7 +52,6 @@ class FakeGenerateState:
     def __init__(self, args) -> None:
         self.args = args
         self.tokenizer = _FakeTokenizer()
-        self.semaphore = types.SimpleNamespace(__aenter__=None)
         self.aborted = False
 
     @contextmanager
@@ -99,26 +97,12 @@ def assert_episode_contract(episode: Episode) -> None:
     assert episode.get_reward_value() is not None
 
 
-class _DummySemaphore:
-    async def __aenter__(self):
-        return None
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-
-class _PatchedGenerateState(FakeGenerateState):
-    def __init__(self, args):
-        super().__init__(args)
-        self.semaphore = _DummySemaphore()
-
-
 @pytest.fixture
 def patch_generate_state(monkeypatch):
     """Patch GenerateState with a test-safe variant; returns the sglang_rollout module."""
     from slim.rollout import sglang_rollout
 
-    monkeypatch.setattr(sglang_rollout, "GenerateState", _PatchedGenerateState)
+    monkeypatch.setattr(sglang_rollout, "GenerateState", FakeGenerateState)
     return sglang_rollout
 
 

@@ -45,14 +45,13 @@ class RolloutGroup:
 
 
 class GenerateState(metaclass=SingletonMeta):
-    def __init__(self, args: Namespace, concurrency: int) -> None:
+    def __init__(self, args: Namespace) -> None:
         from slim.utils.processing_utils import load_processor, load_tokenizer
 
         self.args = args
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(concurrency)
         self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
         self.deterministic_inference = getattr(args, "sglang_enable_deterministic_inference", False)
 
@@ -281,21 +280,20 @@ async def generate_and_rm(
         return episode
 
     state = GenerateState(args)
-    async with state.semaphore:
-        if state.aborted:
-            episode.status = Episode.Status.ABORTED
-            return episode
+    if state.aborted:
+        episode.status = Episode.Status.ABORTED
+        return episode
 
-        with state.dp_rank_context():
-            custom_func_path = episode.generate_function_path or args.custom_generate_function_path
-            if custom_func_path is not None:
-                custom_generate_func = load_function(custom_func_path)
-                if "evaluation" in inspect.signature(custom_generate_func).parameters:
-                    episode = await custom_generate_func(state, episode, evaluation=evaluation)
-                else:
-                    episode = await custom_generate_func(state, episode)
+    with state.dp_rank_context():
+        custom_func_path = episode.generate_function_path or args.custom_generate_function_path
+        if custom_func_path is not None:
+            custom_generate_func = load_function(custom_func_path)
+            if "evaluation" in inspect.signature(custom_generate_func).parameters:
+                episode = await custom_generate_func(state, episode, evaluation=evaluation)
             else:
-                episode = await generate(state, episode)
+                episode = await custom_generate_func(state, episode)
+        else:
+            episode = await generate(state, episode)
 
     if episode.status != Episode.Status.ABORTED:
         for trajectory in episode.trajectories:

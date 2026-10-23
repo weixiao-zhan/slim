@@ -210,11 +210,11 @@ async def _post(client, url, payload, max_retries=10, headers=None):
     return output
 
 
-def init_http_client(concurrency: int):
-    """Initialize this process's HTTP client with at most ``concurrency`` connections."""
+def init_http_client():
+    """Initialize this process's HTTP client without a connection limit; callers bound their own concurrency."""
     global _http_client
     _http_client = httpx.AsyncClient(
-        limits=httpx.Limits(max_connections=concurrency),
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=None),
         timeout=httpx.Timeout(None),
         trust_env=False,
     )

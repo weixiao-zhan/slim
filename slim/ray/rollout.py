@@ -41,7 +41,7 @@ from slim.utils.trajectory_batch import build_dp_batches
 from slim.utils.types import Episode, Trajectory
 
 from ..utils.metric_utils import has_repetition
-from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock, train_span
+from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock, rollout_node_ids, train_span
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -381,8 +381,8 @@ class RolloutManager:
             self.servers: dict[str, RolloutServer] = {}
         else:
             self.servers = start_rollout_servers(args, pg)
-            init_http_client(len(self.rollout_engines))
-            RolloutWorkerPool(args)
+            init_http_client()
+            RolloutWorkerPool(args, rollout_node_ids(pg))
 
         # Init W&B after servers start so the router/engine Prometheus
         # endpoints are known and can be registered for scraping.

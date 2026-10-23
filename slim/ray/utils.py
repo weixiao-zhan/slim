@@ -37,6 +37,13 @@ def train_span(args) -> int:
     return args.actor_num_gpus + args.critic_num_gpus
 
 
+def rollout_node_ids(pg) -> list[str]:
+    """Distinct node ids of the rollout bundles, in sorted bundle order."""
+    placement_group, reordered_bundle_indices, _ = pg
+    bundles_to_node_id = ray.util.placement_group_table(placement_group)["bundles_to_node_id"]
+    return list(dict.fromkeys(bundles_to_node_id[index] for index in reordered_bundle_indices))
+
+
 @ray.remote
 class Lock(RayWorker):
     def __init__(self):

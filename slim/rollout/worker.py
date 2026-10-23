@@ -32,11 +32,11 @@ def offload_bulk_fields(group: RolloutGroup) -> None:
 
 @ray.remote
 class RolloutWorker:
-    def __init__(self, args: Namespace, concurrency: int):
+    def __init__(self, args: Namespace):
         configure_logger()
-        init_http_client(concurrency)
+        init_http_client()
         self.args = args
-        self.state = GenerateState(args, concurrency)
+        self.state = GenerateState(args)
 
     async def run_group(self, group: RolloutGroup, evaluation: bool) -> RolloutGroup:
         group = await generate_and_rm_group(self.args, group, evaluation=evaluation)
@@ -51,21 +51,20 @@ class RolloutWorker:
 
 
 class RolloutWorkerPool(metaclass=SingletonMeta):
-    """One RolloutWorker per alive node, fed groups by episode load."""
+    """`--rollout-num-workers` RolloutWorkers placed round-robin over the rollout nodes, fed groups by episode load."""
 
-    def __init__(self, args: Namespace) -> None:
+    def __init__(self, args: Namespace, node_ids: list[str]) -> None:
         self.args = args
-        nodes = [node for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) >= 1]
-        total = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
-        self.concurrency = math.ceil(total / len(nodes))
+        total_concurrency = args.rollout_concurrency_per_replica * args.rollout_num_gpus // args.rollout_num_gpus_per_replica
+        self.concurrency = math.ceil(total_concurrency / args.rollout_num_workers)
         self.workers = [
             RolloutWorker.options(
                 num_cpus=1,
-                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False),
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_ids[i % len(node_ids)], soft=False),
                 # A worker holds at most `concurrency` groups, plus abort and reset.
                 max_concurrency=self.concurrency + 2,
-            ).remote(args, self.concurrency)
-            for node in nodes
+            ).remote(args)
+            for i in range(args.rollout_num_workers)
         ]
         ray.get([worker.__ray_ready__.remote() for worker in self.workers])
         logger.info(f"Started {len(self.workers)} rollout workers with concurrency {self.concurrency} each")

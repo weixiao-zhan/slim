@@ -23,15 +23,15 @@ Each accepts a dotted Python path (e.g. `my_package.module.function`) loaded at 
 
 ## Where Hooks Run
 
-Rollout is split between one `RolloutManager` coordinator process and one `RolloutWorker` process on every node of the Ray cluster, head node included; see [Distributed Rollout](distributed-rollout.md).
+Rollout is split between one `RolloutManager` coordinator process and `--rollout-num-workers` `RolloutWorker` processes placed round-robin over the rollout nodes; see [Rollout Workers](placement.md#rollout-workers).
 
 | Process | Hooks |
 |---|---|
-| `RolloutWorker` (every node) | `--custom-generate-function-path`, `--custom-rm-path` |
+| `RolloutWorker` (rollout nodes) | `--custom-generate-function-path`, `--custom-rm-path` |
 | `RolloutManager` (coordinator) | `--rollout-function-path`, `--eval-function-path`, `--data-source-path`, `--rollout-group-filter-path`, `--rollout-sample-filter-path`, `--rollout-all-samples-process-path`, `--custom-rollout-log-function-path`, `--custom-eval-rollout-log-function-path` |
 | `AdvantageEstimator` | `--custom-reward-post-process-path` |
 
-Every node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every node.
+Every rollout node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every rollout node.
 Hooks running in the coordinator or `AdvantageEstimator` see `trajectory.multimodal_inputs` as a `ray.ObjectRef`; they pass it through without reading it (see [Multimodal Input Lifecycle](data-layout.md#multimodal-input-lifecycle)).
 
 ## Key Interfaces
@@ -60,17 +60,36 @@ The function owns the sampling fields of its own requests, but should honor the 
 
 Per-episode override: set `episode.generate_function_path` to route specific episodes to a different generate function.
 
-The function runs inside the `RolloutWorker` of the node its group was dispatched to, and all episodes of a group run in the same worker.
-Environments are node-local: a function that starts Docker containers talks to the daemon of that node, which may be the head node or any worker node.
+The function owns the data of its episode: it decides how to read the raw example columns, load media, start containers, and which processor outputs to carry.
+
+The function runs inside the `RolloutWorker` its group was dispatched to, and all episodes of a group run in the same worker.
+Environments are node-local: a function that starts Docker containers talks to the daemon of the rollout node that worker runs on.
 
 Abort is cooperative, so the function must return on its own in both the normal and the abort path:
 
 - A response with `finish_reason == "abort"` ends the episode: set `Episode.Status.ABORTED` and return.
-- Between environment steps, check `state.aborted` and return when it is set; an engine abort cannot interrupt a running environment call.
+- Between environment steps, check `state.aborted` and return when it is set. An engine abort cannot interrupt a running environment call such as `docker exec`, so this check bounds abort latency to one environment step.
 - Create containers inside the `try` whose `finally` removes them.
-- Run blocking or CPU-heavy calls (environment calls, heavy processor or reward work) through `asyncio.to_thread` or a process pool. One event loop serves all groups on the node, so a blocking call stalls every episode on that node and delays abort.
+- Run blocking or CPU-heavy calls (environment calls, heavy processor or reward work) through `asyncio.to_thread` or a process pool. One event loop serves all groups of a worker, so a blocking call stalls every episode of that worker and delays abort.
 
-See [Generate Function Contract](distributed-rollout.md#generate-function-contract) for an example.
+```python
+async def generate(state: GenerateState, episode: Episode) -> Episode:
+    container = None
+    try:
+        container = await start_container(episode.example)
+        while not done:
+            if state.aborted:
+                episode.status = Episode.Status.ABORTED
+                return episode
+            ...  # model call; finish_reason "abort" → ABORTED, return
+            ...  # environment step in the container, via asyncio.to_thread
+        return episode
+    finally:
+        if container is not None:
+            await remove_container(container)
+```
+
+See [Abort](placement.md#abort) for the coordinator side.
 
 ### Reward model (`--custom-rm-path`)
 

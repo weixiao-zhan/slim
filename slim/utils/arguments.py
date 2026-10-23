@@ -179,6 +179,16 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-num-workers",
+                type=int,
+                default=1,
+                help=(
+                    "Number of RolloutWorker processes. "
+                    "Workers are placed round-robin over the rollout engine nodes in placement group order, "
+                    "and each worker runs ceil(total concurrency / num workers) episodes at once."
+                ),
+            )
+            parser.add_argument(
                 "--over-sampling-batch-size",
                 type=int, 
                 default=None,

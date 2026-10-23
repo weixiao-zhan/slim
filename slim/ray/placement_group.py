@@ -6,10 +6,10 @@ import socket
 
 import ray
 from ray.util.placement_group import placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from .actor_group import RayTrainGroup
-from .utils import train_span
+from .utils import rollout_node_ids, train_span
 
 logger = logging.getLogger(__name__)
 
@@ -189,9 +189,12 @@ def create_rollout_manager(args, pg):
     # and does not run the sglang backend itself.
     from .rollout import RolloutManager
 
+    # The manager runs the router, sits on the first rollout node next to the first engine.
+    node_ids = rollout_node_ids(pg)
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
+        scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_ids[0], soft=False) if node_ids else None,
     ).remote(args, pg)
 
     # calculate num_rollout from num_epoch
