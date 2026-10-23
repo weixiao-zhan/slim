@@ -20,7 +20,7 @@ NUM_GPUS = 0
 def _episode(index: int, trajectory_lengths: list[int], reward: float = 1.0, group_index: int = 0) -> Episode:
     episode = Episode(
         trajectories=[
-            Trajectory(token_ids=list(range(length)), loss_mask=[1] * (length - 1))
+            Trajectory(token_ids=list(range(length)), loss_mask=[1] * (length - 1), rollout_log_probs=[0.0] * (length - 1))
             for length in trajectory_lengths
         ],
         reward=reward,
@@ -39,6 +39,8 @@ def _build(episodes, *, dp_size, num_steps, balance_data=True):
         loss_normalization_unit="episode",
         pad_token_id=0,
         balance_data=balance_data,
+        top_k=None,
+        routing_replay_shape=None,
     )
 
 

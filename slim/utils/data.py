@@ -11,6 +11,7 @@ except ModuleNotFoundError:  # pragma: no cover
     ray = None
 
 from .timer import Timer
+from .types import BULK_FIELDS
 
 __all__ = ["load_hf_dataset", "process_rollout_data"]
 
@@ -63,12 +64,21 @@ def load_hf_dataset(path: str):
 
 
 def process_rollout_data(rollout_data_refs, dp_rank, dp_size):
-    """Fetch this DP rank's trajectory batch and resolve its multimodal_inputs refs."""
+    """Fetch this DP rank's trajectory batch and resolve the bulk field refs of its real trajectories.
+
+    Padding trajectories (`episode_index` None) are built in `RolloutManager` and carry their fields inline.
+    """
     if ray is None:
         raise ModuleNotFoundError("ray is required to process rollout data")
     batch = ray.get(rollout_data_refs[dp_rank])
-    trajectories = [trajectory for trajectory in batch.trajectories if trajectory.multimodal_inputs is not None]
-    for trajectory, multimodal_inputs in zip(trajectories, ray.get([t.multimodal_inputs for t in trajectories]), strict=True):
-        trajectory.multimodal_inputs = multimodal_inputs
+    ref_fields = [
+        (trajectory, name)
+        for trajectory in batch.trajectories
+        if trajectory.episode_index is not None
+        for name in BULK_FIELDS
+        if getattr(trajectory, name) is not None
+    ]
+    for (trajectory, name), value in zip(ref_fields, ray.get([getattr(t, name) for t, name in ref_fields]), strict=True):
+        setattr(trajectory, name, value)
     Timer().seq_lens = [len(trajectory.token_ids) for trajectory in batch.trajectories]
     return batch

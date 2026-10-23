@@ -80,7 +80,7 @@ class SGLangChatModel(OpenAIModel):
         if episode.has_multimodal:
             # Training reuses the tensors the engine ran, rather than reprocessing the media.
             params["return_processor_outputs"] = True
-        if state.routing_replay_shape is not None:
+        if state.args.routing_replay_shape is not None:
             # One call is one whole trajectory, so every position is in scope.
             params["return_routed_experts"] = True
             params["routed_experts_start_len"] = 0
@@ -145,9 +145,9 @@ class SGLangChatModel(OpenAIModel):
         if self.episode.has_multimodal:
             trajectory.multimodal_inputs = decode_tensor_envelopes(meta_info["processor_outputs"])
 
-        if self.state.routing_replay_shape is not None:
+        if self.state.args.routing_replay_shape is not None:
             experts = decode_tensor_envelopes(meta_info["routed_experts"])
-            trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.routing_replay_shape)
+            trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.args.routing_replay_shape)
 
         self.finish_reason = choice.finish_reason
         self.episode.trajectories.append(trajectory)

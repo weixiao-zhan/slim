@@ -32,7 +32,7 @@ Rollout is split between one `RolloutManager` coordinator process and `--rollout
 | `AdvantageEstimator` | `--custom-reward-post-process-path` |
 
 Every rollout node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every rollout node.
-Hooks running in the coordinator or `AdvantageEstimator` see `trajectory.multimodal_inputs` as a `ray.ObjectRef`; they pass it through without reading it (see [Multimodal Input Lifecycle](data-layout.md#multimodal-input-lifecycle)).
+Hooks running in the coordinator or `AdvantageEstimator` see finalized trajectories: `token_ids`, `loss_mask`, and `rollout_log_probs` are CPU tensors of length `len(token_ids)`, and `multimodal_inputs`, `rollout_routed_experts`, `rollout_topk_log_probs`, and `rollout_topk_token_ids` are `ray.ObjectRef`, which they pass through without reading (see [Bulk Field Lifecycle](data-layout.md#bulk-field-lifecycle)).
 
 ## Key Interfaces
 
@@ -45,6 +45,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False) -> Rollout
 Replaces the entire rollout loop.
 Override this for fundamentally different sampling strategies (tree search, offline data, non-SGLang backend).
 It runs in the `RolloutManager` process and reaches the rollout workers through `RolloutWorkerPool(args)`.
+It returns finalized episodes with bulk fields as `ObjectRef`, the form `RolloutWorker.run_group` produces; episodes it builds without the pool go through `slim.rollout.worker.finalize_trajectories` (see [Bulk Field Lifecycle](data-layout.md#bulk-field-lifecycle)).
 
 ### Generate function (`--custom-generate-function-path`)
 
@@ -121,7 +122,7 @@ def sample_filter(args, groups: list[RolloutGroup]) -> None
 ```
 
 Operates in-place on kept groups.
-To exclude a trajectory from training, set its `trajectory.loss_mask` to all zeros; zeroing every trajectory of an episode excludes the whole attempt.
+To exclude a trajectory from training, zero its finalized `trajectory.loss_mask` tensor, for example with `trajectory.loss_mask.zero_()`; zeroing every trajectory of an episode excludes the whole attempt.
 
 ### Data source (`--data-source-path`)
 

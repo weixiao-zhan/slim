@@ -12,8 +12,7 @@ import torch
 import slim.rollout.sglang_rollout as sglang_rollout
 import slim.rollout.worker as worker_module
 from slim.rollout.sglang_rollout import RolloutGroup
-from slim.rollout.worker import RolloutWorkerPool, offload_bulk_fields
-from slim.utils import processing_utils
+from slim.rollout.worker import RolloutWorkerPool, finalize_trajectories
 from slim.utils.data import process_rollout_data
 from slim.utils.misc import SingletonMeta
 from slim.utils.trajectory_batch import build_dp_batches
@@ -153,8 +152,8 @@ class _Tokenizer:
 
 @pytest.mark.unit
 def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fake_cluster, fake_router):
-    monkeypatch.setattr(processing_utils, "load_tokenizer", lambda *args, **kwargs: _Tokenizer())
-    monkeypatch.setattr(processing_utils, "load_processor", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sglang_rollout, "load_tokenizer", lambda *args, **kwargs: _Tokenizer())
+    monkeypatch.setattr(sglang_rollout, "load_processor", lambda *args, **kwargs: None)
     env_steps = []
 
     async def generate(state, episode):
@@ -218,30 +217,46 @@ def local_ray():
     ray.shutdown()
 
 
-def _multimodal_episode() -> Episode:
+def _bulk_episode() -> Episode:
     trajectory = Trajectory(
         token_ids=[1, 2, 3],
         loss_mask=[1, 1],
         rollout_log_probs=[-0.1, -0.2],
+        rollout_routed_experts=torch.arange(8, dtype=torch.int32).reshape(2, 2, 2),
         multimodal_inputs={"pixel_values": torch.arange(8.0).reshape(2, 4), "image_grid_thw": torch.tensor([[1, 1, 2]])},
     )
     return Episode(trajectories=[trajectory], reward=1.0, episode_index=0, group_index=0)
 
 
 @pytest.mark.unit
-def test_multimodal_inputs_round_trip_by_reference(local_ray):
-    episode = _multimodal_episode()
-    expected = dict(episode.trajectory.multimodal_inputs)
-    offload_bulk_fields(RolloutGroup(index=0, example={}, episodes=[episode]))
+def test_bulk_fields_round_trip_by_reference(local_ray):
+    episode = _bulk_episode()
+    expected_inputs = dict(episode.trajectory.multimodal_inputs)
+    finalize_trajectories(RolloutGroup(index=0, example={}, episodes=[episode]))
     assert isinstance(episode.trajectory.multimodal_inputs, ray.ObjectRef)
+    assert isinstance(episode.trajectory.rollout_routed_experts, ray.ObjectRef)
+    assert episode.trajectory.loss_mask.tolist() == [1, 1, 0]
 
-    episode.finalize_source_token_alignment()
-    batches = build_dp_batches([episode], dp_size=2, num_steps=1, loss_normalization_unit="episode", pad_token_id=0, balance_data=False)
+    batches = build_dp_batches(
+        [episode],
+        dp_size=2,
+        num_steps=1,
+        loss_normalization_unit="episode",
+        pad_token_id=0,
+        balance_data=False,
+        top_k=None,
+        routing_replay_shape=(2, 2),
+    )
     refs = [ray.put(batch) for batch in batches]
 
     fetched = [trajectory for rank in range(2) for trajectory in process_rollout_data(refs, rank, 2).trajectories]
-    real = [trajectory for trajectory in fetched if trajectory.multimodal_inputs is not None]
-    assert len(real) == 1 and len(fetched) == 2
-    assert set(real[0].multimodal_inputs) == set(expected)
-    for key, value in expected.items():
+    real = [trajectory for trajectory in fetched if trajectory.episode_index is not None]
+    padding = [trajectory for trajectory in fetched if trajectory.episode_index is None]
+    assert len(real) == 1 and len(padding) == 1
+    assert set(real[0].multimodal_inputs) == set(expected_inputs)
+    for key, value in expected_inputs.items():
         torch.testing.assert_close(real[0].multimodal_inputs[key], value)
+    assert real[0].rollout_routed_experts.shape == (3, 2, 2)
+    assert real[0].rollout_routed_experts[-1].eq(0).all()
+    assert padding[0].rollout_routed_experts.shape == (2, 2, 2)
+    assert padding[0].multimodal_inputs is None

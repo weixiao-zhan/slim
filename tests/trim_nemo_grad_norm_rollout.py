@@ -21,6 +21,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_PREDICTION_FIELDS = ("loss_mask", "rollout_log_probs", "rollout_topk_log_probs", "rollout_topk_token_ids", "rollout_routed_experts")
+
+
 def _slice_predictions(value, prediction_count: int):
     if value is None:
         return None
@@ -28,10 +31,9 @@ def _slice_predictions(value, prediction_count: int):
 
 
 def _trim_trajectory(traj: dict, max_response_tokens: int) -> tuple[dict, int]:
-    """Bound one trajectory's response, returning the trimmed trajectory and its token count."""
+    """Bound one finalized trajectory's response, returning the refinalized trajectory and its token count."""
     trajectory = Trajectory(**traj)
-    mask = torch.as_tensor(trajectory.loss_mask)
-    generated_positions = torch.nonzero(mask, as_tuple=False).flatten()
+    generated_positions = torch.nonzero(trajectory.loss_mask, as_tuple=False).flatten()
     if generated_positions.numel() == 0:
         return traj, len(trajectory.token_ids)
 
@@ -41,23 +43,14 @@ def _trim_trajectory(traj: dict, max_response_tokens: int) -> tuple[dict, int]:
         first_generated_position + max_response_tokens,
     )
     token_count = prediction_count + 1
-    trimmed = dict(traj)
-    trimmed["token_ids"] = trajectory.token_ids[:token_count]
-    trimmed["loss_mask"] = _slice_predictions(trajectory.loss_mask, prediction_count)
-    trimmed["rollout_log_probs"] = _slice_predictions(
-        trajectory.rollout_log_probs,
-        prediction_count,
-    )
-    trimmed["rollout_routed_experts"] = _slice_predictions(
-        trajectory.rollout_routed_experts,
-        prediction_count,
-    )
     if token_count < len(trajectory.token_ids):
-        trimmed["text"] = None
-        trimmed["generated_text"] = None
-
-    Trajectory(**trimmed).finalize_source_token_alignment()
-    return trimmed, token_count
+        trajectory.text = None
+        trajectory.generated_text = None
+    trajectory.token_ids = trajectory.token_ids[:token_count]
+    for name in _PREDICTION_FIELDS:
+        setattr(trajectory, name, _slice_predictions(getattr(trajectory, name), prediction_count))
+    trajectory.finalize_source_token_alignment()
+    return dict(vars(trajectory)), token_count
 
 
 def trim_record(record: dict, max_response_tokens: int) -> tuple[dict, int]:

@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import pybase64
 import torch
-from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,13 @@ def load_processor(name_or_path: str, **kwargs):
         proc = None
 
     return proc
+
+
+def load_routing_replay_shape(name_or_path: str) -> tuple[int, int]:
+    """Per-token shape `(num_layers, top_k)` of the routed experts recorded for routing replay."""
+    cfg = AutoConfig.from_pretrained(name_or_path, trust_remote_code=True)
+    text_cfg = getattr(cfg, "text_config", cfg)
+    return text_cfg.num_hidden_layers, text_cfg.num_experts_per_tok
 
 
 def encode_tensor_to_b64_envelope(value) -> dict:

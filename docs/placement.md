@@ -62,7 +62,7 @@ Agentic rollouts (Docker environments, code execution, agent frameworks) spend m
                    │                                          ▼
   rollout nodes ── N × RolloutWorker (Ray async actor, many groups, capacity ⌈P·c / N⌉)
                    GenerateState · HTTP client · generate_and_rm_group · local Docker daemon
-                   ray.put(multimodal_inputs) stays in this node's object store
+                   finalize, ray.put(bulk fields) stays in this node's object store
                    │                                          │ HTTP
                    ▼                                          ▼
   trainer DP rank ── ray.get(TrajectoryBatch)            router → engines
@@ -94,8 +94,8 @@ Custom generate and reward modules and `--hf-checkpoint` must be reachable from 
 ### Worker
 
 - `RolloutWorker` is an async actor, so every `run_group` call and `abort` run concurrently on the one event loop thread of the actor.
-- `run_group` runs `generate_and_rm_group` on the group, then puts each trajectory's `multimodal_inputs` into the node's object store (see [Multimodal Input Lifecycle](data-layout.md#multimodal-input-lifecycle)).
-- `GenerateState(args)` is a process singleton holding the tokenizer, processor, chat template kwargs, routing replay shape, and the `aborted` flag.
+- `run_group` runs `generate_and_rm_group` on the group, then processes each trajectory in order: it finalizes source-token alignment and puts the bulk fields (`multimodal_inputs`, `rollout_routed_experts`, and the top-$K$ fields) into the node's object store, through `asyncio.to_thread` so the event loop keeps serving the other groups (see [Bulk Field Lifecycle](data-layout.md#bulk-field-lifecycle)).
+- `GenerateState(args)` is a process singleton holding the tokenizer, processor, chat template kwargs, and the `aborted` flag; the routing replay shape is `args.routing_replay_shape`, set once by argument parsing.
 - `init_http_client()` builds the client without a connection limit and with `trust_env=False`, so proxy variables on a remote node do not capture traffic to the router.
 - The worker does not initialize tracking; rollout logging and W&B stay in `RolloutManager`.
 
