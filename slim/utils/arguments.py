@@ -14,6 +14,7 @@ from slim.backends.sglang_utils.arguments import sglang_parse_args
 from slim.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from slim.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
 from slim.utils.logging_utils import configure_logger
+from slim.utils.processing_utils import load_routing_replay_shape
 from slim.utils.trajectory_batch import LOSS_NORMALIZATION_UNITS
 
 logger = logging.getLogger(__name__)
@@ -1056,22 +1057,6 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
     return eval_datasets
 
 
-def _validate_score_centering(args):
-    """Score centering pairs a sampler-relative per-token weight with sampler top-K log probs."""
-    if args.use_score_centering is None:
-        return
-    if args.use_score_centering < 1:
-        raise ValueError("--use-score-centering requires a positive top-K.")
-    if args.policy_surrogate == "is":
-        raise ValueError("--use-score-centering is exactly zero under --policy-surrogate is, where w(r) = r.")
-    if args.advantage_estimator == "gspo":
-        raise ValueError("--use-score-centering does not support the gspo sequence-level ratio.")
-    if args.loss_type == "custom_loss":
-        raise ValueError("--use-score-centering does not support --loss-type custom_loss.")
-    if args.old_logprob_source != "rollout":
-        raise ValueError("--use-score-centering requires --old-logprob-source rollout.")
-
-
 def slim_validate_args(args):
     if args.custom_config_path:
         with open(args.custom_config_path) as f:
@@ -1099,7 +1084,20 @@ def slim_validate_args(args):
     if args.mismatch_correction == "custom" and args.custom_mismatch_correction_function_path is None:
         raise ValueError("--mismatch-correction custom requires --custom-mismatch-correction-function-path.")
 
-    _validate_score_centering(args)
+    # Score centering pairs a sampler-relative per-token weight with sampler top-K log probs.
+    if args.use_score_centering is not None:
+        if args.use_score_centering < 1:
+            raise ValueError("--use-score-centering requires a positive top-K.")
+        if args.policy_surrogate == "is":
+            raise ValueError("--use-score-centering is exactly zero under --policy-surrogate is, where w(r) = r.")
+        if args.advantage_estimator == "gspo":
+            raise ValueError("--use-score-centering does not support the gspo sequence-level ratio.")
+        if args.loss_type == "custom_loss":
+            raise ValueError("--use-score-centering does not support --loss-type custom_loss.")
+        if args.old_logprob_source != "rollout":
+            raise ValueError("--use-score-centering requires --old-logprob-source rollout.")
+
+    args.routing_replay_shape = load_routing_replay_shape(args.hf_checkpoint) if args.use_rollout_routing_replay else None
 
     if args.get_mismatch_metrics and args.old_logprob_source == "rollout":
         logger.info(

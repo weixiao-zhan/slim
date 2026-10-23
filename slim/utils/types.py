@@ -23,6 +23,10 @@ def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
     return torch.as_tensor(value, dtype=dtype)
 
 
+# Trajectory fields the rollout worker puts into its node's object store after finalization.
+BULK_FIELDS = ("rollout_topk_log_probs", "rollout_topk_token_ids", "rollout_routed_experts", "multimodal_inputs")
+
+
 @dataclass
 class Trajectory:
     """One contiguous generation by the policy.
@@ -31,7 +35,9 @@ class Trajectory:
       1. Created empty, then filled by one or more generation calls that append
          to the same trajectory; sequence fields are Python lists.
       2. ``finalize_source_token_alignment()`` converts sequence fields to
-         tensors and appends their terminal source-token slot.
+         tensors and appends their terminal source-token slot. The rollout worker
+         then replaces each ``BULK_FIELDS`` value with an ``ObjectRef``, which
+         ``process_rollout_data`` resolves on the trainer.
       3. Flattened out of its episode, then packed and trained as one document.
 
     Source-token-aligned fields have ``len == len(token_ids)`` after
@@ -44,9 +50,9 @@ class Trajectory:
     token_ids: Any = field(default_factory=list)       # [int] → LongTensor
     loss_mask: Any | None = None                       # [int] → IntTensor
     rollout_log_probs: Any | None = None               # [float] → FloatTensor
-    rollout_topk_log_probs: Any | None = None          # FloatTensor [seq_len - 1, k]
-    rollout_topk_token_ids: Any | None = None          # IntTensor [seq_len - 1, k]
-    rollout_routed_experts: Any | None = None          # IntTensor [seq_len - 1, layer, top_k]
+    rollout_topk_log_probs: Any | None = None          # FloatTensor [seq_len - 1, k] → [seq_len, k] → ObjectRef
+    rollout_topk_token_ids: Any | None = None          # IntTensor [seq_len - 1, k] → [seq_len, k] → ObjectRef
+    rollout_routed_experts: Any | None = None          # IntTensor [seq_len - 1, layer, top_k] → [seq_len, layer, top_k] → ObjectRef
     multimodal_inputs: Any | None = None               # dict[str, Tensor] → ObjectRef → dict[str, Tensor]
     # Non-token-aligned multimodal inputs from processor (concat dim=0):
     #   pixel_values: [num_vision_tokens, d] - image embeddings (concat dim=0)

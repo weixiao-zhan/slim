@@ -21,6 +21,8 @@ def build_args(model_dir: str, rm_type: str, max_context_len: int, concurrency: 
     """A minimal Namespace carrying just what GenerateState + the RM read."""
     from argparse import Namespace
 
+    from slim.utils.processing_utils import load_routing_replay_shape
+
     return Namespace(
         hf_checkpoint=model_dir,
         rm_type=rm_type,
@@ -29,6 +31,7 @@ def build_args(model_dir: str, rm_type: str, max_context_len: int, concurrency: 
         rollout_temperature=1.0,
         apply_chat_template_kwargs={"enable_thinking": False},
         use_rollout_routing_replay=r3,
+        routing_replay_shape=load_routing_replay_shape(model_dir) if r3 else None,
         rollout_concurrency_per_replica=concurrency,
         rollout_num_gpus=1,
         rollout_num_gpus_per_replica=1,
@@ -128,13 +131,13 @@ def main():
     parquet, rm_type = C.SPLITS[args_cli.split]
     args = build_args(mdir, rm_type, args_cli.max_context_len, args_cli.concurrency, args_cli.r3)
 
-    # slim's GenerateState gives us the same tokenizer/processor/routing-shape the real rollout uses.
+    # slim's GenerateState gives us the same tokenizer/processor the real rollout uses.
     from slim.rollout.sglang_rollout import GenerateState
     from slim.utils.types import Episode, Trajectory
 
     GenerateState._instances = {}  # singleton reset between configs in one process
     state = GenerateState(args)
-    routing_shape = state.routing_replay_shape  # (num_layers, top_k) or None
+    routing_shape = args.routing_replay_shape  # (num_layers, top_k) or None
 
     # Load via HF datasets so the `images` column is decoded to PIL (Image() feature), matching
     # slim's data path. Plain pandas leaves images as {'bytes': ...} dicts the processor rejects.

@@ -17,15 +17,6 @@ from slim.utils.types import Episode, Trajectory
 # weights every trajectory equally; `token` denominates the policy term in tokens instead.
 LOSS_NORMALIZATION_UNITS = ("episode", "trajectory", "token")
 
-# Optional sequence fields a padding document must mirror when the real trajectories carry them.
-_OPTIONAL_FIELD_DTYPES = {
-    "rollout_log_probs": torch.float32,
-    "rollout_topk_log_probs": torch.float32,
-    "rollout_topk_token_ids": torch.int32,
-    "rollout_routed_experts": torch.int32,
-}
-
-
 @dataclass
 class TrajectoryBatch:
     """One DP rank's share of a rollout, evenly divided into optimizer steps."""
@@ -72,7 +63,11 @@ def _materialize_trajectory_rewards(episode: Episode) -> None:
     episode.reward = None
 
 
-def _padding_trajectory(pad_token_id: int, optional_shapes: dict[str, tuple[int, ...]]) -> Trajectory:
+def create_dp_padding_trajectory(
+    pad_token_id: int,
+    top_k: int | None,
+    routing_replay_shape: tuple[int, int] | None,
+) -> Trajectory:
     r"""An inert two-token document that lets every rank hold an equal share.
 
     Two tokens is the minimum `pack_sequences` accepts. The all-zero `loss_mask`
@@ -80,17 +75,15 @@ def _padding_trajectory(pad_token_id: int, optional_shapes: dict[str, tuple[int,
     `loss_weight` keeps it out of $\sum_d w_d$.
 
     `pack_sequences` requires each optional sequence field to be present for every
-    document of a pack or for none, so padding mirrors whichever fields the real
-    trajectories carry.
+    document of a pack or for none, so padding carries every optional field the run
+    configuration produces. Finalization casts each field to its dtype.
     """
-    trajectory = Trajectory(
-        token_ids=[pad_token_id, pad_token_id],
-        loss_mask=[0],
-        reward=0.0,
-        loss_weight=0.0,
-    )
-    for name, trailing_shape in optional_shapes.items():
-        setattr(trajectory, name, torch.zeros((1, *trailing_shape), dtype=_OPTIONAL_FIELD_DTYPES[name]))
+    trajectory = Trajectory(token_ids=[pad_token_id, pad_token_id], loss_mask=[0], rollout_log_probs=[0.0], reward=0.0)
+    if top_k is not None:
+        trajectory.rollout_topk_log_probs = torch.zeros((1, top_k))
+        trajectory.rollout_topk_token_ids = torch.zeros((1, top_k))
+    if routing_replay_shape is not None:
+        trajectory.rollout_routed_experts = torch.zeros((1, *routing_replay_shape))
     trajectory.finalize_source_token_alignment()
     return trajectory
 
@@ -111,23 +104,6 @@ def flatten_episodes(episodes: list[Episode], *, loss_normalization_unit: str) -
     return trajectories
 
 
-def _optional_field_shapes(trajectories: list[Trajectory]) -> dict[str, tuple[int, ...]]:
-    """Collect the trailing shape of each optional sequence field the trajectories carry."""
-    shapes = {}
-    for name in _OPTIONAL_FIELD_DTYPES:
-        present = {
-            tuple(getattr(trajectory, name).shape[1:])
-            for trajectory in trajectories
-            if getattr(trajectory, name) is not None
-        }
-        if not present:
-            continue
-        if len(present) > 1:
-            raise ValueError(f"{name} shapes disagree across trajectories: {sorted(present)}")
-        shapes[name] = present.pop()
-    return shapes
-
-
 def build_dp_batches(
     episodes: list[Episode],
     *,
@@ -136,6 +112,8 @@ def build_dp_batches(
     loss_normalization_unit: str,
     pad_token_id: int,
     balance_data: bool,
+    top_k: int | None,
+    routing_replay_shape: tuple[int, int] | None,
 ) -> list[TrajectoryBatch]:
     """Split an episode batch into one balanced trajectory batch per DP rank.
 
@@ -144,15 +122,17 @@ def build_dp_batches(
     is the trajectory: each is its own packed document and cannot be concatenated
     with its siblings, so distributing trajectories rather than attempts is what gives
     every rank an equal document count.
+
+    `top_k` (`--use-score-centering`) and `routing_replay_shape` describe the
+    optional fields the run produces. Bulk fields arrive as `ObjectRef`, so padding
+    takes their shapes from this configuration instead of from the real trajectories.
     """
     trajectories = flatten_episodes(episodes, loss_normalization_unit=loss_normalization_unit)
 
     padding_count = -len(trajectories) % (dp_size * num_steps)
-    if padding_count:
-        optional_shapes = _optional_field_shapes(trajectories)
-        trajectories += [
-            _padding_trajectory(pad_token_id, optional_shapes) for _ in range(padding_count)
-        ]
+    trajectories += [
+        create_dp_padding_trajectory(pad_token_id, top_k, routing_replay_shape) for _ in range(padding_count)
+    ]
 
     lengths = [len(trajectory.token_ids) for trajectory in trajectories]
     rank_indices: list[list[int]] = [[] for _ in range(dp_size)]

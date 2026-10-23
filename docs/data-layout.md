@@ -44,10 +44,10 @@ and `Episode.get_reward_value()` returns one scalar whichever level carries the 
 | `token_ids` | `list[int]` or `LongTensor [T]` | Full token sequence of this trajectory (prompt + generated) |
 | `loss_mask` | `list[int]` or `IntTensor [T]` | Source-token mask; 0 for prompt and terminal positions, 1 for generated predictions |
 | `rollout_log_probs` | `list[float]` or `FloatTensor [T]` | Source-token-aligned log-probabilities under the rollout policy |
-| `rollout_topk_log_probs` | `FloatTensor [T, K] \| None` | Source-token-aligned sampler top-$K$ log-probabilities, under `--use-score-centering K` |
-| `rollout_topk_token_ids` | `IntTensor [T, K] \| None` | Token ids of `rollout_topk_log_probs`, in the same order |
-| `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| None` | Source-token-aligned MoE expert indices recorded during rollout |
-| `multimodal_inputs` | `dict[str, Tensor] \| ObjectRef \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.); an `ObjectRef` between the rollout worker and `process_rollout_data`, see [Multimodal Input Lifecycle](#multimodal-input-lifecycle) |
+| `rollout_topk_log_probs` | `FloatTensor [T, K] \| ObjectRef \| None` | Source-token-aligned sampler top-$K$ log-probabilities, under `--use-score-centering K` |
+| `rollout_topk_token_ids` | `IntTensor [T, K] \| ObjectRef \| None` | Token ids of `rollout_topk_log_probs`, in the same order |
+| `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| ObjectRef \| None` | Source-token-aligned MoE expert indices recorded during rollout |
+| `multimodal_inputs` | `dict[str, Tensor] \| ObjectRef \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
 | `reward` | `float \| None` | Raw scalar reward for this trajectory |
 | `text` | `str \| None` | Decoded full trajectory (prompt + response) |
 | `generated_text` | `str \| None` | Decoded target tokens selected by active prediction slots |
@@ -94,6 +94,7 @@ temporary Python or NumPy values with length `len(token_ids) - 1`.
 `trajectory.finalize_source_token_alignment()` appends one neutral terminal slot and
 converts the sequence fields to CPU tensors with length `len(token_ids)`.
 `episode.finalize_source_token_alignment()` does this for every trajectory in the episode.
+The rollout worker finalizes every trajectory at the end of `run_group`, so every stage after the generate and reward functions sees the finalized form (see [Bulk Field Lifecycle](#bulk-field-lifecycle)).
 
 After finalization, entry `i` describes the prediction of `token_ids[i+1]` given
 `token_ids[:i+1]`. The final source position has no prediction target, so its mask and
@@ -121,24 +122,34 @@ tokenization it returns them the same way. See
 [Tokenization Ownership](sglang-config.md#tokenization-ownership) for the field names on each
 endpoint.
 
-### Multimodal Input Lifecycle
+### Bulk Field Lifecycle
 
-`trajectory.multimodal_inputs` moves by reference, so the `RolloutManager` coordinator never holds processor tensors.
+`RolloutWorker.run_group` processes each trajectory of the group in order: it finalizes the trajectory, then puts each bulk field into the worker node's object store.
+The bulk fields are `rollout_topk_log_probs`, `rollout_topk_token_ids`, `rollout_routed_experts`, and `multimodal_inputs` (`BULK_FIELDS` in `slim/utils/types.py`).
+The `RolloutManager` coordinator holds only their refs.
+`token_ids`, `loss_mask`, and `rollout_log_probs` stay inline: the coordinator reads them for rollout logging, sample filtering, and DP balancing.
 
-| Stage | Form |
-|---|---|
-| generate and reward functions (`RolloutWorker`) | `dict[str, Tensor] \| None` |
-| end of `RolloutWorker.run_group` | `ray.put` into the worker node's object store, becomes `ObjectRef \| None` |
-| filters, batch hooks, rollout logging, `build_dp_batches`, `AdvantageEstimator`, `--custom-reward-post-process-path` | `ObjectRef \| None`, never read |
-| `process_rollout_data` (trainer) | one `ray.get` over the batch's refs, written back as `dict[str, Tensor] \| None` |
-| packing and training | `dict[str, Tensor] \| None` |
+| Stage | Bulk fields | `token_ids`, `loss_mask`, `rollout_log_probs` |
+|---|---|---|
+| generate and reward functions (`RolloutWorker`) | `Tensor` or `dict[str, Tensor]`, prediction length | `list`, prediction length |
+| end of `RolloutWorker.run_group` | finalized, then `ray.put`, becomes `ObjectRef` | finalized CPU tensors of length `T` |
+| filters, batch hooks, rollout logging, `build_dp_batches`, `AdvantageEstimator`, `--custom-reward-post-process-path` | `ObjectRef`, never read | CPU tensors of length `T` |
+| `process_rollout_data` (trainer) | one `ray.get` over the real trajectories' refs, written back as tensors | CPU tensors of length `T` |
+| packing and training | tensors | tensors |
 
+A field the run does not produce stays `None` at every stage.
 Each stage relies on the form the stage before it produces and does not re-validate it.
+The worker skips the processing when its abort flag is set, because the pool drops every group that returns after abort.
+
 The worker owns the objects and lives for the run, and Ray keeps nested refs alive while the batch that contains them is alive.
-`AdvantageEstimator.compute_training_targets` fetches and re-puts batches without moving any processor tensor.
-`compute_log_probs` and `train` each call `process_rollout_data`, so a rank fetches the processor outputs twice per step.
-`--save-debug-rollout-data` resolves the refs inside the `dataclasses.asdict` output it saves, for both train and eval, so the live episodes keep their refs; `--load-debug-rollout-data` puts the loaded dicts back with `ray.put`.
-Token-aligned fields (`token_ids`, `loss_mask`, `rollout_log_probs`, `rollout_topk_log_probs`, `rollout_topk_token_ids`, `rollout_routed_experts`) stay inline, because source-token finalization and DP padding in `RolloutManager` read them.
+`AdvantageEstimator.compute_training_targets` fetches and re-puts batches without moving any bulk tensor.
+`compute_log_probs` and `train` each call `process_rollout_data`, so a rank fetches the bulk fields twice per step.
+
+`build_dp_batches` builds padding trajectories in the coordinator, so `create_dp_padding_trajectory` takes the optional fields and their per-token shapes from the run configuration: `rollout_log_probs` always, $(K,)$ top-$K$ fields under `--use-score-centering K`, and `(num_layers, top_k)` routed experts from the `--hf-checkpoint` config under `--use-rollout-routing-replay`.
+Padding trajectories carry these fields inline, and `process_rollout_data` resolves refs only on trajectories with an `episode_index`.
+
+`--save-debug-rollout-data` resolves the refs inside the `dataclasses.asdict` output it saves, for both train and eval, so the live episodes keep their refs; the saved trajectories are finalized.
+`--load-debug-rollout-data` puts the loaded bulk fields back with `ray.put`.
 
 ### Routing Replay
 

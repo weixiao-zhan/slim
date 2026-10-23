@@ -18,10 +18,19 @@ from tqdm.asyncio import tqdm as atqdm
 from slim.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
 from slim.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from slim.utils.async_utils import run
+from slim.utils.data import load_hf_dataset
 from slim.utils.eval_config import EvalDatasetConfig
 from slim.utils.http_utils import post
 from slim.utils.misc import SingletonMeta, load_function
+from slim.utils.processing_utils import (
+    decode_tensor_envelopes,
+    encode_tensor_to_b64_envelope,
+    load_processor,
+    load_tokenizer,
+)
 from slim.utils.types import Episode, Trajectory
+
+from .rm_hub import async_rm, batched_async_rm
 
 __all__ = ["generate_rollout", "get_model_url"]
 
@@ -46,8 +55,6 @@ class RolloutGroup:
 
 class GenerateState(metaclass=SingletonMeta):
     def __init__(self, args: Namespace) -> None:
-        from slim.utils.processing_utils import load_processor, load_tokenizer
-
         self.args = args
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
@@ -58,13 +65,6 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
 
-        self.routing_replay_shape: tuple[int, int] | None = None
-        if args.use_rollout_routing_replay:
-            from transformers import AutoConfig
-
-            cfg = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
-            text_cfg = getattr(cfg, "text_config", cfg)
-            self.routing_replay_shape = (text_cfg.num_hidden_layers, text_cfg.num_experts_per_tok)
 
         self.reset()
 
@@ -178,8 +178,6 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
 
 async def generate(state: GenerateState, episode: Episode) -> Episode:
     args = state.args
-    from slim.utils.processing_utils import decode_tensor_envelopes, encode_tensor_to_b64_envelope
-
     trajectory = await _build_trajectory_with_first_prompt(state, episode)
     episode.trajectories.append(trajectory)
 
@@ -203,7 +201,7 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if args.use_score_centering is not None:
         payload["top_logprobs_num"] = args.use_score_centering
     routed_experts_start_len = 0
-    if state.routing_replay_shape is not None:
+    if args.routing_replay_shape is not None:
         # Expert capture is indexed by KV-cache slot, so a position reports the routing
         # of whichever forward pass last wrote its slot. Rows already held end where
         # this call's fresh prefill begins, which is the first token of the new turn.
@@ -253,8 +251,8 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         trajectory.rollout_topk_log_probs = torch.cat((trajectory.rollout_topk_log_probs, top_logprobs["logprobs"]))
         trajectory.rollout_topk_token_ids = torch.cat((trajectory.rollout_topk_token_ids, top_logprobs["token_ids"]))
 
-    if state.routing_replay_shape is not None:
-        num_layers, top_k = state.routing_replay_shape
+    if args.routing_replay_shape is not None:
+        num_layers, top_k = args.routing_replay_shape
         # The response covers [start_len, seqlen - 1), one row per prediction.
         prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
@@ -302,8 +300,6 @@ async def generate_and_rm(
                 trajectory.generated_text = decode_generated_text(args, trajectory)
 
     if not args.group_rm and episode.status != Episode.Status.ABORTED and _needs_reward(episode):
-        from .rm_hub import async_rm
-
         await async_rm(args, episode)
     return episode
 
@@ -328,8 +324,6 @@ async def generate_and_rm_group(args: Namespace, group: RolloutGroup, evaluation
 
     group.episodes = await asyncio.gather(*tasks)
     if not state.aborted and args.group_rm:
-        from .rm_hub import batched_async_rm
-
         await batched_async_rm(args, group.episodes)
 
     group.completed = all(ep.status != Episode.Status.ABORTED for ep in group.episodes)
@@ -436,7 +430,6 @@ async def eval_rollout_single_dataset(
 
     global EVAL_PROMPT_DATASET
     from slim.rollout.worker import RolloutWorkerPool
-    from slim.utils.data import load_hf_dataset
 
     pool = RolloutWorkerPool(args)
     cache_key = dataset_cfg.cache_key + (args.hf_checkpoint,)

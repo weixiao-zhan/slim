@@ -81,8 +81,9 @@ def test_generate_handles_aborted_routing_replay_response(monkeypatch):
         router_ip="127.0.0.1",
         router_port=30000,
         use_score_centering=None,
+        routing_replay_shape=(40, 8),
     )
-    rollout_state = SimpleNamespace(args=args, routing_replay_shape=(40, 8))
+    rollout_state = SimpleNamespace(args=args)
     episode = Episode.from_example({"prompt": "prompt"})
     episode.max_tokens = 16
 

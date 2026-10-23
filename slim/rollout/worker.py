@@ -13,8 +13,9 @@ from slim.rollout.sglang_rollout import GenerateState, RolloutGroup, generate_an
 from slim.utils.http_utils import get, init_http_client, post
 from slim.utils.logging_utils import configure_logger
 from slim.utils.misc import SingletonMeta
+from slim.utils.types import BULK_FIELDS
 
-__all__ = ["RolloutWorker", "RolloutWorkerPool", "offload_bulk_fields"]
+__all__ = ["RolloutWorker", "RolloutWorkerPool", "finalize_trajectories"]
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -22,12 +23,14 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
-def offload_bulk_fields(group: RolloutGroup) -> None:
-    """Put each trajectory's processor outputs into this node's object store."""
+def finalize_trajectories(group: RolloutGroup) -> None:
+    """Finalize each trajectory in order and put its bulk fields into this node's object store."""
     for episode in group.episodes:
         for trajectory in episode.trajectories:
-            if trajectory.multimodal_inputs is not None:
-                trajectory.multimodal_inputs = ray.put(trajectory.multimodal_inputs)
+            trajectory.finalize_source_token_alignment()
+            for name in BULK_FIELDS:
+                if (value := getattr(trajectory, name)) is not None:
+                    setattr(trajectory, name, ray.put(value))
 
 
 @ray.remote
@@ -40,7 +43,8 @@ class RolloutWorker:
 
     async def run_group(self, group: RolloutGroup, evaluation: bool) -> RolloutGroup:
         group = await generate_and_rm_group(self.args, group, evaluation=evaluation)
-        offload_bulk_fields(group)
+        if not self.state.aborted:
+            await asyncio.to_thread(finalize_trajectories, group)
         return group
 
     async def abort(self) -> None:

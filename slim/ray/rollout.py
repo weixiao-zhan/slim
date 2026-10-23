@@ -9,8 +9,8 @@ import multiprocessing
 import os
 import random
 import time
-from pathlib import Path
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import ray
@@ -18,6 +18,7 @@ import requests
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
+from sglang_router.launch_router import RouterArgs
 
 from slim.backends.sglang_utils.sglang_config import ModelConfig, ServerGroupConfig, SglangConfig
 from slim.backends.sglang_utils.sglang_engine import SGLangEngine
@@ -25,7 +26,7 @@ from slim.rollout.worker import RolloutWorkerPool
 from slim.utils import logging_utils
 from slim.utils.env_utils import get_nvidia_ld_library_path
 from slim.utils.health_monitor import RolloutHealthMonitor
-from slim.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client
+from slim.utils.http_utils import _wrap_ipv6, find_available_port, get_host_info, init_http_client, run_router
 from slim.utils.logging_utils import build_sglang_metrics_endpoints, configure_logger, init_tracking
 from slim.utils.metric_utils import (
     compute_consensus,
@@ -36,9 +37,10 @@ from slim.utils.metric_utils import (
     dict_add_prefix,
 )
 from slim.utils.misc import load_function
+from slim.utils.processing_utils import load_tokenizer
 from slim.utils.profile_utils import profile_rollout
 from slim.utils.trajectory_batch import build_dp_batches
-from slim.utils.types import Episode, Trajectory
+from slim.utils.types import BULK_FIELDS, Episode, Trajectory
 
 from ..utils.metric_utils import has_repetition
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock, rollout_node_ids, train_span
@@ -60,8 +62,9 @@ def _load_debug_rollout_episodes(path_template: str, rollout_id: int) -> list[Ep
         record = dict(record)
         record["trajectories"] = [Trajectory(**traj) for traj in record["trajectories"]]
         for trajectory in record["trajectories"]:
-            if trajectory.multimodal_inputs is not None:
-                trajectory.multimodal_inputs = ray.put(trajectory.multimodal_inputs)
+            for name in BULK_FIELDS:
+                if (value := getattr(trajectory, name)) is not None:
+                    setattr(trajectory, name, ray.put(value))
         episodes.append(Episode(**record))
     logger.info("Loaded %d debug rollout episodes from %s", len(episodes), path)
     return episodes
@@ -486,7 +489,6 @@ class RolloutManager:
             return
         for index, episode in enumerate(episodes):
             episode.episode_index = index
-            episode.finalize_source_token_alignment()
         return self._split_trajectories_by_dp(episodes)
 
     def eval(self, rollout_id):
@@ -631,10 +633,10 @@ class RolloutManager:
 
             all_episodes = [ep for episodes in data.values() for ep in episodes] if evaluation else data
             records = [dataclasses.asdict(ep) for ep in all_episodes]
-            # Resolve multimodal_inputs refs in the saved copy; the live episodes keep their refs.
-            trajectories = [traj for record in records for traj in record["trajectories"] if traj["multimodal_inputs"] is not None]
-            for traj, multimodal_inputs in zip(trajectories, ray.get([traj["multimodal_inputs"] for traj in trajectories]), strict=True):
-                traj["multimodal_inputs"] = multimodal_inputs
+            # Resolve bulk field refs in the saved copy; the live episodes keep their refs.
+            ref_fields = [(traj, name) for record in records for traj in record["trajectories"] for name in BULK_FIELDS if traj[name] is not None]
+            for (traj, name), value in zip(ref_fields, ray.get([traj[name] for traj, name in ref_fields]), strict=True):
+                traj[name] = value
 
             torch.save(dict(rollout_id=rollout_id, episodes=records), path)
 
@@ -653,6 +655,8 @@ class RolloutManager:
             loss_normalization_unit=self.args.loss_normalization_unit,
             pad_token_id=self._pad_token_id,
             balance_data=self.args.balance_data,
+            top_k=self.args.use_score_centering,
+            routing_replay_shape=self.args.routing_replay_shape,
         )
         logger.info(
             "Split %d episodes into %d trajectories per DP rank across %d optimizer steps",
@@ -664,9 +668,8 @@ class RolloutManager:
 
     @functools.cached_property
     def _pad_token_id(self) -> int:
-        from slim.utils.processing_utils import load_tokenizer
-
         return load_tokenizer(self.args.hf_checkpoint, trust_remote_code=True).pad_token_id
+
 
 
 def _allocate_rollout_engine_addr_and_ports_external(args, rollout_engines):
@@ -792,10 +795,6 @@ def _start_router(args, *, has_pd_disaggregation: bool = False, force_new: bool 
             router_port = find_available_port(random.randint(3000, 4000))
 
     prometheus_port = find_available_port(random.randint(4000, 5000))
-
-    from sglang_router.launch_router import RouterArgs
-
-    from slim.utils.http_utils import run_router
 
     router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
     router_args.host = router_ip

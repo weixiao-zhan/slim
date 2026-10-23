@@ -11,6 +11,7 @@ import socket
 
 import httpx
 import orjson
+from sglang_router.launch_router import launch_router
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +120,6 @@ def _wrap_ipv6(host):
 
 def run_router(args):
     try:
-        from sglang_router.launch_router import launch_router
-
         router = launch_router(args)
         if router is None:
             return 1
