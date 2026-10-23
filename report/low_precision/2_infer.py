@@ -133,7 +133,7 @@ def main():
     from slim.utils.types import Episode, Trajectory
 
     GenerateState._instances = {}  # singleton reset between configs in one process
-    state = GenerateState(args, args_cli.concurrency)
+    state = GenerateState(args)
     routing_shape = state.routing_replay_shape  # (num_layers, top_k) or None
 
     # Load via HF datasets so the `images` column is decoded to PIL (Image() feature), matching

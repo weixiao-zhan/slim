@@ -133,9 +133,12 @@ endpoint.
 | `process_rollout_data` (trainer) | one `ray.get` over the batch's refs, written back as `dict[str, Tensor] \| None` |
 | packing and training | `dict[str, Tensor] \| None` |
 
-`--save-debug-rollout-data` resolves the refs in the saved copy, and `--load-debug-rollout-data` puts the loaded dicts back with `ray.put`.
-Token-aligned fields stay inline throughout.
-See [Distributed Rollout](distributed-rollout.md#bulk-field-lifecycle).
+Each stage relies on the form the stage before it produces and does not re-validate it.
+The worker owns the objects and lives for the run, and Ray keeps nested refs alive while the batch that contains them is alive.
+`AdvantageEstimator.compute_training_targets` fetches and re-puts batches without moving any processor tensor.
+`compute_log_probs` and `train` each call `process_rollout_data`, so a rank fetches the processor outputs twice per step.
+`--save-debug-rollout-data` resolves the refs inside the `dataclasses.asdict` output it saves, for both train and eval, so the live episodes keep their refs; `--load-debug-rollout-data` puts the loaded dicts back with `ray.put`.
+Token-aligned fields (`token_ids`, `loss_mask`, `rollout_log_probs`, `rollout_topk_log_probs`, `rollout_topk_token_ids`, `rollout_routed_experts`) stay inline, because source-token finalization and DP padding in `RolloutManager` read them.
 
 ### Routing Replay
 

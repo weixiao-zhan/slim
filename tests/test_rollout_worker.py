@@ -20,6 +20,7 @@ from slim.utils.trajectory_batch import build_dp_batches
 from slim.utils.types import Episode, Trajectory
 
 NUM_GPUS = 0
+NODE_IDS = [f"{1:056x}"]
 
 
 class LocalHandle:
@@ -40,7 +41,7 @@ class FakeWorkerClass:
         self.make_worker = make_worker
 
     def options(self, **kwargs):
-        return SimpleNamespace(remote=lambda args, concurrency: LocalHandle(self.make_worker(args, concurrency)))
+        return SimpleNamespace(remote=lambda args: LocalHandle(self.make_worker(args)))
 
 
 class BlockingWorker:
@@ -59,15 +60,12 @@ class BlockingWorker:
         return group
 
 
-def _node(index: int) -> dict:
-    return {"NodeID": f"{index + 1:056x}", "Alive": True, "Resources": {"CPU": 8.0}}
-
-
 def _args(**overrides):
     values = dict(
         rollout_concurrency_per_replica=4,
         rollout_num_gpus=2,
         rollout_num_gpus_per_replica=1,
+        rollout_num_workers=1,
         router_ip="127.0.0.1",
         router_port=30000,
     )
@@ -87,12 +85,11 @@ async def _settle():
 
 @pytest.fixture
 def fake_cluster(monkeypatch):
-    """Patch node discovery and actor creation so the pool builds over in-process workers."""
+    """Patch actor creation so the pool builds over in-process workers."""
     monkeypatch.setattr(SingletonMeta, "_instances", {})
     monkeypatch.setattr(worker_module.ray, "get", lambda refs: refs)
 
-    def install(nodes, make_worker):
-        monkeypatch.setattr(worker_module.ray, "nodes", lambda: nodes)
+    def install(make_worker):
         monkeypatch.setattr(worker_module, "RolloutWorker", FakeWorkerClass(make_worker))
 
     return install
@@ -118,14 +115,14 @@ def fake_router(monkeypatch):
 def test_pool_dispatches_to_least_loaded_worker_below_capacity(fake_cluster):
     calls, releases, workers = [], {}, []
 
-    def make_worker(args, concurrency):
+    def make_worker(args):
         workers.append(BlockingWorker(len(workers), calls, releases))
         return workers[-1]
 
-    fake_cluster([_node(0), _node(1)], make_worker)
+    fake_cluster(make_worker)
 
     async def run():
-        pool = RolloutWorkerPool(_args())
+        pool = RolloutWorkerPool(_args(rollout_num_workers=2), NODE_IDS)
         assert pool.concurrency == 4
 
         tasks = [asyncio.create_task(pool.run_group(_group(i, 3), evaluation=False)) for i in range(5)]
@@ -175,7 +172,7 @@ def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fak
 
     monkeypatch.setattr(sglang_rollout, "generate", generate)
     local_worker_class = worker_module.RolloutWorker.__ray_metadata__.modified_class
-    fake_cluster([_node(0)], local_worker_class)
+    fake_cluster(local_worker_class)
 
     args = _args(
         rollout_num_gpus=1,
@@ -198,7 +195,7 @@ def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fak
     examples = [{"prompt": "fast"}, {"prompt": "slow"}, {"prompt": "slow-waiting"}]
 
     async def run():
-        pool = RolloutWorkerPool(args)
+        pool = RolloutWorkerPool(args, NODE_IDS)
         output, aborted_examples = await sglang_rollout.generate_rollout_async(args, 0, lambda n: [examples.pop(0) for _ in range(n)])
         return pool, output, aborted_examples
 

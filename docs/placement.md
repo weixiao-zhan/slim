@@ -48,16 +48,91 @@ The quotas are **scheduling weights, not memory limits**: GPU memory isolation i
 Slim manage time-slicing with offload (`sleep`/`wake_up` premitive).
 Slim set fixed quotas: actor `0.4`, critic `0.4`, rollout `0.2`, so all colocate placement are valid.
 
-### Rollout workers
+## Rollout Workers
 
 Rollout generation runs in CPU-only `RolloutWorker` actors outside the GPU placement group.
-`RolloutManager` creates one worker on every alive Ray node with a CPU, head node included, each with `num_cpus=1` and a `NodeAffinitySchedulingStrategy` pinning it to its node.
-The workers are created after the rollout servers start; `--debug-train-only` creates none.
+Agentic rollouts (Docker environments, code execution, agent frameworks) spend much of their CPU outside token generation, so `--rollout-num-workers` spreads that work over several processes and nodes.
 
-With $P$ rollout replicas (`R / rollout_num_gpus_per_replica`), $c$ = `--rollout-concurrency-per-replica`, and $N$ workers, the total episode concurrency is $P \cdot c$ and each worker's episode semaphore is $\lceil P \cdot c / N \rceil$.
-The coordinator dispatches each prompt group to the least loaded worker with free capacity.
-Custom generate and reward modules and `--hf-checkpoint` must be reachable from every node.
-See [Distributed Rollout](distributed-rollout.md) for dispatch and abort.
+```
+            ┌──────────── RolloutManager (first rollout node) ─────────────┐
+            │ data source · dynamic filter · batch hooks · abort · DP split │
+            │ RolloutWorkerPool: per-worker episode load, pending tasks     │
+            │ sglang router (child process)                                 │
+            └──────▲ RolloutGroup (bulk fields as ObjectRef)  │ RolloutGroup (PENDING)
+                   │                                          ▼
+  rollout nodes ── N × RolloutWorker (Ray async actor, many groups, capacity ⌈P·c / N⌉)
+                   GenerateState · HTTP client · generate_and_rm_group · local Docker daemon
+                   ray.put(multimodal_inputs) stays in this node's object store
+                   │                                          │ HTTP
+                   ▼                                          ▼
+  trainer DP rank ── ray.get(TrajectoryBatch)            router → engines
+```
+
+| Component | Process | Owns |
+|---|---|---|
+| `RolloutManager` | one actor on the first rollout node | data source, dynamic filter, batch-level hooks, abort, DP split, logging, tracking, engine lifecycle, router |
+| `RolloutWorkerPool` | singleton inside the `RolloutManager` process | worker handles, per-worker episode load, pending group tasks, `aborted` flag |
+| `RolloutWorker` | `--rollout-num-workers` async actors, round-robin over the rollout nodes | `GenerateState`, HTTP client, the groups assigned to it |
+| generate function | runs inside a worker | example interpretation, media loading, containers, processor outputs |
+
+A dataset example becomes one `RolloutGroup` of `n_samples_per_prompt` episodes.
+The group is the dispatch unit, so all episodes of a group run in the same worker.
+The framework ships the raw example dict to a worker and does not interpret it.
+
+### Placement and sizing
+
+The rollout nodes are the distinct nodes of the rollout bundles, in sorted bundle order; let $M$ be their count.
+`RolloutManager` is pinned to the first rollout node, so the router it launches shares a node with the first rollout engine.
+After the rollout servers start, `RolloutManager` creates $N$ = `--rollout-num-workers` workers (default 1) and pins worker $i$ to rollout node $i \bmod M$.
+Each worker and `RolloutManager` take `num_cpus=1` outside the placement group, so a rollout node needs one free CPU per worker on it, and the first rollout node needs one more.
+`--debug-train-only` has no rollout nodes, so `RolloutManager` is not pinned and no worker is created.
+
+With $P$ rollout replicas (`R / rollout_num_gpus_per_replica`) and $c$ = `--rollout-concurrency-per-replica`, the target episode concurrency is $P \cdot c$ and each worker's episode capacity is $\lceil P \cdot c / N \rceil$.
+`--rollout-concurrency-per-replica` also sets the engine's `max_running_requests` and the default `cuda_graph_max_bs_decode`.
+Custom generate and reward modules and `--hf-checkpoint` must be reachable from every rollout node.
+
+### Worker
+
+- `RolloutWorker` is an async actor, so every `run_group` call and `abort` run concurrently on the one event loop thread of the actor.
+- `run_group` runs `generate_and_rm_group` on the group, then puts each trajectory's `multimodal_inputs` into the node's object store (see [Multimodal Input Lifecycle](data-layout.md#multimodal-input-lifecycle)).
+- `GenerateState(args)` is a process singleton holding the tokenizer, processor, chat template kwargs, routing replay shape, and the `aborted` flag.
+- `init_http_client()` builds the client without a connection limit and with `trust_env=False`, so proxy variables on a remote node do not capture traffic to the router.
+- The worker does not initialize tracking; rollout logging and W&B stay in `RolloutManager`.
+
+### Dispatch
+
+`RolloutWorkerPool.run_group(group, evaluation)`:
+
+1. Return the group untouched if the pool is aborted.
+2. Wait for a worker whose episode load is below its capacity, and pick the least loaded one.
+3. Add the group's episode count to that worker's load, await `worker.run_group.remote(group, evaluation)`, and subtract it again in a `finally`.
+
+Groups that do not fit anywhere wait in the coordinator, where any worker that frees capacity picks them up.
+The coordinator reaches workers only by calling them; workers never call `RolloutManager`, which is a synchronous actor blocked in `generate` for the whole rollout.
+A custom `--rollout-function-path` runs in the `RolloutManager` process and reaches the workers through `RolloutWorkerPool(args)`.
+
+The train loop `generate_rollout_async` builds groups, submits them with `pool.submit_generate_tasks`, waits for the first completed task in `pool.pendings`, applies the dynamic filter, and refills until `rollout_batch_size` groups pass.
+`over_sampling_batch_size` sets how many groups stay in flight.
+The dynamic filter, `--rollout-sample-filter-path`, and `--rollout-all-samples-process-path` run in the `RolloutManager` process on returned groups.
+
+Eval builds one group of `eval_n_samples_per_prompt` episodes per dataset row and gathers `pool.run_group(group, evaluation=True)` over the rows.
+`generate_and_rm_group` gives eval episodes session ids, so the `consistent_hashing` router policy routes them by session like train episodes.
+Each call waits for its own group, so the eval datasets that `eval_rollout` gathers concurrently share the pool without taking each other's results.
+
+### Abort
+
+Abort is cooperative: nothing cancels a task or kills a process.
+`RolloutWorkerPool.abort` runs when the batch is full:
+
+1. Set the pool's `aborted` flag, so pending tasks that have not reached a worker return their group untouched.
+2. Call `abort` on every worker, which sets `state.aborted` in that worker. All groups of a worker share its `GenerateState`, and threads the generate function starts through `asyncio.to_thread` read the same object.
+3. Post `abort_request` with `abort_all` to every engine behind the router once per second until every pending task has returned. `abort_all` aborts only the requests running at that moment, so the repeat catches requests a worker posted before it saw its flag.
+4. Collect the examples of groups that are not `completed` for `data_source.add_examples`.
+5. Call `reset` on every worker and on the pool.
+
+The coordinator has its own HTTP client for `GET /workers` and the abort posts, also without a connection limit.
+An aborted group returns through the normal path, so its bulk refs are dropped with it.
+Every generate function returns on its own, so its `finally` always runs; see the [generate function contract](customization.md#generate-function---custom-generate-function-path).
 
 ## Step timeline
 

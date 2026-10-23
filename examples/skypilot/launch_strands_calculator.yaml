@@ -2,9 +2,7 @@
 #   sky launch launch_strands_calculator.yaml --env-file ../../.env -c slim-dev
 #   sky exec slim-dev launch_strands_calculator.yaml --env-file ../../.env
 #
-# Strands calculator rollout over the chat completions endpoint, on one GPU per node.
-# Every node runs one RolloutWorker, so the agent loop runs on every node.
-
+# Strands calculator rollout over the chat completions endpoint
 name: strands-calculator
 
 workdir: ../..
@@ -113,7 +111,7 @@ run: | # shell
     --max-worker-port=${RAY_MAX_WORKER_PORT} \
     --metrics-export-port=${RAY_METRICS_EXPORT_PORT}
 
-  # The pool places one RolloutWorker on every alive node, so wait for all of them.
+  # The placement group spans every node, so wait for all of them.
   until [ "$(uv run python -c "import ray; ray.init(address='${MASTER_ADDR}:${RAY_PORT}', logging_level='ERROR'); print(sum(n['Alive'] for n in ray.nodes()))")" = "${SKYPILOT_NUM_NODES}" ]; do
     sleep 5
   done
@@ -162,6 +160,7 @@ run: | # shell
     --rollout-colocate \
     --rollout-num-gpus-per-replica 1 \
     --rollout-concurrency-per-replica 64 \
+    --rollout-num-workers ${SKYPILOT_NUM_NODES} \
     --sglang-context-length 24576 \
     --sglang-tool-call-parser qwen3_coder \
     --sglang-reasoning-parser qwen3 \
