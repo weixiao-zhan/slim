@@ -7,6 +7,9 @@ Strands owns the agent loop: it formats every request, parses tool calls out of 
 response, and runs the calculator. This module only points Strands at SGLang's chat
 completions endpoint, hands it one dataset row, and keeps the token ids the engine ran.
 
+Each calculator call runs in a child process with a wall-clock limit, so a slow SymPy
+computation cannot stall the rollout.
+
 Dataset columns this example reads:
 
 | Column | Type | Content |
@@ -19,8 +22,12 @@ Dataset columns this example reads:
 
 from __future__ import annotations
 
+import asyncio
 import io
+import logging
+import multiprocessing
 from collections.abc import AsyncGenerator
+from multiprocessing.connection import Connection
 from typing import Any
 
 import torch
@@ -30,7 +37,7 @@ from strands.models.openai import OpenAIModel
 from strands.types.content import ContentBlock, Message
 from strands.types.exceptions import EventLoopException, MaxTokensReachedException
 from strands.types.streaming import StreamEvent
-from strands.types.tools import ToolChoice, ToolSpec
+from strands.types.tools import AgentTool, ToolChoice, ToolGenerator, ToolSpec, ToolUse
 from strands_tools.calculator import calculator
 
 from slim.rollout.sglang_rollout import GenerateState, get_model_url
@@ -38,11 +45,18 @@ from slim.utils.http_utils import post
 from slim.utils.processing_utils import decode_tensor_envelopes
 from slim.utils.types import Episode, Trajectory
 
-# How the engine ended the attempt's last call is what the attempt amounts to.
-_STATUS_BY_FINISH_REASON = {
-    "stop": Episode.Status.COMPLETED,
-    "length": Episode.Status.TRUNCATED,
-}
+# Generation cap of one model call.
+_MAX_TOKENS_PER_TURN = 12 * 1024
+# Cap on model calls in one attempt. Strands recurses once per tool round, so an uncapped
+# run of short tool calls exhausts the Python stack before it fills the context.
+_MAX_TURNS = 10
+# Wall-clock limit of one calculator call. The model gets an error result for a call that runs longer.
+_TOOL_TIMEOUT_SECONDS = 10
+
+# A child forks from a server that has already imported this module, so a call starts in milliseconds.
+# The fork server itself starts on the first call.
+_PROCESSES = multiprocessing.get_context("forkserver")
+_PROCESSES.set_forkserver_preload([__name__])
 
 
 class _RequestAborted(Exception):
@@ -56,15 +70,85 @@ def _image_block(image) -> ContentBlock:
     return {"image": {"format": "png", "source": {"bytes": buffer.getvalue()}}}
 
 
+def _calculate(tool_use: ToolUse, sender: Connection) -> None:
+    """Run one calculator call in the child process and send its tool result."""
+    # The calculator logs a deprecation warning on every call.
+    logging.getLogger("strands_tools.calculator").setLevel(logging.ERROR)
+
+    async def events() -> list[Any]:
+        return [event async for event in calculator.stream(tool_use, {})]
+
+    # The last event carries the tool result.
+    sender.send(asyncio.run(events())[-1].tool_result)
+
+
+class _TimeLimitedCalculator(AgentTool):
+    """Strands' calculator, stopped when a call runs past `_TOOL_TIMEOUT_SECONDS`.
+
+    SymPy can run for hours on a short expression such as `factorial(10**10)`. A thread
+    cannot be stopped, so each call runs in a child process that is killed at the limit.
+    """
+
+    @property
+    def tool_name(self) -> str:
+        return calculator.tool_name
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        return calculator.tool_spec
+
+    @property
+    def tool_type(self) -> str:
+        return calculator.tool_type
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        del invocation_state, kwargs
+        try:
+            result = await self._run_in_child(tool_use)
+        except TimeoutError:
+            error = f"the call ran past the {_TOOL_TIMEOUT_SECONDS} second limit and was stopped"
+        except EOFError:
+            error = "the calculator process exited without a result"
+        else:
+            error = None
+        if error is not None:
+            result = {"toolUseId": tool_use["toolUseId"], "status": "error", "content": [{"text": f"Error: {error}"}]}
+        # The executor takes the last raw value a tool yields as its result.
+        yield result
+
+    @staticmethod
+    async def _run_in_child(tool_use: ToolUse) -> Any:
+        receiver, sender = _PROCESSES.Pipe(duplex=False)
+        with receiver:
+            with sender:
+                process = _PROCESSES.Process(target=_calculate, args=(tool_use, sender), daemon=True)
+                # The first start launches the fork server, which takes seconds.
+                await asyncio.to_thread(process.start)
+            # Only the child holds the sending end now, so the pipe becomes readable when
+            # the child sends its result or exits.
+            loop = asyncio.get_running_loop()
+            ready = asyncio.Event()
+            loop.add_reader(receiver.fileno(), ready.set)
+            try:
+                async with asyncio.timeout(_TOOL_TIMEOUT_SECONDS):
+                    await ready.wait()
+                return receiver.recv()
+            finally:
+                loop.remove_reader(receiver.fileno())
+                process.kill()
+                process.join()
+
+
 class SGLangChatModel(OpenAIModel):
     """Strands' OpenAI provider served by SGLang, recording each call as a trajectory."""
 
     def __init__(self, state: GenerateState, episode: Episode) -> None:
         # Everything here is a `/v1/chat/completions` body field; Strands merges
-        # `params` into the request it builds. With no completion cap, each call may
-        # generate until the context is full.
+        # `params` into the request it builds. Near the end of the context, the engine
+        # lowers `max_tokens` to the tokens left, since slim enables `allow_auto_truncate`.
         params: dict[str, Any] = {
             "temperature": state.args.rollout_temperature,
+            "max_tokens": _MAX_TOKENS_PER_TURN,
             "chat_template_kwargs": state.chat_template_kwargs,
             # Token-in-token-out: keep the ids and logprobs the engine ran.
             "logprobs": True,
@@ -88,7 +172,6 @@ class SGLangChatModel(OpenAIModel):
 
         self.state = state
         self.episode = episode
-        self.finish_reason: str | None = None
         self.url = get_model_url(state.args, "actor", "/v1/chat/completions")
         self.headers = (
             {"X-SMG-Routing-Key": episode.session_id}
@@ -149,7 +232,6 @@ class SGLangChatModel(OpenAIModel):
             experts = decode_tensor_envelopes(meta_info["routed_experts"])
             trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.args.routing_replay_shape)
 
-        self.finish_reason = choice.finish_reason
         self.episode.trajectories.append(trajectory)
 
     async def stream(
@@ -167,6 +249,10 @@ class SGLangChatModel(OpenAIModel):
         if payload["choices"][0]["finish_reason"] == "abort":
             # `abort` is the engine's own finish reason, outside the OpenAI schema below.
             raise _RequestAborted
+        if payload["usage"]["prompt_tokens"] < payload["choices"][0]["meta_info"]["prompt_token_ids"]["shape"][0]:
+            # The conversation outgrew the context and the engine cut the prompt to fit. What the
+            # engine ran then matches no prompt the agent sent, so the call is dropped.
+            raise MaxTokensReachedException("The conversation outgrew the context")
         response = ChatCompletion.model_validate(payload)
         self._record_trajectory(response.choices[0])
         for event in self._format_non_streaming_response(response):
@@ -182,15 +268,17 @@ async def generate(state: GenerateState, episode: Episode, evaluation: bool = Fa
     model = SGLangChatModel(state, episode)
     agent = Agent(
         model=model,
-        tools=[calculator],
+        tools=[_TimeLimitedCalculator()],
         system_prompt=episode.example.get("system"),
         callback_handler=None,
     )
     try:
-        await agent.invoke_async([{"role": "user", "content": content}])
+        result = await agent.invoke_async([{"role": "user", "content": content}], limits={"turns": _MAX_TURNS})
+        # At the turn limit the last call asked for a tool, so the attempt ends without an answer.
+        episode.status = Episode.Status.TRUNCATED if result.stop_reason == "limit_turns" else Episode.Status.COMPLETED
     except MaxTokensReachedException:
-        # The engine stopped that call at the context limit; it is already recorded.
-        pass
+        # A call hit the token cap or the context limit, or the conversation outgrew the context.
+        episode.status = Episode.Status.TRUNCATED
     except (_RequestAborted, EventLoopException) as error:
         cause = getattr(error, "original_exception", error)
         if not isinstance(cause, _RequestAborted):
@@ -199,6 +287,5 @@ async def generate(state: GenerateState, episode: Episode, evaluation: bool = Fa
         return episode
 
     if not episode.trajectories:
-        raise RuntimeError("The calculator rollout recorded no model invocation")
-    episode.status = _STATUS_BY_FINISH_REASON.get(model.finish_reason, Episode.Status.FAILED)
+        raise RuntimeError("The tool-use rollout recorded no model invocation")
     return episode
