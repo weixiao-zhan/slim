@@ -1,5 +1,5 @@
 {
-  "_comment": "FP8 forge recipe for the Qwen3.5 family with DeepGEMM-style UE8M0 block scales: block-128x128 W8A8 e4m3, dynamic activations, per-block scales rounded up to a power of two (scale_fmt=ue8m0). On disk the scales are stored as fp32 powers of two; the rollout engine (DeepGEMM on Blackwell) repacks/consumes them as int32 UE8M0 at load. Same keep-list as qwen35_official.json.",
+  "_comment": "FP8 forge recipe for the Qwen3.5 family with DeepGEMM-style UE8M0 block scales: block-128x128 W8A8 e4m3, dynamic activations, per-block scales rounded up to a power of two (scale_fmt=ue8m0). On disk the scales are stored as fp32 powers of two; the rollout engine (DeepGEMM on Blackwell) repacks/consumes them as int32 UE8M0 at load. Same keep-list as qwen35_128blockfp8.json.",
   "architectures": [
     "Qwen3_5ForConditionalGeneration"
   ],

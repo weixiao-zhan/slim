@@ -41,7 +41,7 @@ run: | # shell
     uv run python tools/convert_hf_to_fp8.py \
       --model-dir "${HOME}/models/${MODEL_NAME}" \
       --save-dir "${HOME}/models/${MODEL_NAME}-FP8" \
-      --ref-config tools/fp8_recipes/qwen35_official.json \
+      --ref-config tools/quant_recipes/qwen35_128blockfp8.json \
       --config-only
   fi
 

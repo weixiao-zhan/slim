@@ -51,6 +51,9 @@ strands = [
     "strands-agents[openai]",
     "strands-agents-tools",
 ]
+quant = [
+    "nvidia-modelopt==0.47.0",
+]
 
 [build-system]
 requires = ["hatchling"]

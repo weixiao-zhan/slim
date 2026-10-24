@@ -1,9 +1,11 @@
-"""Aggregate stage-1 accuracy + stage-2 KL into per-task (Math / Geo3k) Markdown tables.
+"""Aggregate throughput, accuracy (2_infer.py), and KL (3_kl.py) into Markdown tables for README.md.
 
-Enumerates the study's run dirs under --runs-dir and prints rows for fp8_r3_throughput_kl.md.
+Enumerates the study's run dirs under --runs-dir (and bench results under --bench-dir) over every
+(model, precision) in common.py's registry.
 
 Args:
   --runs-dir   parent dir holding the per-run subdirs (named by run_matrix.sh's convention).
+  --bench-dir  dir with 1_bench_throughput.sh's result_<model>_<precision>.jsonl.
 """
 
 import argparse
@@ -12,8 +14,10 @@ from pathlib import Path
 
 import numpy as np
 
-MODELS = ["2b", "4b", "9b", "35b"]
-PRECS = ["bf16", "fp8"]
+import common as C
+
+MODELS = list(C.MODELS)
+PRECS = list(C.PRECISIONS)
 SPLITS = ["math", "vision"]  # math = Math (text), vision = Geo3k
 
 
@@ -87,9 +91,11 @@ def accuracy_tables(runs_dir):
         print("| Model | Prec | pass@1 | pass@2 | pass@4 | acc(unt) | trunc rate |")
         print("|-------|------|--------|--------|--------|----------|------------|")
         for model in MODELS:
-            # 35b stage-1 always runs with r3 capture; 2b has no r3.
-            r3 = model == "35b"
+            # MoE 2_infer.py always runs with r3 capture; dense models have no r3.
+            r3 = model in C.MOE_MODELS
             for prec in PRECS:
+                if not C.is_supported(model, prec):
+                    continue
                 records = _load_records(runs_dir, model, prec, split, r3)
                 if records is None:
                     print(f"| {model} | {prec.upper()} | _tbd_ | _tbd_ | _tbd_ | _tbd_ | _tbd_ |")
@@ -103,20 +109,10 @@ def accuracy_tables(runs_dir):
 
 
 def kl_tables(runs_dir):
-    print("### Section 3 — Rollout/training KL (per task)\n")
-    # (label, model, precision, replay) rows
-    rows = [
-        ("2B", "2b", "bf16", False),
-        ("2B", "2b", "fp8", False),
-        ("4B", "4b", "bf16", False),
-        ("4B", "4b", "fp8", False),
-        ("9B", "9b", "bf16", False),
-        ("9B", "9b", "fp8", False),
-        ("35B", "35b", "bf16", False),
-        ("35B", "35b", "fp8", False),
-        ("35B R3", "35b", "bf16", True),
-        ("35B R3", "35b", "fp8", True),
-    ]
+    print("### Section 3 — TIM KL (per task)\n")
+    # (label, model, precision, replay) rows; MoE models also get an R3 (replay) row per precision.
+    configs = [(m.upper(), m, False) for m in MODELS] + [(f"{m.upper()} R3", m, True) for m in MODELS if m in C.MOE_MODELS]
+    rows = [(name, m, p, r3) for name, m, r3 in configs for p in PRECS if C.is_supported(m, p)]
     for split, label in [("math", "Math"), ("vision", "Geo3k")]:
         print(f"#### {label}")
         # report mean (headline) + p99 (tail) for each K3 granularity (median ~0, std outlier-dominated).
@@ -135,9 +131,52 @@ def kl_tables(runs_dir):
         print()
 
 
+def _throughput(bench_dir, model, prec):
+    """{batch_size: (prefill tok/s, decode tok/s)}; last run wins."""
+    p = Path(bench_dir) / f"result_{model}_{prec}.jsonl"
+    if not p.exists():
+        return {}
+    out = {}
+    for line in open(p):
+        if line.strip():
+            r = json.loads(line)
+            out[r["batch_size"]] = (r["prefill_throughput"], r["median_decode_throughput"])
+    return out
+
+
+def throughput_tables(bench_dir):
+    print("### Section 1 — Throughput (input=512, output=1024)\n")
+    for idx, label in [(1, "Decode"), (0, "Prefill")]:
+        print(f"#### {label} tok/s (x = speedup vs BF16)")
+        for model in MODELS:
+            thru = {p: _throughput(bench_dir, model, p) for p in PRECS if C.is_supported(model, p)}
+            batches = sorted({b for d in thru.values() for b in d})
+            if not batches:
+                continue
+            print(f"\n{model.upper()}\n")
+            print("| Prec | " + " | ".join(f"bs={b}" for b in batches) + " |")
+            print("|------|" + "|".join("------" for _ in batches) + "|")
+            base = thru.get("bf16", {})
+            for prec, d in thru.items():
+                cells = []
+                for b in batches:
+                    if b not in d:
+                        cells.append("—")
+                    elif prec != "bf16" and b in base:
+                        cells.append(f"{d[b][idx]:.0f} ({d[b][idx] / base[b][idx]:.2f}x)")
+                    else:
+                        cells.append(f"{d[b][idx]:.0f}")
+                print(f"| {prec.upper()} | " + " | ".join(cells) + " |")
+        print()
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs-dir", required=True, help="parent dir holding the per-run subdirs")
+    ap.add_argument("--runs-dir", default="/mnt/sagemaker-nvme/experiments/low_precision/runs",
+                    help="parent dir holding the per-run subdirs")
+    ap.add_argument("--bench-dir", default="/mnt/sagemaker-nvme/experiments/low_precision/throughput",
+                    help="dir with 1_bench_throughput.sh results")
     args = ap.parse_args()
+    throughput_tables(args.bench_dir)
     accuracy_tables(args.runs_dir)
     kl_tables(args.runs_dir)

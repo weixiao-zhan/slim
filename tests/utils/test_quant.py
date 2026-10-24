@@ -16,6 +16,7 @@ from slim.utils.quant import (
     QuantizerFP8,
     block_fp8,
     module_path_match,
+    split_fused_experts,
 )
 
 
@@ -57,6 +58,32 @@ def test_block_fp8_grouped_experts_matches_individual_weights():
         expert_weight, expert_scale = block_fp8(weight[expert_id], [128, 128])
         assert torch.equal(grouped_weight[expert_id].view(torch.uint8), expert_weight.view(torch.uint8))
         assert torch.equal(grouped_scale[expert_id], expert_scale)
+
+
+def test_offline_split_experts_match_online_grouped_sync():
+    """Offline per-expert split (converter) == online grouped-expert sync, bytes and scale names.
+
+    Offline checkpoints store fused MoE experts split per expert so sglang loads their scales;
+    the online path quantizes the fused tensor and emits per-expert scales. Both must agree.
+    """
+    torch.manual_seed(0)
+    qz = QuantizerFP8([128, 128], [])
+    prefix = "model.language_model.layers.0.mlp.experts"
+    for projection, shape in (("gate_up_proj", (3, 512, 384)), ("down_proj", (3, 384, 256))):
+        weight = torch.randn(*shape, dtype=torch.bfloat16)
+        (_, q_online), *online_scales = qz.quantize(f"{prefix}.{projection}", weight)
+
+        offline = {}
+        for key, expert_weight in split_fused_experts(f"{prefix}.{projection}", weight):
+            offline[key], offline[key.replace(".weight", ".weight_scale_inv")] = block_fp8(expert_weight, [128, 128])
+        assert [name for name, _ in online_scales] == [k for k in offline if k.endswith("weight_scale_inv")]
+        for name, scale in online_scales:
+            assert torch.equal(offline[name], scale)
+
+        q_offline = [q for k, q in offline.items() if k.endswith(".weight")]
+        if projection == "gate_up_proj":  # online keeps [E, gate;up, in], offline stores gate, up per expert
+            q_offline = [torch.cat(q_offline[i : i + 2]) for i in range(0, len(q_offline), 2)]
+        assert torch.equal(torch.stack(q_offline).view(torch.uint8), q_online.view(torch.uint8))
 
 
 def test_block_fp8_ue8m0_scales_are_powers_of_two():

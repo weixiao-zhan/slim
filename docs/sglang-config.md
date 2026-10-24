@@ -178,6 +178,7 @@ After each training step, updated BF16 weights are re-quantized online to match 
 - e4m3 weights, 128x128 blocks, one scale per block stored as `<weight>.weight_scale_inv`.
 - Two scale formats: `fp32` (default, works on SM89/SM90/SM120) and `ue8m0` (power-of-two scales for DeepGEMM on Blackwell SM120).
 - Modules listed in `quantization_config.modules_to_not_convert` remain unquantized.
+- Fused MoE experts (`mlp.experts.gate_up_proj` / `down_proj`) are written split per expert, so sglang loads their scales.
 
 ### Conversion tool
 
@@ -190,7 +191,27 @@ python tools/convert_hf_to_fp8.py \
     --scale-fmt ue8m0
 ```
 
-`--ref-config` points to an existing FP8 model whose `quantization_config` defines the recipe.
+`--ref-config` points to an existing FP8 model, or a recipe in `tools/quant_recipes/`, whose `quantization_config` defines the recipe.
+
+### Other formats
+
+Recipes in `tools/quant_recipes/` share one keep-list for the Qwen3.5 family:
+
+| Recipe | Format | Tool |
+|---|---|---|
+| `qwen35_128blockfp8.json` | 128x128 block FP8, fp32 scales (official Qwen3.5 FP8) | `tools/convert_hf_to_fp8.py` |
+| `qwen35_128blockfp8ue8m0.json` | 128x128 block FP8, UE8M0 scales (DeepGEMM) | `tools/convert_hf_to_fp8.py` |
+| `qwen35_mxfp8.json` | OCP MXFP8: 1x32 blocks, UE8M0 scales | `tools/convert_hf_to_fp8.py` |
+| `qwen35_nvfp4.json` | NVFP4 W4A4 (ModelOpt export, served as `modelopt_fp4`) | `tools/convert_hf_to_nvfp4.py` |
+
+NVFP4 needs activation calibration, so it uses NVIDIA ModelOpt (`uv sync --extra quant`):
+
+```bash
+python tools/convert_hf_to_nvfp4.py \
+    --model-dir models/Qwen3.5-9B \
+    --save-dir models/Qwen3.5-9B-NVFP4 \
+    --ref-config tools/quant_recipes/qwen35_nvfp4.json
+```
 
 ## Router
 
