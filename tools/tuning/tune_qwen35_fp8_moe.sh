@@ -5,16 +5,14 @@
 # Tune the block-FP8 W8A8 *fused-MoE* Triton kernel for Qwen3.5-35B-A3B's expert FFN on the
 # local GPU, writing the tuned config into tools/triton_moe_configs/triton_<ver>/.
 #
-# WHY: sglang ships a Blackwell BF16 fused-MoE config (E=256,N=512,...Blackwell.json) in its
-# wheel, but NO FP8 variant. So FP8 rollout of the MoE falls back to a default kernel config
-# ("Using default MoE kernel config. Performance might be sub-optimal!" in the engine log),
-# which understates FP8's decode throughput vs the (upstream-tuned) BF16 path. This script
-# produces the missing E=256,N=512,...,dtype=fp8_w8a8,block_shape=[128,128].json (+ its _down
-# companion) so the fused-MoE GEMMs run on a tuned schedule, matching how the dense models'
-# FP8 GEMMs are already tuned (tools/triton_fp8_configs/, see tune_qwen35_fp8_gemm.sh).
+# sglang ships BF16 fused-MoE configs for some GPUs, but no FP8 variant for every GPU.
+# Without a tuned config, FP8 MoE uses a default kernel config
+# ("Using default MoE kernel config. Performance might be sub-optimal!" in the engine log).
+# This script produces E=256,N=512,...,dtype=fp8_w8a8,block_shape=[128,128].json (+ its _down
+# companion) so the fused-MoE GEMMs run on a tuned schedule.
 #
-# The expert-FFN MoE GEMM is keyed by (E, N) = (num_experts, moe_intermediate_size), NOT by the
-# split nn.Linear shapes tuned in tune_qwen35_fp8_gemm.sh. For 35B-A3B: E=256, N=512.
+# The expert-FFN MoE GEMM is keyed by (E, N) = (num_experts, moe_intermediate_size).
+# For 35B-A3B: E=256, N=512.
 #
 # Uses sglang's own fused-MoE tuner (vendored as tuning_fused_moe_triton.py), which reads E/N/topk
 # and the FP8 block_shape straight from the model's quantization_config — point it at the FP8 ckpt.
@@ -23,7 +21,7 @@
 #   MODEL_DIR=models/Qwen3.5-122B-A10B-FP8 bash tools/tuning/tune_qwen35_fp8_moe.sh
 #
 # After tuning, run `uv run python patch_dependencies.py` to install the new config into the active
-# sglang, then re-benchmark (report/fp8_r3/bench_fp8_vs_bf16.sh).
+# sglang, then re-benchmark (report/low_precision/1_bench_throughput.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
