@@ -19,12 +19,9 @@ class NeMoArgs:
     lr: float = 2e-5
     lr_warmup_init: float = 0.0
     lr_min: float = 0.0
-    lr_decay_style: str = "constant"
-    lr_decay_iters: int | None = None
-    lr_warmup_iters: int = 0
-    lr_warmup_fraction: float | None = None
-    lr_wsd_decay_iters: int | None = None
-    lr_wsd_decay_style: str | None = None
+    lr_warmup_steps: int = 0
+    lr_decay_steps: int = 0
+    lr_decay_style: Literal["linear", "cosine", "exponential", "minus_sqrt"] = "linear"
     no_load_lr_scheduler: bool = False
     weight_decay: float = 0.0
     adam_beta1: float = 0.9
@@ -133,6 +130,8 @@ def validate_args(args) -> None:
         if value < 1:
             raise ValueError(f"{name} must be at least 1")
     for name in (
+        "lr_warmup_steps",
+        "lr_decay_steps",
         "lr_actor_start_step",
         "lr_critic_start_step",
         "lr_critic_value_head_start_step",

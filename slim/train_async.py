@@ -5,7 +5,7 @@ import ray
 
 from slim.ray.advantage_estimator import RayAdvantageEstimator
 from slim.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_groups
-from slim.train import save, train_step
+from slim.train import save, start_lr_decay, train_step
 from slim.utils.arguments import parse_args
 from slim.utils.logging_utils import configure_logger, finish_tracking, init_tracking
 from slim.utils.misc import should_run_periodic_action
@@ -21,7 +21,7 @@ def train(args):
 
     # create the rollout manager, with sglang engines inside.
     # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
+    rollout_manager = create_rollout_manager(args, pgs["rollout"])
 
     # create the actor and critic training groups
     actor_train_group, critic_train_group = create_training_groups(args, pgs, rollout_manager)
@@ -36,10 +36,14 @@ def train(args):
 
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
-    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    rollout_id = args.start_rollout_id
+    while rollout_id < args.num_rollout:
         # Sync the last generation
         if rollout_data_next_future is not None:
             rollout_data_curr_ref = ray.get(rollout_data_next_future)
+        if args.num_epoch is not None and ray.get(rollout_manager.get_epoch_id.remote()) >= args.num_epoch:
+            decay_rollouts = start_lr_decay(args, actor_train_group, critic_train_group)
+            args.num_rollout = min(args.num_rollout, rollout_id + decay_rollouts)
 
         # Start the next rollout early.
         if rollout_id + 1 < args.num_rollout:
@@ -47,7 +51,7 @@ def train(args):
 
         train_step(args, rollout_id, rollout_data_curr_ref, actor_train_group, critic_train_group, advantage_estimator)
 
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+        if should_run_periodic_action(rollout_id, args.save_interval, args.num_rollout):
             save(args, rollout_id, actor_train_group, critic_train_group, rollout_manager)
 
         if not args.critic_train_only:
@@ -57,8 +61,10 @@ def train(args):
                 rollout_data_next_future = None
             actor_train_group.update_weights()
 
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
+        if should_run_periodic_action(rollout_id, args.eval_interval, args.num_rollout):
             ray.get(rollout_manager.eval.remote(rollout_id))
+
+        rollout_id += 1
 
     ray.get(rollout_manager.dispose.remote())
     ray.kill(advantage_estimator)

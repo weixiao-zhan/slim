@@ -392,7 +392,6 @@ class RolloutManager:
         init_tracking(args, primary=False, metrics_endpoints=build_sglang_metrics_endpoints(args, self.servers))
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
-        self._dynamic_global_batch_size = None
 
         self._health_monitors = []
         for srv in self.servers.values():
@@ -475,6 +474,9 @@ class RolloutManager:
 
     def get_num_rollout_per_epoch(self):
         return len(self.data_source) // self.args.rollout_batch_size
+
+    def get_epoch_id(self):
+        return self.data_source.epoch_id
 
     def generate(self, rollout_id):
         start_time = time.time()
@@ -560,14 +562,8 @@ class RolloutManager:
             episodes = result.episodes
 
         if not self.args.disable_rollout_trim_samples and not self.args.debug_rollout_only:
-            global_batch_size = self.args.global_batch_size
-            if self.args.use_dynamic_global_batch_size:
-                logger.info(f"Collected {len(episodes)} episodes from rollout to train with dynamic global batch size")
-                self._dynamic_global_batch_size = self._compute_dynamic_global_batch_size(len(episodes))
-                global_batch_size = self._dynamic_global_batch_size
-
-            if len(episodes) % global_batch_size != 0:
-                episodes = self._trim_whole_groups(episodes, global_batch_size)
+            if len(episodes) % self.args.global_batch_size != 0:
+                episodes = self._trim_whole_groups(episodes, self.args.global_batch_size)
             logger.info(f"Final collected {len(episodes)} episodes from rollout to train")
 
         return episodes, metrics
@@ -598,33 +594,6 @@ class RolloutManager:
         logger.info(f"trim number of episodes from {len(episodes)} to {len(kept)}")
         return kept
 
-    def _compute_dynamic_global_batch_size(self, num_samples: int) -> int:
-        """Calculate dynamic global_batch_size to ensure only one training step.
-
-        Strategy: global_batch_size = num_samples rounded down to a multiple of dp_size
-        This ensures num_steps_per_rollout = num_samples // global_batch_size = 1
-        """
-        dp_size = self.train_parallel_config["dp_size"]
-        original_gbs = self.args.global_batch_size
-
-        # Round down to a multiple of dp_size to ensure only one training step
-        dynamic_gbs = (num_samples // dp_size) * dp_size
-
-        if dynamic_gbs == 0:
-            # Too few samples, use at least dp_size
-            dynamic_gbs = dp_size
-            logger.warning(f"num_samples={num_samples} < dp_size={dp_size}, using dp_size as global_batch_size")
-
-        # Calculate how many samples will be discarded
-        wasted = num_samples - dynamic_gbs
-
-        if dynamic_gbs != original_gbs or wasted > 0:
-            logger.info(
-                f"Dynamic global_batch_size: {original_gbs} -> {dynamic_gbs} (num_samples={num_samples}, dp_size={dp_size}, num_steps=1, wasted={wasted})"
-            )
-
-        return dynamic_gbs
-
     def _save_debug_rollout_data(self, data, rollout_id, evaluation: bool):
         if (path_template := self.args.save_debug_rollout_data) is not None:
             path = Path(path_template.format(rollout_id=("eval_" if evaluation else "") + str(rollout_id)))
@@ -646,8 +615,7 @@ class RolloutManager:
     def _split_trajectories_by_dp(self, episodes: list[Episode]) -> list:
         """Flatten episodes to trajectories and split them across DP ranks."""
         dp_size = self.train_parallel_config["dp_size"]
-        global_batch_size = self._dynamic_global_batch_size or self.args.global_batch_size
-        num_steps = max(len(episodes) // global_batch_size, 1)
+        num_steps = max(len(episodes) // self.args.global_batch_size, 1)
         batches = build_dp_batches(
             episodes,
             dp_size=dp_size,
