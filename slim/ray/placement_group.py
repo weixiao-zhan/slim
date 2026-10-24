@@ -198,10 +198,8 @@ def create_rollout_manager(args, pg):
     ).remote(args, pg)
 
     # calculate num_rollout from num_epoch
-    num_rollout_per_epoch = None
     if args.num_rollout is None:
-        num_rollout_per_epoch = ray.get(rollout_manager.get_num_rollout_per_epoch.remote())
-        args.num_rollout = num_rollout_per_epoch * args.num_epoch
+        args.num_rollout = ray.get(rollout_manager.get_num_rollout_per_epoch.remote()) * args.num_epoch
         assert args.num_rollout > 0
 
     if args.check_weight_update_equal:
@@ -211,4 +209,4 @@ def create_rollout_manager(args, pg):
     if args.rollout_colocate:
         ray.get(rollout_manager.offload.remote())
 
-    return rollout_manager, num_rollout_per_epoch
+    return rollout_manager

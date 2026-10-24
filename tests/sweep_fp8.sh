@@ -42,7 +42,6 @@ COMMON_ARGS="
     --eps-clip-high 1
 
     --lr 1e-6
-    --lr-decay-style constant
 "
 
 # combo -> "expect_actor|expect_critic|combo_args"

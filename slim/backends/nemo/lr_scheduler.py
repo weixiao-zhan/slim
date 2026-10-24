@@ -13,8 +13,20 @@ from torch.optim.lr_scheduler import LRScheduler
 logger = logging.getLogger(__name__)
 
 
+_DECAY_COEFFICIENTS = {
+    "linear": lambda ratio: 1.0 - ratio,
+    "cosine": lambda ratio: 0.5 * (math.cos(math.pi * ratio) + 1.0),
+    "exponential": lambda ratio: 2.0 * math.pow(0.5, ratio) - 1.0,
+    "minus_sqrt": lambda ratio: 1.0 - math.sqrt(ratio),
+}
+
+
 class NeMoLRScheduler(LRScheduler):
-    """Iteration-based learning rate scheduler for NeMo training.
+    """Warmup, constant, and decay learning-rate schedule for NeMo training.
+
+    Each parameter group warms up from ``init_lr`` to its ``max_lr`` over ``lr_warmup_steps``
+    steps from its ``start_step``. All groups keep ``max_lr`` until ``decay_start``, then decay
+    to ``min_lr`` over ``lr_decay_steps`` steps with the ``lr_decay_style`` shape.
 
     Args:
         optimizer (torch.optim.Optimizer): The optimizer to be used.
@@ -22,11 +34,9 @@ class NeMoLRScheduler(LRScheduler):
         max_lr (float): Maximum learning rate.
         min_lr (float): Minimum learning rate.
         lr_warmup_steps (int): Number of warmup steps.
-        lr_decay_steps (int): Number of decay steps.
-        lr_decay_style (str): Decay style for learning rate.
-        wsd_decay_steps (int, optional): Number of weight decay decay steps.
-        lr_wsd_decay_style (str, optional): Decay style for learning rate during weight decay decay
-            steps.
+        lr_decay_steps (int): Number of decay steps. Zero keeps ``max_lr`` after warmup.
+        lr_decay_style (str): Decay shape, one of ``_DECAY_COEFFICIENTS``.
+        decay_start (int): Step at which the decay starts. ``start_lr_decay`` can move it earlier.
         last_epoch (int, optional): The index of last epoch. Default: -1.
     """
 
@@ -39,8 +49,7 @@ class NeMoLRScheduler(LRScheduler):
         lr_warmup_steps: int,
         lr_decay_steps: int,
         lr_decay_style: str,
-        wsd_decay_steps: int | None = None,
-        lr_wsd_decay_style: str | None = None,
+        decay_start: int,
         last_epoch: int = -1,
     ) -> None:
         # Store our custom parameters
@@ -53,33 +62,23 @@ class NeMoLRScheduler(LRScheduler):
 
         self.lr_warmup_steps = lr_warmup_steps
         self.lr_decay_steps = lr_decay_steps
-        self.wsd_decay_steps = wsd_decay_steps
-        self.lr_wsd_decay_style = lr_wsd_decay_style
-        assert self.lr_decay_steps > 0
-        assert self.lr_warmup_steps < self.lr_decay_steps
-
         self.lr_decay_style = lr_decay_style
-        if self.lr_decay_style == "WSD":
-            assert self.wsd_decay_steps is not None
+        self.decay_start = decay_start
 
-        schedule_end = self.lr_decay_steps
-        warmup_end_limit = (
-            schedule_end - self.wsd_decay_steps
-            if self.lr_decay_style == "WSD"
-            else schedule_end - 1
-        )
+        self.warmup_end = 0
         for index, group in enumerate(optimizer.param_groups):
             name = group.get("name", f"param_group_{index}")
-            start_step = group.get("start_step", 0)
-            if start_step + self.lr_warmup_steps > warmup_end_limit:
-                raise ValueError(
-                    f"{name} warmup ends at step {start_step + self.lr_warmup_steps}, "
-                    f"after the allowed shared-schedule boundary {warmup_end_limit}"
-                )
+            warmup_end = group.get("start_step", 0) + self.lr_warmup_steps
+            if warmup_end > self.decay_start:
+                raise ValueError(f"{name} warmup ends at step {warmup_end}, after the decay start {self.decay_start}")
+            self.warmup_end = max(self.warmup_end, warmup_end)
 
         super().__init__(optimizer, last_epoch)
 
-        logger.info(f"> learning rate decay style: {self.lr_decay_style}")
+        logger.info(
+            f"> learning rate: warmup {self.lr_warmup_steps} steps, "
+            f"{self.lr_decay_style} decay {self.lr_decay_steps} steps from step {self.decay_start}"
+        )
 
     def _get_lr_for_group(self, param_group: dict) -> float:
         """Compute learning rate for a specific parameter group.
@@ -105,50 +104,12 @@ class NeMoLRScheduler(LRScheduler):
                 / float(self.lr_warmup_steps)
             )
 
-        if self.lr_decay_style == "constant":
+        if self.lr_decay_steps == 0 or self.last_epoch <= self.decay_start:
             return max_lr
 
-        if self.last_epoch > self.lr_decay_steps:
-            return min_lr
-
-        if self.lr_decay_style == "inverse-square-root":
-            warmup_steps = max(self.lr_warmup_steps, 1)
-            num_steps = max(component_step, 1)
-            lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
-            return max(min_lr, lr)
-
-        decay_start = start_step + self.lr_warmup_steps
-        num_steps_ = self.last_epoch - decay_start
-        decay_steps_ = self.lr_decay_steps - decay_start
-        decay_ratio = float(num_steps_) / float(decay_steps_)
-
-        delta_lr = max_lr - min_lr
-        coeff = None
-
-        if self.lr_decay_style == "linear":
-            coeff = 1.0 - decay_ratio
-        elif self.lr_decay_style == "cosine":
-            coeff = 0.5 * (math.cos(math.pi * decay_ratio) + 1.0)
-        elif self.lr_decay_style == "WSD":
-            wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
-            if self.last_epoch <= wsd_anneal_start_:
-                coeff = 1.0
-            else:
-                wsd_steps = self.last_epoch - wsd_anneal_start_
-                wsd_decay_ratio = min(1.0, float(wsd_steps) / float(self.wsd_decay_steps))
-                if self.lr_wsd_decay_style == "linear":
-                    coeff = 1.0 - wsd_decay_ratio
-                elif self.lr_wsd_decay_style == "cosine":
-                    coeff = 0.5 * (math.cos(math.pi * wsd_decay_ratio) + 1.0)
-                elif self.lr_wsd_decay_style == "exponential":
-                    coeff = (2.0 * math.pow(0.5, wsd_decay_ratio)) - 1.0
-                elif self.lr_wsd_decay_style == "minus_sqrt":
-                    coeff = 1.0 - math.sqrt(wsd_decay_ratio)
-        else:
-            raise Exception(f"{self.lr_decay_style} decay style is not supported.")
-
-        assert coeff is not None
-        return min_lr + coeff * delta_lr
+        decay_ratio = min(1.0, float(self.last_epoch - self.decay_start) / float(self.lr_decay_steps))
+        coeff = _DECAY_COEFFICIENTS[self.lr_decay_style](decay_ratio)
+        return min_lr + coeff * (max_lr - min_lr)
 
     @override
     def get_lr(self) -> list[float]:
@@ -158,6 +119,18 @@ class NeMoLRScheduler(LRScheduler):
             list[float]: A list of learning rates, one for each parameter group.
         """
         return [self._get_lr_for_group(group) for group in self.optimizer.param_groups]
+
+    def start_lr_decay(self) -> int:
+        """Start the decay at the current step and return the remaining decay steps.
+
+        The decay starts after all warmups end. The decay start never moves later, so the
+        decay start saved in the scheduler state stays the same after resume.
+        """
+        decay_start = min(self.decay_start, max(self.last_epoch, self.warmup_end))
+        if decay_start != self.decay_start:
+            self.decay_start = decay_start
+            logger.info(f"> learning rate decay starts at step {self.decay_start}")
+        return max(self.decay_start + self.lr_decay_steps - self.last_epoch, 0)
 
     def reset(self) -> None:
         """Reset the learning-rate timeline to step zero."""
@@ -181,27 +154,21 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> NeMoLRScheduler:
     Returns:
         NeMoLRScheduler: Initialized scheduler bound to ``optimizer``.
     """
-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
-    if args.lr_decay_iters is None:
-        args.lr_decay_iters = args.train_iters
-    lr_decay_steps = args.lr_decay_iters
-    wsd_decay_steps = None
-    if args.lr_wsd_decay_iters is not None:
-        wsd_decay_steps = args.lr_wsd_decay_iters
-    if args.lr_warmup_fraction is not None:
-        lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
-    else:
-        lr_warmup_steps = args.lr_warmup_iters
+    train_steps = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    if args.lr_warmup_steps + args.lr_decay_steps > train_steps:
+        raise ValueError(
+            f"lr_warmup_steps {args.lr_warmup_steps} + lr_decay_steps {args.lr_decay_steps} "
+            f"exceed the {train_steps} train steps"
+        )
     lr_scheduler = NeMoLRScheduler(
         optimizer,
         init_lr=args.lr_warmup_init,
         max_lr=args.lr,
         min_lr=args.lr_min,
-        lr_warmup_steps=lr_warmup_steps,
-        lr_decay_steps=lr_decay_steps,
+        lr_warmup_steps=args.lr_warmup_steps,
+        lr_decay_steps=args.lr_decay_steps,
         lr_decay_style=args.lr_decay_style,
-        wsd_decay_steps=wsd_decay_steps,
-        lr_wsd_decay_style=args.lr_wsd_decay_style,
+        decay_start=train_steps - args.lr_decay_steps,
     )
 
     return lr_scheduler

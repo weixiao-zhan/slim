@@ -178,8 +178,7 @@ run: | # shell
     --kl-loss-type low_var_kl \
     \
     --lr 1e-5 \
-    --lr-warmup-iters 10 \
-    --lr-decay-style constant \
+    --lr-warmup-steps 10 \
     --weight-decay 0.1 \
     --adam-beta1 0.9 \
     --adam-beta2 0.98 \

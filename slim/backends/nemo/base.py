@@ -374,6 +374,9 @@ class NeMoTrainer(RayWorker):
         self.sleep()
         clear_memory()
 
+    def start_lr_decay(self) -> int:
+        return self.lr_scheduler.start_lr_decay()
+
     def _train_core(self, rollout_id, packed_batches: list[dict], grad_accum: list[int]) -> None:
         self._run_train_loop(packed_batches, grad_accum)
         self.prof.step(rollout_id=rollout_id)

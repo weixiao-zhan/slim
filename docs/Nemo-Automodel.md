@@ -109,7 +109,7 @@ Actor log-probability precompute and critic value precompute may cache packs bef
 
 The rollout/train boundary flattens episodes into trajectories, pads the list to a multiple of `logical_dp * num_steps` with inert two-token documents, then partitions twice: across optimizer steps, then within each step across ranks. Every rank therefore holds the same document count per step, which is what the synchronized pack count in `_packed_data` requires. `--balance-data` is enabled by default and uses Karmarkar-Karp partitioning to balance token counts at both levels; `--no-balance-data` restores round-robin assignment.
 
-The optimizer step count stays denominated in episodes, so `args.train_iters` and the LR decay horizon do not move with how many generation calls a rollout made.
+The optimizer step count stays denominated in episodes, so the LR schedule length does not move with how many generation calls a rollout made.
 
 `--max-tokens-per-gpu` is the target post-CP token budget for one rank. Dynamic packing therefore targets a physical pack length of:
 
@@ -183,6 +183,14 @@ Rollout routing choices are source-token aligned with shape:
 The final token row is zero because it has no prediction target. Packing concatenates routing rows with the same token boundaries as the model input, and the selected CP sharder maps them to model-local token order. Router replay remains active through backward so activation-checkpoint recomputation sees the same expert indices. The registry is process owned and clears replay state on context exit.
 
 Routing replay is valid only for Qwen3.5 MoE.
+
+## Learning Rate Schedule
+
+The LR schedule has three phases: warmup for `--lr-warmup-steps`, constant, and decay for `--lr-decay-steps` with the `--lr-decay-style` shape.
+With `--num-rollout`, the decay ends at the last rollout.
+With `--num-epoch E`, `E * len(dataset) // rollout_batch_size` rollouts is the upper limit.
+When the data source finishes epoch E before the decay start, the decay starts at that rollout, and the training stops when the decay ends.
+The decay never starts before all warmups end.
 
 ## Checkpoints
 
@@ -263,8 +271,7 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --eps-clip 0.2 \
   --eps-clip-high 0.28 \
   --lr 1e-5 \
-  --lr-warmup-iters 0 \
-  --lr-decay-style constant \
+  --lr-warmup-steps 0 \
   --weight-decay 0.1 \
   --adam-beta1 0.9 \
   --adam-beta2 0.98 \

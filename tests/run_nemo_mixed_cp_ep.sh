@@ -58,8 +58,7 @@ run_train_wait "
     --eps-clip-high 0.28
 
     --lr 3e-6
-    --lr-warmup-iters 0
-    --lr-decay-style constant
+    --lr-warmup-steps 0
     --weight-decay 0.1
     --adam-beta1 0.9
     --adam-beta2 0.98

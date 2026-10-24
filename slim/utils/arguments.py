@@ -294,7 +294,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 "--num-rollout",
                 type=int,
                 default=None,
-                help="Number of rollout steps. If not set, we will calculate the number of rollout steps from the dataset size.",
+                help="Number of rollout steps. The LR decay ends at the last rollout.",
             )
             parser.add_argument(
                 "--num-epoch",
@@ -916,12 +916,6 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help="Disable trim samples when converting samples to train data",
             )
-            parser.add_argument(
-                "--use-dynamic-global-batch-size",
-                action="store_true",
-                default=False,
-                help="Enable dynamic global batch size, disable trim samples when converting samples to train data",
-            )
             return parser
 
 
@@ -1213,6 +1207,7 @@ def slim_validate_args(args):
     if args.num_epoch is not None:
         if args.num_rollout is not None:
             logger.info("Both num_epoch and num_rollout are set, num_epoch will be ignored.")
+            args.num_epoch = None
         else:
             assert args.rollout_global_dataset, (
                 "num_epoch is set, but rollout_global_dataset is not set, "

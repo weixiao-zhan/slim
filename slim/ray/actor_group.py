@@ -89,6 +89,10 @@ class RayTrainGroup:
         """Do one rollout training"""
         return [actor.train.remote(rollout_id, rollout_data_ref) for actor in self._actor_handlers]
 
+    def start_lr_decay(self):
+        """Start the LR decay at the current step. Each ObjectRef returns the remaining decay steps."""
+        return [actor.start_lr_decay.remote() for actor in self._actor_handlers]
+
     def compute_values(self, rollout_data_ref):
         """Compute per-token value payloads (critic only). Returns list of ObjectRefs."""
         return [actor.compute_values.remote(rollout_data_ref) for actor in self._actor_handlers]

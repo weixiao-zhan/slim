@@ -135,6 +135,8 @@ class DataSource(abc.ABC):
     def __len__(self) -> int: ...
 ```
 
+With `--num-epoch`, the train loop also reads `data_source.epoch_id`, the epoch of the last example that `get_examples` returned.
+
 ### Loss function (`--custom-loss-function-path`)
 
 ```python

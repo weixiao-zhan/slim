@@ -71,8 +71,7 @@ TRAIN_ARGS="
     --old-logprob-source rollout
 
     --lr 1e-6
-    --lr-decay-style constant
-    --lr-warmup-iters 5
+    --lr-warmup-steps 5
 
     --hf-checkpoint $FP8_MODEL_DIR
     --load $BF16_MODEL_DIR
