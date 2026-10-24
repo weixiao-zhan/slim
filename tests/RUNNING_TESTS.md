@@ -27,7 +27,7 @@ hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 uv run python tools/convert_hf_to_fp8.py \
     --model-dir models/Qwen3.5-4B \
     --save-dir models/Qwen3.5-4B-FP8 \
-    --ref-config tools/fp8_recipes/qwen35_official.json
+    --ref-config tools/quant_recipes/qwen35_128blockfp8.json
 ```
 
 ## Datasets

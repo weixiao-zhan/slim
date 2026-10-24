@@ -10,11 +10,15 @@ serves during training match what a deployed quantized checkpoint would serve.
 
 `Quantizer.maybe_from_checkpoint` reads a checkpoint's `quantization_config` and
 returns the matching quantizer, or None for an unquantized checkpoint. The only
-format is block-FP8 (`QuantizerFP8`): e4m3 weights with 128x128 blocks and a
+online format is block-FP8 (`QuantizerFP8`): e4m3 weights with 128x128 blocks and a
 per-block scale named `<weight>.weight_scale_inv`, multiplicative (dequant = q*scale),
 matching sglang's block-FP8 GEMM. Per-tensor / per-channel FP8 are intentionally
 not supported (sglang applies special load-time transforms for those that the
 online sync path can't replicate).
+
+MXFP8 (`quant_method == "mxfp8"`: e4m3 weights, 1x32 blocks, uint8 UE8M0 scales) is
+offline-only for now: the converter can write it, but sglang re-lays out MXFP8 scales
+at load (swizzle/interleave per GEMM backend), so online sync rejects it.
 
 Two scale formats:
   * fp32  (scale_fmt=None)   -- a full float32 per-block scale. The default; consumed
@@ -33,6 +37,7 @@ import torch.nn.functional as F
 
 FP8_INFO = torch.finfo(torch.float8_e4m3fn)
 FP8_MAX, FP8_MIN = FP8_INFO.max, FP8_INFO.min
+MXFP8_BLOCK_SIZE = [1, 32]
 
 
 def ceildiv(a, b):
@@ -60,6 +65,26 @@ def module_path_match(pattern, module_name):
     )
 
 
+# HF (transformers 5) fused MoE expert tensors: [E, out, in], gate_up_proj stacks gate then up on `out`.
+FUSED_EXPERT_SUFFIXES = (".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")
+
+
+def split_fused_experts(key, weight):
+    """Yield (per-expert key, 2-D weight) for a fused [E, out, in] expert tensor.
+
+    sglang loads quantization scales only for per-expert keys (`experts.<e>.<proj>.weight`),
+    so offline checkpoints store experts split; the gate/up split matches sglang's loader.
+    """
+    prefix, projection = key.rsplit(".", 1)
+    for expert_id in range(weight.shape[0]):
+        if projection == "gate_up_proj":
+            gate, up = weight[expert_id].chunk(2, dim=0)
+            yield f"{prefix}.{expert_id}.gate_proj.weight", gate.contiguous()
+            yield f"{prefix}.{expert_id}.up_proj.weight", up.contiguous()
+        else:
+            yield f"{prefix}.{expert_id}.down_proj.weight", weight[expert_id].contiguous()
+
+
 def make_keep_predicate(keep_patterns):
     """Build an `is_kept(module_name)` predicate from a `modules_to_not_convert` list."""
 
@@ -74,21 +99,25 @@ def make_keep_predicate(keep_patterns):
 
 
 def parse_quant_recipe(quantization_config):
-    """Extract the block-FP8 quantization recipe from a HF `quantization_config` dict.
+    """Extract the FP8 quantization recipe from a HF `quantization_config` dict.
 
-    Returns a dict with: block_size, keep_patterns, activation_scheme, fmt, scale_fmt.
-    Only `quant_method == "fp8"` with a `weight_block_size` is supported.
+    Returns a dict with: quant_method, block_size, keep_patterns, activation_scheme, fmt,
+    scale_fmt. Supports `quant_method == "fp8"` with a `weight_block_size`, and
+    `quant_method == "mxfp8"` (block size fixed to 1x32 by the OCP spec).
     """
     qc = quantization_config
     method = qc.get("quant_method")
-    if method != "fp8":
-        raise ValueError(f"Unsupported quant_method: {method!r} (only block-FP8 is supported)")
-
-    weight_block_size = qc.get("weight_block_size")
-    if not weight_block_size:
-        raise ValueError("Block-FP8 requires `weight_block_size` in quantization_config.")
+    if method == "mxfp8":
+        weight_block_size = MXFP8_BLOCK_SIZE
+    elif method == "fp8":
+        weight_block_size = qc.get("weight_block_size")
+        if not weight_block_size:
+            raise ValueError("Block-FP8 requires `weight_block_size` in quantization_config.")
+    else:
+        raise ValueError(f"Unsupported quant_method: {method!r} (only fp8 / mxfp8 are supported)")
 
     return {
+        "quant_method": method,
         "block_size": list(weight_block_size),
         "keep_patterns": list(qc.get("modules_to_not_convert") or []),
         "activation_scheme": qc.get("activation_scheme", "dynamic"),
@@ -151,6 +180,20 @@ def block_fp8(weight, block_size, scale_fmt=None):
     return _block_fp8_fp32(weight, block_size)
 
 
+def mxfp8(weight):
+    """Quantize a 2D weight to MXFP8. Returns (e4m3 weight, uint8 UE8M0 scale [n, k/32]).
+
+    Delegates to sglang's `mxfp8_group_quantize`, the same kernel the engine uses when it
+    quantizes a BF16 checkpoint to MXFP8 at load, so the bytes match the engine's own.
+    Requires a CUDA tensor (Triton kernel).
+    """
+    from sglang.srt.layers.quantization.fp8_utils import mxfp8_group_quantize
+
+    if weight.dim() != 2 or weight.shape[-1] % MXFP8_BLOCK_SIZE[1] != 0:
+        raise ValueError(f"MXFP8 needs a 2D weight with K % 32 == 0, got {tuple(weight.shape)}")
+    return mxfp8_group_quantize(weight.contiguous())
+
+
 def pack_ue8m0_scale_for_engine(scale, mn):
     """Pack a float32 power-of-two block scale into DeepGEMM's runtime layout
     (int32, MN-major, TMA-aligned, 4 UE8M0 bytes per int32).
@@ -195,7 +238,10 @@ class Quantizer:
         method = qc.get("quant_method")
         if method == "fp8":
             return QuantizerFP8.from_quant_config(qc)
-        return None
+        raise NotImplementedError(
+            f"Online weight sync does not support quant_method={method!r} yet; "
+            "use a block-FP8 or unquantized --hf-checkpoint for the rollout engine."
+        )
 
     def quantize(self, name, param):
         """Yield (name, tensor) pairs to push for one parameter."""
@@ -279,6 +325,6 @@ class QuantizerFP8(Quantizer):
             return ((name, param),)
         if name.endswith(".weight") and param.dim() == 2:
             return self._quantize_linear_weight(name, param)
-        if param.dim() == 3 and name.endswith((".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")):
+        if param.dim() == 3 and name.endswith(FUSED_EXPERT_SUFFIXES):
             return self._quantize_grouped_expert_weight(name, param)
         return ((name, param),)

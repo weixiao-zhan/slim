@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Quantize a BF16 HF safetensors model to block-FP8, mimicking a reference recipe.
+"""Quantize a BF16 HF safetensors model to block-FP8 or MXFP8, mimicking a reference recipe.
 
 The recipe (block size, activation_scheme, scale_fmt, and the exact
 `modules_to_not_convert` keep-list) is always read from a reference FP8 model's
@@ -9,8 +9,11 @@ The recipe (block size, activation_scheme, scale_fmt, and the exact
 target FP8 model's layer selection exactly. Explicit --block-size / --scale-fmt
 override the corresponding values derived from the reference config.
 
-Only block-FP8 is supported (e4m3, NxK blocks, per-block `*.weight_scale_inv`),
-matching slim's online rollout weight-sync. Per-tensor / per-channel FP8 are not
+Two formats, selected by the recipe's `quant_method`:
+  * fp8   -- block-FP8 (e4m3, NxK blocks, fp32 per-block `*.weight_scale_inv`),
+             matching slim's online rollout weight-sync.
+  * mxfp8 -- OCP MXFP8 (e4m3, 1x32 blocks, uint8 UE8M0 `*.weight_scale_inv`), served by
+             sglang's MXFP8 path (FlashInfer CUTLASS on SM120). Offline only for now. Per-tensor / per-channel FP8 are not
 supported. `--config-only` creates a weightless FP8 model directory for SGLang
 dummy initialization; slim's first weight sync populates the model before use.
 
@@ -45,7 +48,15 @@ import safetensors.torch
 import torch
 from tqdm import tqdm
 
-from slim.utils.quant import block_fp8, make_keep_predicate, module_name_of, parse_quant_recipe
+from slim.utils.quant import (
+    FUSED_EXPERT_SUFFIXES,
+    block_fp8,
+    make_keep_predicate,
+    module_name_of,
+    mxfp8,
+    parse_quant_recipe,
+    split_fused_experts,
+)
 
 
 def load_quant_recipe(ref_config):
@@ -61,6 +72,7 @@ def load_quant_recipe(ref_config):
 
 
 def build_quantization_config(
+    quant_method,
     block_size,
     activation_scheme,
     fmt,
@@ -70,7 +82,7 @@ def build_quantization_config(
     config = {
         "activation_scheme": activation_scheme,
         "fmt": fmt,
-        "quant_method": "fp8",
+        "quant_method": quant_method,
         "weight_block_size": block_size,
     }
     if scale_fmt is not None:
@@ -118,7 +130,13 @@ class ConversionResult:
             self.modules_to_not_convert.extend(module_names)
 
 
-def process_file(input_path, output_path, filename, block_size, scale_fmt, is_kept, result_collector):
+def quantize_weight(weight, quant_method, block_size, scale_fmt):
+    if quant_method == "mxfp8":
+        return mxfp8(weight)
+    return block_fp8(weight, block_size, scale_fmt=scale_fmt)
+
+
+def process_file(input_path, output_path, filename, quant_method, block_size, scale_fmt, is_kept, result_collector):
     if not filename.endswith(".safetensors"):
         return
 
@@ -137,8 +155,14 @@ def process_file(input_path, output_path, filename, block_size, scale_fmt, is_ke
 
         do_quant = key.endswith(".weight") and weight.dim() == 2 and not is_kept(module_name)
 
-        if do_quant:
-            qw, s = block_fp8(weight, block_size, scale_fmt=scale_fmt)
+        if weight.dim() == 3 and key.endswith(FUSED_EXPERT_SUFFIXES) and not is_kept(module_name):
+            # sglang loads scales only for per-expert keys, so split the fused 3-D experts.
+            for expert_key, expert_weight in split_fused_experts(key, weight):
+                qw, s = quantize_weight(expert_weight, quant_method, block_size, scale_fmt)
+                q_weights[expert_key] = qw
+                q_weights[expert_key.replace(".weight", ".weight_scale_inv")] = s
+        elif do_quant:
+            qw, s = quantize_weight(weight, quant_method, block_size, scale_fmt)
             q_weights[key] = qw
             q_weights[key.replace(".weight", ".weight_scale_inv")] = s
         else:
@@ -154,6 +178,7 @@ def process_file(input_path, output_path, filename, block_size, scale_fmt, is_ke
 def convert_fp8(
     input_path,
     output_path,
+    quant_method,
     block_size,
     max_workers=4,
     scale_fmt=None,
@@ -178,7 +203,15 @@ def convert_fp8(
         futures = []
         for filename in safetensors_files:
             future = executor.submit(
-                process_file, input_path, output_path, filename, block_size, scale_fmt, is_kept, result_collector
+                process_file,
+                input_path,
+                output_path,
+                filename,
+                quant_method,
+                block_size,
+                scale_fmt,
+                is_kept,
+                result_collector,
             )
             futures.append(future)
 
@@ -192,6 +225,7 @@ def convert_fp8(
     print(f"  Kept {len(result_collector.modules_to_not_convert)} source modules in source dtype; quantized the rest.")
 
     quantization_config = build_quantization_config(
+        quant_method,
         block_size,
         activation_scheme,
         fmt,
@@ -224,6 +258,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     recipe = load_quant_recipe(args.ref_config)
+    quant_method = recipe["quant_method"]
 
     # Resolve recipe parameters: explicit CLI flags override the reference config.
     block_size = args.block_size if args.block_size is not None else recipe["block_size"]
@@ -234,11 +269,13 @@ if __name__ == "__main__":
 
     if not block_size:
         raise ValueError("Block-FP8 requires --block-size (or a reference config with weight_block_size).")
+    if quant_method == "mxfp8" and (args.block_size is not None or scale_fmt is not None):
+        raise ValueError("MXFP8 fixes 1x32 blocks with UE8M0 scales; drop --block-size / --scale-fmt.")
     if scale_fmt == "ue8m0" and list(block_size) != [128, 128]:
         raise ValueError("ue8m0 scales require 128x128 blocks (DeepGEMM constraint).")
 
     print(
-        f"Recipe from {args.ref_config}: block_size={block_size} "
+        f"Recipe from {args.ref_config}: quant_method={quant_method} block_size={block_size} "
         f"scale_fmt={scale_fmt} keep={len(keep_patterns)} modules"
     )
 
@@ -254,6 +291,7 @@ if __name__ == "__main__":
             args.model_dir,
             args.save_dir,
             build_quantization_config(
+                quant_method,
                 block_size,
                 activation_scheme,
                 fmt,
@@ -265,6 +303,7 @@ if __name__ == "__main__":
         convert_fp8(
             args.model_dir,
             args.save_dir,
+            quant_method,
             block_size,
             max_workers=args.max_workers,
             scale_fmt=scale_fmt,

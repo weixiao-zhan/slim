@@ -1,0 +1,22 @@
+{
+  "_comment": "NVFP4 recipe for the Qwen3.5 family, consumed by tools/convert_hf_to_nvfp4.py (ModelOpt max calibration + HF export). W4A4: e2m1 values, 1x16 blocks with e4m3 block scales, plus fp32 per-tensor global scales (weight_scale_2 for weights, calibrated input_scale for activations). Same keep-list as qwen35_128blockfp8.json. sglang auto-detects the export as modelopt_fp4.",
+  "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "quantization_config": {
+    "quant_method": "modelopt",
+    "quant_algo": "NVFP4",
+    "group_size": 16,
+    "modules_to_not_convert": [
+      "lm_head",
+      "embed_tokens",
+      "linear_attn.conv1d",
+      "linear_attn.in_proj_a",
+      "linear_attn.in_proj_b",
+      "visual",
+      "mtp.fc",
+      "mlp.gate",
+      "mlp.shared_expert_gate"
+    ]
+  }
+}

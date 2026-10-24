@@ -1,4 +1,4 @@
-"""Stage 1 — generate rollouts for one config with the offline sglang Engine and write source-aligned
+"""Step 2: generate rollouts for one config with the offline sglang Engine and write source-aligned
 records + reward + accuracy to <out-dir> (record schema in common.py).
 
 Args:
@@ -89,19 +89,21 @@ def mm_image_data(mm_inputs):
 
 
 async def score(args, episode):
+    """Rule-based reward of the episode's single trajectory (async_rm scores in place)."""
     from slim.rollout.rm_hub import async_rm
 
-    return await async_rm(args, episode)
+    await async_rm(args, episode)
+    return episode.reward
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(C.MODELS), required=True)
-    ap.add_argument("--precision", choices=["bf16", "fp8"], required=True)
+    ap.add_argument("--precision", choices=list(C.PRECISIONS), required=True)
     ap.add_argument("--split", choices=list(C.SPLITS), required=True)
     ap.add_argument("--r3", action="store_true", help="rollout routing replay (MoE only; capture expert ids)")
     # Only the TOTAL context is capped (16k); generation length is bounded only by (16k - prompt
-    # length). Why 16k: a rollout sequence is never split across stage-2 micro-batches, so its
+    # length). Why 16k: a rollout sequence is never split across 3_kl.py micro-batches, so its
     # [T, vocab~152k] logits tensor must fit alongside the 70GB of BF16 weights in the forward;
     # T<=16k keeps that ~10-12GB on one 96GB GPU.
     ap.add_argument("--max-context-len", type=int, default=16384)
@@ -117,8 +119,10 @@ def main():
                     help="exact directory to write this run's records.jsonl/meta.json/experts into")
     args_cli = ap.parse_args()
 
-    if args_cli.r3 and args_cli.model != "35b":
-        raise SystemExit("--r3 only applies to the MoE model (35b); dense 2b has no experts to replay.")
+    if args_cli.r3 and args_cli.model not in C.MOE_MODELS:
+        raise SystemExit(f"--r3 only applies to MoE models {sorted(C.MOE_MODELS)}; dense models have no experts.")
+    if not C.is_supported(args_cli.model, args_cli.precision):
+        raise SystemExit(f"sglang can't serve {args_cli.precision} for MoE model {args_cli.model} on SM120.")
 
     mdir = C.model_dir(args_cli.model, args_cli.precision)
     parquet, rm_type = C.SPLITS[args_cli.split]
@@ -129,7 +133,7 @@ def main():
     from slim.utils.types import Episode, Trajectory
 
     GenerateState._instances = {}  # singleton reset between configs in one process
-    state = GenerateState(args)
+    state = GenerateState(args, args_cli.concurrency)
     routing_shape = state.routing_replay_shape  # (num_layers, top_k) or None
 
     # Load via HF datasets so the `images` column is decoded to PIL (Image() feature), matching
@@ -143,7 +147,7 @@ def main():
         ds = ds.select(range(min(args_cli.limit, len(ds))))
     examples = [ds[i] for i in range(len(ds))]
 
-    # Build the offline engine. FP8 forces the Triton GEMM backend (DeepGEMM is off on SM120).
+    # Build the offline engine.
     import sglang as sgl
 
     eng_kwargs = dict(
@@ -155,9 +159,10 @@ def main():
         max_running_requests=args_cli.concurrency,
         skip_server_warmup=True,
     )
-    if args_cli.precision == "fp8":
-        # DeepGEMM is disabled on SM120, so pin the Triton block-FP8 GEMM runner.
-        eng_kwargs["fp8_gemm_runner_backend"] = "triton"
+    # Per-format GEMM / MoE backend pins (common.py PRECISIONS).
+    eng_kwargs.update(C.PRECISIONS[args_cli.precision].engine_kwargs)
+    # GDN state pool sized to the concurrency (shared launch config, see common.py).
+    eng_kwargs.update(C.mamba_engine_kwargs(args_cli.concurrency))
     if routing_shape is not None:
         # Enable server-side capture of per-token routed expert ids (no Rust router here, but the
         # scheduler still needs this flag to populate meta_info["routed_experts"]).
@@ -232,13 +237,12 @@ def main():
 
             routed = None
             if routing_shape is not None:
-                b64 = meta.get("routed_experts")
-                if b64 is not None:
-                    import pybase64
+                envelope = meta.get("routed_experts")
+                if envelope is not None:
+                    from slim.utils.processing_utils import decode_tensor_envelopes
 
                     L, K = routing_shape
-                    arr = np.frombuffer(pybase64.b64decode(b64.encode("utf-8")), dtype=np.int32).copy()
-                    routed = arr.reshape(-1, L, K)  # [num_predictions, L, K]
+                    routed = decode_tensor_envelopes(envelope).reshape(-1, L, K)  # [num_predictions, L, K]
                     traj.rollout_routed_experts = routed
 
             traj.generated_text = state.tokenizer.decode(new_tokens)
@@ -248,7 +252,7 @@ def main():
             truncs.append(bool(truncated))
 
             # Persist the processor-output tensors (pixel_values, image_grid_thw, ...) for the
-            # stage-2 VLM forward; mm is None for text samples.
+            # 3_kl.py VLM forward; mm is None for text samples.
             if mm:
                 C.save_mm_inputs(out_dir, j, mm)
 

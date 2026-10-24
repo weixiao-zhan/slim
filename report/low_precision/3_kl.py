@@ -1,11 +1,11 @@
-"""Stage 2 — run slim's actor forward on stage-1 rollouts and write the K3 KL (per-token and
+"""Step 3: run slim's actor forward on 2_infer.py rollouts and write the K3 KL (per-token and
 per-sequence) of train vs rollout logprobs to <out-dir>/kl/. Run under torchrun.
 
 Args:
   --model/--precision/--split  which run to score; --r3 replays rollout routing in the forward (MoE).
-  --src-dir                    stage-1 run dir to read rollouts from.
+  --src-dir                    2_infer.py run dir to read rollouts from.
   --out-dir                    where to write kl/ outputs.
-  --offload-train              CPU-offload params (needed for BF16-35B); --limit caps #samples.
+  --limit                      caps #samples.
 
 Output: <out-dir>/kl/summary.json (token/seq K3 mean & p99), per_sample.json, and the raw
 per-token / per-sequence K3 arrays as .npy.
@@ -17,11 +17,11 @@ import sys
 # Load CUDA runtime libraries from NVIDIA wheels, matching Ray workers.
 # Re-exec before importing torch so the dynamic linker uses the updated search path.
 # execv preserves the PID for torchrun.
-if not os.environ.get("_STAGE2_NVIDIA_LD_PINNED"):
+if not os.environ.get("_KL_NVIDIA_LD_PINNED"):
     from slim.utils.env_utils import get_nvidia_ld_library_path
 
     os.environ.update(get_nvidia_ld_library_path())
-    os.environ["_STAGE2_NVIDIA_LD_PINNED"] = "1"
+    os.environ["_KL_NVIDIA_LD_PINNED"] = "1"
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 import argparse
@@ -33,7 +33,7 @@ import numpy as np
 import common as C
 
 
-def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: int, r3: bool, offload: bool):
+def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: int, r3: bool):
     """Construct a full slim args Namespace via slim's own parser, with a synthetic argv.
 
     A forward-only actor: --debug-train-only skips sglang; --get-mismatch-metrics +
@@ -56,16 +56,17 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
         "--old-logprob-source", "actor",
         "--get-mismatch-metrics",
         "--advantage-estimator", "grpo",
+        # Keep the checkpoint's BF16 storage: FSDP2 computes in BF16 either way, and the forward-only
+        # actor has no optimizer, so fp32 master weights would only double memory (BF16-35B fits).
+        "--master-weight-dtype", "auto",
     ]
     if r3:
         argv.append("--use-rollout-routing-replay")
-    if offload:
-        argv.append("--nemo-cpu-offload")
 
     from slim.utils.arguments import parse_args
 
     saved = os.sys.argv
-    os.sys.argv = ["stage2_kl.py"] + argv
+    os.sys.argv = ["3_kl.py"] + argv
     try:
         args = parse_args()
     finally:
@@ -74,7 +75,7 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
 
 
 def records_to_trajectories(d, limit=None):
-    """Rebuild finalized Slim Trajectories from source-token-aligned stage-1 records."""
+    """Rebuild finalized Slim Trajectories from source-token-aligned 2_infer.py records."""
     import torch
 
     from slim.utils.types import Trajectory
@@ -106,20 +107,19 @@ def records_to_trajectories(d, limit=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=list(C.MODELS), required=True)
-    ap.add_argument("--precision", choices=["bf16", "fp8"], required=True)
+    ap.add_argument("--precision", choices=list(C.PRECISIONS), required=True)
     ap.add_argument("--split", choices=list(C.SPLITS), required=True)
     ap.add_argument("--r3", action="store_true",
                     help="replay rollout routing in the training forward (MoE). Both replay and "
                          "no-replay runs read the SAME --src-dir (the R3-captured rollouts); only "
                          "this flag and --out-dir differ between them.")
-    # Match stage-1's 16k total context (see stage1_infer.py for why 16k: caps the single-sequence
+    # Match the 16k total context of 2_infer.py (see there for why 16k: caps the single-sequence
     # logits tensor so the BF16-35B forward fits one 96GB GPU).
     ap.add_argument("--max-context-len", type=int, default=16384)
     ap.add_argument("--max-tokens-per-gpu", type=int, default=16384)
-    ap.add_argument("--offload-train", action="store_true", help="CPU-offload params (for BF16-35B)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--src-dir", required=True,
-                    help="stage-1 run dir to read records.jsonl/experts from (the caller points this "
+                    help="2_infer.py run dir to read records.jsonl/experts from (the caller points this "
                          "at the R3-captured run so replay and no-replay KL share source rollouts)")
     ap.add_argument("--out-dir", required=True,
                     help="directory to write the kl/ outputs into (caller keys it by replay on/off so "
@@ -128,17 +128,18 @@ def main():
 
     src_dir = Path(args_cli.src_dir)
     if not (src_dir / "records.jsonl").exists():
-        raise SystemExit(f"no stage-1 records at {src_dir}; run stage1_infer.py first")
+        raise SystemExit(f"no 2_infer.py records at {src_dir}; run 2_infer.py first")
     out_run = Path(args_cli.out_dir)
 
-    # stage-2 ALWAYS loads the BF16 weights for the training forward, even when stage-1 served FP8.
-    # Two reasons: (1) this mirrors real slim RL, where --load is the BF16 model and the FP8
-    # checkpoint is used only by the rollout engine; (2) FSDP2 requires a uniform param dtype and
-    # rejects the mixed fp8/fp32 FP8 checkpoint outright. So the measured KL is exactly the gap RL
-    # actually corrects: FP8-(or BF16-)served rollout logprobs vs the BF16 training forward.
-    model_dir = C.MODELS[args_cli.model][0]  # bf16 dir
+    # 3_kl.py ALWAYS loads the BF16 weights for the training forward, even when 2_infer.py served a
+    # quantized checkpoint. Two reasons: (1) this mirrors real slim RL, where --load is the BF16
+    # model and the quantized checkpoint is used only by the rollout engine; (2) FSDP2 requires a
+    # uniform param dtype and rejects mixed-dtype quantized checkpoints outright. So the measured KL
+    # is exactly the gap RL actually corrects: quantized-(or BF16-)served rollout logprobs vs the
+    # BF16 training forward.
+    model_dir = C.model_dir(args_cli.model, "bf16")
     slim_args = build_slim_args(
-        model_dir, args_cli.max_context_len, args_cli.max_tokens_per_gpu, args_cli.r3, args_cli.offload_train,
+        model_dir, args_cli.max_context_len, args_cli.max_tokens_per_gpu, args_cli.r3,
     )
 
     # --- bootstrap the actor (1-rank distributed group set up by torchrun) ---
@@ -159,7 +160,7 @@ def main():
     actor._rank = rank
     actor.master_addr = os.environ["MASTER_ADDR"]
     actor.master_port = int(os.environ["MASTER_PORT"])
-    actor.init(slim_args, role="actor", with_ref=False)
+    actor.init(slim_args)
 
     # The forward is NOT torch.compiled: KL is identical with/without compile, and on the R3 MoE path
     # routing-replay sets a per-layer guard (`_routing_replay_layer_idx`) that makes dynamo recompile

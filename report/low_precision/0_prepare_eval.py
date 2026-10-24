@@ -1,4 +1,4 @@
-"""Build the eval parquets for the FP8/R3 study, using slim's VLM prompt schema: test_math.parquet
+"""Build the eval parquets for the low-precision study, using slim's VLM prompt schema: test_math.parquet
 (open-r1/DAPO-Math-17k) and test_vision.parquet (hiyouga/geometry3k), --n-eval examples each.
 
 Args:
@@ -11,8 +11,8 @@ from pathlib import Path
 
 from datasets import Image, Sequence, load_dataset
 
-# This file lives at report/fp8_r3/; the eval set defaults to the repo-root datasets/ dir, which is
-# parents[2] (report/fp8_r3 -> report -> slim).
+# This file lives at report/low_precision/; the eval set defaults to the repo-root datasets/ dir,
+# which is parents[2] (report/low_precision -> report -> slim).
 DEFAULT_OUT_DIR = Path(__file__).resolve().parents[2] / "datasets" / "eval"
 
 

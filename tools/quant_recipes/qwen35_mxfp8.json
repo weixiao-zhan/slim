@@ -1,0 +1,26 @@
+{
+  "_comment": "MXFP8 recipe for the Qwen3.5 family: OCP MXFP8 W8A8 (e4m3, 1x32 blocks, UE8M0 power-of-two scales stored as uint8), dynamic activations. Same keep-list as qwen35_128blockfp8.json. Served on SM120 by sglang's FlashInfer CUTLASS mm_mxfp8; dense layers only, since sglang's MXFP8 MoE is SM100-only.",
+  "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+  ],
+  "quantization_config": {
+    "quant_method": "mxfp8",
+    "activation_scheme": "dynamic",
+    "fmt": "e4m3",
+    "weight_block_size": [
+      1,
+      32
+    ],
+    "modules_to_not_convert": [
+      "lm_head",
+      "embed_tokens",
+      "linear_attn.conv1d",
+      "linear_attn.in_proj_a",
+      "linear_attn.in_proj_b",
+      "visual",
+      "mtp.fc",
+      "mlp.gate",
+      "mlp.shared_expert_gate"
+    ]
+  }
+}
