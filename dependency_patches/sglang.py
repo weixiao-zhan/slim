@@ -297,12 +297,8 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
             )
 
         meta_info["input_token_logprobs"] = state.input_token_logprobs
-        if envelopes:
-            meta_info["output_token_logprobs"] = {
-                "logprobs": encode_array_to_b64_envelope(state.output_token_logprobs_val, np.float32),
-                "token_ids": encode_array_to_b64_envelope(state.output_token_logprobs_idx, np.int32),
-            }
-        else:
+        # Envelopes are encoded once, on the finished output.
+        if not envelopes:
             meta_info["output_token_logprobs"] = state.output_token_logprobs
         meta_info["output_token_logprobs_length"] = len(state.output_token_logprobs_val)
 """,
@@ -318,16 +314,7 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
                 )
             meta_info["output_top_logprobs"] = state.output_top_logprobs
 """,
-                """            if envelopes:
-                meta_info["output_top_logprobs"] = {
-                    "logprobs": encode_array_to_b64_envelope(
-                        state.output_top_logprobs_val, np.float32, top_logprobs_num
-                    ),
-                    "token_ids": encode_array_to_b64_envelope(
-                        state.output_top_logprobs_idx, np.int32, top_logprobs_num
-                    ),
-                }
-            else:
+                """            if not envelopes:
                 if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
                     state.output_top_logprobs.extend(
                         self.detokenize_top_logprobs_tokens(
@@ -359,12 +346,25 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
             state.finished = recv_obj.finished_reasons[i] is not None
 """,
                 """                meta_info["dp_rank"] = recv_obj.dp_ranks[i]
-            if (
-                getattr(state.obj, "return_tensor_envelopes", False)
-                and state.prompt_token_ids is not None
-                and recv_obj.finished_reasons[i] is not None
-            ):
-                meta_info["prompt_token_ids"] = encode_array_to_b64_envelope(state.prompt_token_ids, np.int32)
+            # A non-streaming request returns only its finished output, so its envelopes are
+            # encoded here once instead of on every intermediate output.
+            if getattr(state.obj, "return_tensor_envelopes", False) and recv_obj.finished_reasons[i] is not None:
+                if state.prompt_token_ids is not None:
+                    meta_info["prompt_token_ids"] = encode_array_to_b64_envelope(state.prompt_token_ids, np.int32)
+                if state.obj.return_logprob and not state.obj.stream:
+                    meta_info["output_token_logprobs"] = {
+                        "logprobs": encode_array_to_b64_envelope(state.output_token_logprobs_val, np.float32),
+                        "token_ids": encode_array_to_b64_envelope(state.output_token_logprobs_idx, np.int32),
+                    }
+                    if state.obj.top_logprobs_num > 0:
+                        meta_info["output_top_logprobs"] = {
+                            "logprobs": encode_array_to_b64_envelope(
+                                state.output_top_logprobs_val, np.float32, state.obj.top_logprobs_num
+                            ),
+                            "token_ids": encode_array_to_b64_envelope(
+                                state.output_top_logprobs_idx, np.int32, state.obj.top_logprobs_num
+                            ),
+                        }
 
             state.finished = recv_obj.finished_reasons[i] is not None
 """,
