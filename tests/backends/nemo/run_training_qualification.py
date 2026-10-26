@@ -96,6 +96,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--heterogeneous-multimodal", action="store_true")
     parser.add_argument("--rollout-data", type=Path)
     parser.add_argument("--max-tokens-per-gpu", type=int, default=2048)
+    parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
     parser.add_argument(
         "--freeze-vision-tower",
         action="store_true",
@@ -154,6 +155,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr_warmup_steps=0,
         master_weight_dtype="fp32",
         mismatch_correction="none",
+        muon_momentum=0.95,
         nemo_dispatcher="torch",
         nemo_experts_backend="torch_mm",
         nemo_linear_backend="torch",
@@ -165,6 +167,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         n_samples_per_prompt=1,
         num_rollout=4,
         old_logprob_source="rollout",
+        optimizer=cli.optimizer,
         policy_surrogate="ppo_clip",
         ref_load=cli.checkpoint,
         rollout_batch_size=8,
@@ -477,6 +480,7 @@ def _build_trainer(
     trainer.processor = AutoProcessor.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("processor_loaded")
     trainer.checkpointer = checkpoint.build_checkpointer(trainer)
+    trainer._pending_checkpoint = None
     record("checkpointer_built")
     return trainer
 

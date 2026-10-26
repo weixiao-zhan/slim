@@ -5,6 +5,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "accelerate",
     "datasets>=3.2.0",
+    "dion",
     "flash-attn",
     "flash-attn-3",
     "httpx[http2]",
@@ -66,6 +67,7 @@ packages = ["slim"]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
 torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
 torchaudio = { index = "pytorch-cu130", marker = "sys_platform == 'linux'" }
+dion = { git = "https://github.com/microsoft/dion", rev = "7692479288f928a3d61d1cc58137b4dbe4f71000" }
 flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.47/flash_attn-2.8.3%2Bcu130torch2.13-cp312-cp312-linux_x86_64.whl" }
 flash-attn-3 = { url = "https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.08.17-542a34a/flash_attn_3-3.0.0%2B20260817.cu130torch2130cxx11abitrue.25110-cp310-abi3-linux_x86_64.whl" }
 # Forked gateway: the released wheel forwards the SGLang request fields upstream drops.

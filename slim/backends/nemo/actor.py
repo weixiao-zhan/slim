@@ -72,6 +72,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         self.optimizer = build_optimizer(
             self.args,
             self.device_mesh,
+            self.model,
             param_groups=[{"params": parameters, "max_lr": self.args.lr_actor}],
         )
         self.model.train()
