@@ -473,7 +473,7 @@ def _compute_server_args(
     base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
     base = _to_local_gpu_id(base)
     kwargs = {
-        "model_path": args.hf_checkpoint,
+        "model_path": args.rollout_load,
         "trust_remote_code": True,
         "random_seed": args.seed + rank,
         # memory
