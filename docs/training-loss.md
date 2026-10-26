@@ -85,7 +85,7 @@ $$A w = r \frac{\partial J}{\partial r}$$
 
 $w_x = w(r, A_t)$ is the detached weight, so the gradient is $-A_t w_x s_x$.
 `pg_loss` logs this form, so its value is not $-J$.
-A token in the clipped region of `ppo_clip` or `tis` has $\partial J / \partial r = 0$, so its weight is $0$.
+A token in the clipped region of `ppo_clip` or `mis` has $\partial J / \partial r = 0$, so its weight is $0$.
 $\text{clip}(r)$ is short for $\text{clip}(r, 1-\varepsilon, 1+\varepsilon_\text{high})$:
 
 | Surrogate | $J(r, A)$ | $w(r, A)$ |
@@ -93,7 +93,7 @@ $\text{clip}(r)$ is short for $\text{clip}(r, 1-\varepsilon, 1+\varepsilon_\text
 | `ppo_clip`, $A > 0$ | $\min(rA, \text{clip}(r) A)$ | $r \cdot \mathbf{1}[r \le 1+\varepsilon_\text{high}]$ |
 | `ppo_clip`, $A < 0$ | $\min(rA, \text{clip}(r) A)$ | $r \cdot \mathbf{1}[r \ge 1-\varepsilon]$, and also $r \le \varepsilon_c$ under dual-clip |
 | `is` | $rA$ | $r$ |
-| `tis` | $\text{clip}(r) A$ | $r \cdot \mathbf{1}[1-\varepsilon \le r \le 1+\varepsilon_\text{high}]$ |
+| `mis` | $\text{clip}(r) A$ | $r \cdot \mathbf{1}[1-\varepsilon \le r \le 1+\varepsilon_\text{high}]$ |
 | `cis` | — | $\text{clip}(r)$ |
 
 Under `gspo`, $r$ is the sequence-level ratio, and the sequence mean of $\log\pi_\theta$ replaces $\log p_x$.
@@ -107,14 +107,14 @@ Optional dual-clip via `--eps-clip-c` (must be > 1.0): when $A < 0$, $J$ becomes
 
 Plain importance sampling.
 
-### `tis`
+### `mis`
 
-Truncated importance sampling: the ratio is clamped before multiplication.
+Masked importance sampling: a token whose ratio is outside $[1-\varepsilon, 1+\varepsilon_\text{high}]$ carries no gradient, whatever the sign of $A$.
 
 ### `cis`
 
 Clipped importance sampling.
-When $r$ is in the clipped region of `ppo_clip` and `tis`, the weight is exactly zero, so these surrogates silently drop the token.
+When $r$ is in the clipped region of `ppo_clip` and `mis`, the weight is exactly zero, so these surrogates silently drop the token.
 `cis` clamps the weight itself, so the token keeps a gradient through $\log\pi_\theta$ with a bounded weight.
 It has no standard $J$, and $w$ defines it.
 
@@ -150,7 +150,7 @@ $$L_t = \underbrace{-A_t \text{sg}[w_x] \log p_x}_{\text{surrogate}} + A_t \sum_
 |---|---|---|---|
 | `cis --eps-clip 0 --eps-clip-high 0` | $1$ | SC | Score centering alone, for a mismatch that does not grow within a rollout, such as a quantized sampler. |
 | e.g. `cis --eps-clip 1 --eps-clip-high 1` | $\min(r, 2)$ | TIS + SC | Score centering with truncated IS, for staleness from several optimizer steps per rollout. |
-| e.g. `tis --eps-clip 0.5 --eps-clip-high 4` | $r \cdot \mathbf{1}[0.5 \le r \le 5]$ | MIS + SC | Score centering with masked IS, for staleness or weight noise. |
+| e.g. `mis --eps-clip 0.5 --eps-clip-high 4` | $r \cdot \mathbf{1}[0.5 \le r \le 5]$ | MIS + SC | Score centering with masked IS, for staleness or weight noise. |
 | `ppo_clip` | $r$ where the token is not clipped for the sign of $A_t$, else $0$ | Not tested | |
 
 `is` has $w(r) = r$, which makes the correction exactly zero, so `--use-score-centering` rejects it.
@@ -236,7 +236,7 @@ Choosing `trajectory` weights a 50-call attempt 50 times as heavily as a single-
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--advantage-estimator` | `grpo` | `grpo`, `gspo`, `ppo_gae` |
-| `--policy-surrogate` | `ppo_clip` | `ppo_clip`, `is`, `tis`, `cis` |
+| `--policy-surrogate` | `ppo_clip` | `ppo_clip`, `is`, `mis`, `cis` |
 | `--use-score-centering` | `None` | Top-$K$ size; enables score centering |
 | `--eps-clip` | `0.2` | PPO clip lower bound |
 | `--eps-clip-high` | `None` | PPO clip upper bound (defaults to `--eps-clip`) |

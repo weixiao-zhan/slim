@@ -47,12 +47,12 @@ COMMON_ARGS="
 declare -A COMBOS
 COMBOS[ppo_clip]="1|0|--policy-surrogate ppo_clip --eps-clip 0.2 --eps-clip-high 0.28"
 COMBOS[is]="1|0|--policy-surrogate is"
-COMBOS[tis]="1|0|--policy-surrogate tis --eps-clip 0.2 --eps-clip-high 0.28"
+COMBOS[mis]="1|0|--policy-surrogate mis --eps-clip 0.2 --eps-clip-high 0.28"
 COMBOS[cis]="1|0|--policy-surrogate cis --eps-clip 0.2 --eps-clip-high 0.28"
 COMBOS[sc]="1|0|--policy-surrogate cis --eps-clip 0 --eps-clip-high 0 --use-score-centering 31"
 COMBOS[cis_sc]="1|0|--policy-surrogate cis --eps-clip 0.2 --eps-clip-high 0.28 --use-score-centering 31"
 
-ORDER=(ppo_clip is tis cis sc cis_sc)
+ORDER=(ppo_clip is mis cis sc cis_sc)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi
 
 start_ray

@@ -75,7 +75,7 @@ def _ratio_loss(ratio, advantages, policy_surrogate, eps_clip, eps_clip_high, ep
     clamped = ratio.clamp(1 - eps_clip, 1 + eps_clip_high)
     if policy_surrogate == "is":
         return -ratio * advantages
-    if policy_surrogate == "tis":
+    if policy_surrogate == "mis":
         return -clamped * advantages
     if policy_surrogate == "cis":
         return -clamped.detach() * advantages * ratio.log()
@@ -88,7 +88,7 @@ def _ratio_loss(ratio, advantages, policy_surrogate, eps_clip, eps_clip_high, ep
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("policy_surrogate", "eps_clip_c"),
-    [("ppo_clip", None), ("ppo_clip", 1.5), ("is", None), ("tis", None), ("cis", None)],
+    [("ppo_clip", None), ("ppo_clip", 1.5), ("is", None), ("mis", None), ("cis", None)],
 )
 def test_surrogate_weights_reproduce_the_ratio_gradient(policy_surrogate, eps_clip_c):
     ratios = torch.tensor([0.5, 0.9, 1.1, 1.4, 2.0])
