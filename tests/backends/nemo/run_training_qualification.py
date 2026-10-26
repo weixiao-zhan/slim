@@ -168,6 +168,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         policy_surrogate="ppo_clip",
         ref_load=cli.checkpoint,
         rollout_batch_size=8,
+        rollout_load=cli.checkpoint,
         rollout_temperature=1.0,
         save=checkpoint_dir,
         start_rollout_id=0,

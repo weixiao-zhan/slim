@@ -123,6 +123,14 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-load",
+                type=str,
+                default=None,
+                help=(
+                    "HuggingFace checkpoint that the SGLang engines load instead of --hf-checkpoint, e.g. a quantized (FP8) copy."
+                ),
+            )
+            parser.add_argument(
                 "--rollout-function-path",
                 type=str,
                 default="slim.rollout.sglang_rollout.generate_rollout",
@@ -481,8 +489,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
                     "Path to load training weights from. Accepts either: "
                     "(1) a slim DCP checkpoint directory (with latest_checkpointed_iteration.txt) for resuming training, or "
                     "(2) a HuggingFace checkpoint directory (with config.json) for BF16 weight initialization. "
-                    "When an HF checkpoint is given, it overrides --hf-checkpoint for training init only, "
-                    "allowing --hf-checkpoint to point to a quantized model (e.g. FP8) for the rollout engine."
+                    "When an HF checkpoint is given, it overrides --hf-checkpoint for training init only."
                 ),
             )
             parser.add_argument(
@@ -1091,6 +1098,7 @@ def slim_validate_args(args):
         if args.old_logprob_source != "rollout":
             raise ValueError("--use-score-centering requires --old-logprob-source rollout.")
 
+    args.rollout_load = args.rollout_load or args.hf_checkpoint
     args.routing_replay_shape = load_routing_replay_shape(args.hf_checkpoint) if args.use_rollout_routing_replay else None
 
     if args.get_mismatch_metrics and args.old_logprob_source == "rollout":

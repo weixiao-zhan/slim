@@ -9,7 +9,7 @@ The deployment has two layers:
 
 | Flag | Purpose |
 |------|---------|
-| `--hf-checkpoint` | HuggingFace checkpoint for SGLang engines and tokenizer. Can point to a quantized (e.g. FP8) checkpoint. |
+| `--hf-checkpoint` | HuggingFace checkpoint for SGLang engines and tokenizer. `--rollout-load` can point the engines to a quantized (e.g. FP8) checkpoint. |
 | `--rollout-num-gpus` | Total GPUs for rollout. |
 | `--rollout-num-gpus-per-replica` | GPUs per engine (= TP size). The number of engines is `rollout_num_gpus / rollout_num_gpus_per_replica`. |
 
@@ -167,8 +167,8 @@ This reduces rollout GPU memory and increases throughput at the cost of a small 
 ### Dual-checkpoint setup
 
 ```bash
---hf-checkpoint /models/Qwen3-8B-FP8    # FP8 for rollout
---load /models/Qwen3-8B                  # BF16 for training init
+--hf-checkpoint /models/Qwen3-8B         # BF16 for training init
+--rollout-load /models/Qwen3-8B-FP8      # FP8 for rollout
 ```
 
 After each training step, updated BF16 weights are re-quantized online to match the FP8 format and pushed to engines.

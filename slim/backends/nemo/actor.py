@@ -102,12 +102,12 @@ class ActorNeMoTrainer(NeMoTrainer):
 
     def _post_model_setup(self) -> None:
         self.ref_model = self._create_ref_model(self.args.ref_load) if self.args.kl_loss_coef != 0 else None
-        quantizer = Quantizer.maybe_from_checkpoint(self.args.hf_checkpoint)
+        quantizer = Quantizer.maybe_from_checkpoint(self.args.rollout_load)
         if quantizer is not None:
             logger.info(
                 "Rollout weight quantization enabled with %s from %s",
                 type(quantizer).__name__,
-                self.args.hf_checkpoint,
+                self.args.rollout_load,
             )
         updater_type = UpdateWeightFromTensor if self.args.rollout_colocate else UpdateWeightFromDistributed
         self.weight_updater = updater_type(self.args, self.model, quantizer)

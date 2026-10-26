@@ -47,7 +47,7 @@ COMMON_ARGS="
 # combo -> "expect_actor|expect_critic|combo_args"
 declare -A COMBOS
 COMBOS[bf16]="1|0|--hf-checkpoint $BF16_MODEL_DIR"
-COMBOS[fp8_fp32]="1|0|--hf-checkpoint $FP8_MODEL_DIR --load $BF16_MODEL_DIR"
+COMBOS[fp8_fp32]="1|0|--hf-checkpoint $BF16_MODEL_DIR --rollout-load $FP8_MODEL_DIR"
 
 ORDER=(bf16 fp8_fp32)
 if [[ $# -gt 0 ]]; then ORDER=("$@"); fi

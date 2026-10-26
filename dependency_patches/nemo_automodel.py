@@ -69,6 +69,38 @@ def patch_automodel_fsdp2_single_gpu(fsdp2: Path) -> None:
     )
 
 
+def patch_automodel_original_hf_config(addons: Path) -> None:
+    """Export the original checkpoint's config.json, not the training-time config (fp32 dtype, use_cache off)."""
+    generated_assets = """            else:
+                _save_generated_hf_assets(
+                    model_part,
+                    original_model_path,
+                    hf_metadata_dir,
+                    tokenizer,
+                    v4_compatible=kwargs.get("v4_compatible", False),
+                )
+"""
+    original_config = """            else:
+                _save_generated_hf_assets(
+                    model_part,
+                    original_model_path,
+                    hf_metadata_dir,
+                    tokenizer,
+                    v4_compatible=kwargs.get("v4_compatible", False),
+                )
+                if _config_exists(original_model_path, "config.json"):
+                    shutil.copyfile(
+                        os.path.join(original_model_path, "config.json"),
+                        os.path.join(hf_metadata_dir, "config.json"),
+                    )
+"""
+    patch_file(
+        addons,
+        [(generated_assets, original_config)],
+        log_reason="AutoModel original HF config.json in consolidated exports",
+    )
+
+
 def patch_automodel_blockdiag_cp1(batch: Path, exchange: Path) -> None:
     """Use AutoModel's block-diagonal batch context at every CP degree."""
     cp1_noop = """    from contextlib import nullcontext
@@ -332,9 +364,11 @@ def apply() -> None:
     blockdiag_dir = automodel_dir / "components" / "distributed" / "blockdiag_cp"
     batch, exchange = blockdiag_dir / "batch.py", blockdiag_dir / "exchange.py"
     fsdp2 = automodel_dir / "components" / "distributed" / "fsdp2.py"
+    addons = automodel_dir / "components" / "checkpoint" / "addons.py"
     patch_automodel_optional_transformer_engine(parallelizer)
     patch_automodel_fsdp2_single_gpu(fsdp2)
+    patch_automodel_original_hf_config(addons)
     patch_automodel_blockdiag_cp1(batch, exchange)
     model_files = patch_qwen3_5_packed_cp(automodel_dir)
-    for path in (parallelizer, fsdp2, batch, exchange, *model_files):
+    for path in (parallelizer, fsdp2, addons, batch, exchange, *model_files):
         py_compile.compile(str(path), doraise=True)
