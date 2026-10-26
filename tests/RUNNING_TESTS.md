@@ -104,7 +104,7 @@ GRPO and GSPO tests use the built-in nonzero reward standard-deviation group fil
 | `sweep_placement.sh` | rollout and critic colocation placement | 4 PPO combos | Qwen3.5-4B |
 | `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-4B |
 | `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-4B |
-| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `tis`, `cis` | Qwen3.5-4B |
+| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `mis`, `cis` | Qwen3.5-4B |
 | `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32` | Qwen3.5-4B (+ FP8 forge) |
 | `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 10 combos (see below) | Qwen3.5-4B |
 
