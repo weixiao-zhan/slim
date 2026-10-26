@@ -261,7 +261,8 @@ def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
     )
     _save_consolidated_processor(trainer, checkpoint_dir, is_final=force_sync)
     if not trainer.args.no_save_optim:
-        _initialize_missing_adamw_state(trainer.optimizer)
+        if trainer.args.optimizer == "adamw":
+            _initialize_missing_adamw_state(trainer.optimizer)
         trainer.checkpointer.save_optimizer(
             trainer.optimizer,
             trainer.checkpoint_model,

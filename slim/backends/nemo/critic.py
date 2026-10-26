@@ -81,6 +81,7 @@ class CriticNeMoTrainer(NeMoTrainer):
         self.optimizer = build_optimizer(
             self.args,
             self.device_mesh,
+            self.model,
             param_groups=groups,
         )
         self.model.train()

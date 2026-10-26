@@ -27,7 +27,9 @@ class NeMoArgs:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1e-8
-    # Storage dtype of the trained models' weights. AdamW updates them in place with no master
+    optimizer: Literal["adamw", "muon"] = "adamw"
+    muon_momentum: float = 0.95
+    # Storage dtype of the trained models' weights. The optimizer updates them in place with no master
     # copy; FSDP2 computes in bf16 either way, and `auto` keeps the checkpoint's dtype.
     master_weight_dtype: Literal["fp32", "auto"] = "fp32"
 
@@ -140,9 +142,7 @@ def validate_args(args) -> None:
         if value < 0:
             raise ValueError(f"{name} must be non-negative, got {value}")
     if world_size and world_size % cp:
-        raise ValueError(
-            f"world size {world_size} must be divisible by context_parallel_size ({cp})"
-        )
+        raise ValueError(f"world size {world_size} must be divisible by context_parallel_size ({cp})")
     if world_size and world_size % ep:
         raise ValueError(f"world size {world_size} must be divisible by expert_model_parallel_size ({ep})")
     if args.checkpoint_save_consolidated not in ("false", "final", "every"):
