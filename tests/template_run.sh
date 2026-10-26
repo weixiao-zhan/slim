@@ -73,8 +73,8 @@ TRAIN_ARGS="
     --lr 1e-6
     --lr-warmup-steps 5
 
-    --hf-checkpoint $FP8_MODEL_DIR
-    --load $BF16_MODEL_DIR
+    --hf-checkpoint $BF16_MODEL_DIR
+    --rollout-load $FP8_MODEL_DIR
     --save $SAVE_DIR
     --save-interval 20
 "

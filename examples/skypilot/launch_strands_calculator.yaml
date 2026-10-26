@@ -184,7 +184,7 @@ run: | # shell
     --policy-surrogate cis \
     --lr 1e-6 \
     \
-    --hf-checkpoint ${MODEL_DIR}-FP8 \
-    --load ${MODEL_DIR} \
+    --hf-checkpoint ${MODEL_DIR} \
+    --rollout-load ${MODEL_DIR}-FP8 \
     \
     ${WANDB_ARGS[@]}

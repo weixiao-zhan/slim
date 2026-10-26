@@ -50,7 +50,7 @@ class ModelConfig:
 
     Attributes:
         name: Unique name for this model (e.g. "actor", "reward").
-        model_path: HF checkpoint path.  Falls back to ``args.hf_checkpoint``.
+        model_path: HF checkpoint path.  Falls back to ``args.rollout_load``.
         num_gpus_per_replica: Default GPUs per engine for all groups in this
                              model.  Individual groups can override.
         server_groups: Server group configurations for this model.
@@ -58,7 +58,7 @@ class ModelConfig:
                         training.  Set to ``False`` for frozen models
                         (reference, reward, etc.).  When ``None`` (default),
                         automatically inferred in ``resolve()``: ``True`` if
-                        model_path matches ``args.hf_checkpoint``, ``False``
+                        model_path matches ``args.rollout_load``, ``False``
                         otherwise.
     """
 
@@ -71,7 +71,7 @@ class ModelConfig:
     def resolve(self, args) -> None:
         """Resolve per-group defaults from model-level then args-level values."""
         default_gpus_per_replica = self.num_gpus_per_replica or args.rollout_num_gpus_per_replica
-        default_model_path = self.model_path or args.hf_checkpoint
+        default_model_path = self.model_path or args.rollout_load
         for g in self.server_groups:
             if g.num_gpus_per_replica is None:
                 g.num_gpus_per_replica = default_gpus_per_replica
@@ -92,10 +92,10 @@ class ModelConfig:
 
         # Auto-infer update_weights when not explicitly set.
         if self.update_weights is None:
-            if effective_model_path != args.hf_checkpoint:
+            if effective_model_path != args.rollout_load:
                 logger.warning(
                     f"Model '{self.name}' uses model_path='{effective_model_path}' which differs "
-                    f"from hf_checkpoint='{args.hf_checkpoint}'. Defaulting update_weights to False. "
+                    f"from rollout_load='{args.rollout_load}'. Defaulting update_weights to False. "
                     f"Set update_weights explicitly in the config to suppress this warning."
                 )
                 self.update_weights = False
