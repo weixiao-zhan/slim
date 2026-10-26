@@ -605,7 +605,7 @@ def get_slim_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--policy-surrogate",
                 type=str,
-                choices=["ppo_clip", "is", "tis", "cis"],
+                choices=["ppo_clip", "is", "mis", "cis"],
                 default="ppo_clip",
                 help="Policy-gradient surrogate objective.",
             )

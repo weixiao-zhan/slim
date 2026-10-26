@@ -168,7 +168,7 @@ def test_full_vocabulary_score_centering_steps_toward_the_sampled_token_from_the
     [
         ("cis", 0.0, -1.3),
         ("cis", 0.2, -1.3),
-        ("tis", 0.2, -1.3),
+        ("mis", 0.2, -1.3),
         ("ppo_clip", 0.2, -1.3),
         ("ppo_clip", 0.2, 0.9),
     ],
@@ -200,7 +200,7 @@ def test_top_k_score_centering_is_exact_when_the_sampler_tail_matches_the_traine
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("policy_surrogate", "eps_clip"),
-    [("cis", 0.0), ("cis", 0.2), ("tis", 0.2), ("ppo_clip", 0.2)],
+    [("cis", 0.0), ("cis", 0.2), ("mis", 0.2), ("ppo_clip", 0.2)],
 )
 def test_score_centering_vanishes_on_policy(policy_surrogate, eps_clip):
     torch.manual_seed(37)
@@ -242,7 +242,7 @@ def test_score_centering_vanishes_under_unclipped_importance_weights(policy_surr
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("policy_surrogate", "eps_clip_c"),
-    [("cis", None), ("tis", None), ("ppo_clip", None), ("ppo_clip", 3.0)],
+    [("cis", None), ("mis", None), ("ppo_clip", None), ("ppo_clip", 3.0)],
 )
 @pytest.mark.parametrize("advantage", [1.0, -1.0])
 def test_score_centering_stays_finite_when_the_sampler_reports_an_underflowed_probability(

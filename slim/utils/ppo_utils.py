@@ -102,7 +102,7 @@ def compute_ppo_clip_surrogate_weight(
 
 
 @torch.compile(dynamic=True)
-def compute_tis_surrogate_weight(
+def compute_mis_surrogate_weight(
     ratio: torch.Tensor,
     eps_clip: float,
     eps_clip_high: float,
@@ -136,7 +136,7 @@ def compute_surrogate_weight(
     r"""Detached weight $w(r, A)$ of each token's score, and whether the token is clipped.
 
     Every surrogate has the gradient $-A w \nabla \log p$, so the policy loss is
-    $-A \operatorname{sg}[w] \log p$. `ppo_clip` and `tis` differentiate the ratio,
+    $-A \operatorname{sg}[w] \log p$. `ppo_clip` and `mis` differentiate the ratio,
     and $\nabla r = r \nabla \log p$ makes their weight $r$ where the ratio is not
     clipped and $0$ where it is. `ratio` and `advantages` broadcast, so the same call
     weighs the sampled token `[T]` and the sampler top-K `[T, K]`.
@@ -146,8 +146,8 @@ def compute_surrogate_weight(
         return compute_ppo_clip_surrogate_weight(ratio, advantages, eps_clip, eps_clip_high, eps_clip_c)
     if policy_surrogate == "is":
         return ratio, torch.zeros_like(ratio)
-    if policy_surrogate == "tis":
-        return compute_tis_surrogate_weight(ratio, eps_clip, eps_clip_high)
+    if policy_surrogate == "mis":
+        return compute_mis_surrogate_weight(ratio, eps_clip, eps_clip_high)
     return compute_cis_surrogate_weight(ratio, eps_clip, eps_clip_high)
 
 
