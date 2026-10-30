@@ -2,7 +2,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Block-FP8 rollout with CIS, score centering and fp32 master weights, on the
+# Block-FP8 rollout with MIS, token-level loss normalization, score centering and fp32 master weights, on the
 # Strands agent, with colocated rollout.
 #
 # Ray workers inherit the environment of the shell that starts Ray, so export these first;
@@ -22,18 +22,18 @@ BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
 FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
 # Built by examples/strands_calculator/prepare_dataset.py.
 DATASET_DIR="$REPO_DIR/datasets/strands_calculator"
-SAVE_DIR="$REPO_DIR/outputs/strands-4b-fp8-cis-sc-fp32"
+SAVE_DIR="$REPO_DIR/outputs/strands-4b-fp8-mis-tok-sc-fp32"
 CONCURRENCY=64
 
 TRAIN_ARGS="
-    --num-rollout 40
+    --num-rollout 100
     --rollout-batch-size 8
     --n-samples-per-prompt 16
     --num-steps-per-rollout 1
     --max-context-len $(K 32)
     --rollout-temperature 1
     --rollout-shuffle
-    $(group_advantage_filter_args 16)
+    $(group_advantage_filter_args 24)
 
     --prompt-data $DATASET_DIR/train.parquet
     --rm-type math
@@ -63,21 +63,23 @@ TRAIN_ARGS="
 
     --advantage-estimator grpo
     --disable-group-advantage-std-normalization
-    --policy-surrogate cis
+    --policy-surrogate mis
     --eps-clip 0.2
     --eps-clip-high 0.28
     --use-score-centering 127
-    --loss-normalization-unit episode
+    --loss-normalization-unit token
     --old-logprob-source rollout
 
+    --optimizer muon
     --lr 1e-6
     --lr-warmup-steps 5
 
     --hf-checkpoint $BF16_MODEL_DIR
     --rollout-load $FP8_MODEL_DIR
+    --load $SAVE_DIR
     --save $SAVE_DIR
     --save-interval 20
 "
 
 start_ray
-run_train "$TRAIN_ARGS $(wandb_args "strands-4b-fp8-cis-sc-fp32")"
+run_train "$TRAIN_ARGS $(wandb_args "strands-4b-fp8-mis-tok-sc-fp32")"
