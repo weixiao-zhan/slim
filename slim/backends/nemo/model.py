@@ -87,8 +87,9 @@ def build_optimizer(args, device_mesh, model: nn.Module, *, param_groups: list[d
     """Build the optimizer over ``param_groups``.
 
     With ``--optimizer muon``, each group splits into a Muon subgroup for the matrices of
-    ``model`` and an AdamW subgroup for the other parameters. Both subgroups keep the
-    group's scheduler keys.
+    ``model`` and an AdamW subgroup for the other parameters, one per parameter dtype
+    because Dion runs one fused update per subgroup. All subgroups keep the group's
+    scheduler keys.
     """
     if args.optimizer == "adamw":
         config = AdamWConfig(
@@ -104,10 +105,12 @@ def build_optimizer(args, device_mesh, model: nn.Module, *, param_groups: list[d
     muon_ids = _muon_parameter_ids(model, dion_mesh.get_group())
     groups = []
     for group in param_groups:
-        for algorithm, select in (("muon", True), ("adamw", False)):
-            parameters = [parameter for parameter in group["params"] if (id(parameter) in muon_ids) == select]
-            if parameters:
-                groups.append({**group, "params": parameters, "algorithm": algorithm})
+        subgroups = {}
+        for parameter in group["params"]:
+            algorithm = "muon" if id(parameter) in muon_ids else "adamw"
+            subgroups.setdefault((algorithm, parameter.dtype), []).append(parameter)
+        for (algorithm, _), parameters in subgroups.items():
+            groups.append({**group, "params": parameters, "algorithm": algorithm})
     return Muon(
         groups,
         distributed_mesh=dion_mesh,
