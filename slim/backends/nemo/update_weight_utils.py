@@ -105,6 +105,7 @@ class UpdateWeight(abc.ABC):
         if rank == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            ray.get([engine.begin_weight_update.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 
         bucket = []
@@ -134,6 +135,7 @@ class UpdateWeight(abc.ABC):
         torch.cuda.ipc_collect()
 
         if rank == 0:
+            ray.get([engine.end_weight_update.remote() for engine in self.rollout_engines])
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 

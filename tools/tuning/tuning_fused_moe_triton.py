@@ -8,13 +8,12 @@ import json
 import time
 from contextlib import nullcontext
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, TypedDict
+from typing import Any, TypedDict
 
 import ray
 import torch
 import triton
 from ray.experimental.tqdm_ray import tqdm
-
 from sglang.srt.layers.moe.fused_moe_triton import override_config
 from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_moe
@@ -25,10 +24,7 @@ from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_config impor
     get_moe_configs,
 )
 from sglang.srt.layers.moe.topk import TopKConfig, select_experts
-from sglang.srt.server_args import (
-    ServerArgs,
-    set_global_server_args_for_scheduler,
-)
+from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 from sglang.srt.utils import get_device, is_hip, is_xpu
 from sglang.srt.utils.hf_transformers_utils import get_config
 
@@ -57,7 +53,7 @@ def get_model_config(
     ep_size: int = 1,
     disable_shared_experts_fusion: bool = False,
     topk_ids_dir: str = None,
-) -> Dict:
+) -> dict:
     config = get_config(model_name, trust_remote_code=True)
     architecture = config.architectures[0]
     block_shape = None
@@ -191,8 +187,8 @@ def get_model_config(
     }
 
 
-def get_rocm_configs_compute_bound() -> List[Dict[str, int]]:
-    configs: List[BenchmarkConfig] = []
+def get_rocm_configs_compute_bound() -> list[dict[str, int]]:
+    configs: list[BenchmarkConfig] = []
     waves_per_eu_range = 0
     for num_stages in [2]:
         for block_m in [32, 64, 128, 256]:
@@ -214,8 +210,8 @@ def get_rocm_configs_compute_bound() -> List[Dict[str, int]]:
     return configs
 
 
-def get_configs_compute_bound() -> List[Dict[str, int]]:
-    configs: List[BenchmarkConfig] = []
+def get_configs_compute_bound() -> list[dict[str, int]]:
+    configs: list[BenchmarkConfig] = []
     if is_hip():
         configs = get_rocm_configs_compute_bound()
     else:
@@ -254,7 +250,7 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
 
 
 def save_configs(
-    configs: Dict[int, BenchmarkConfig],
+    configs: dict[int, BenchmarkConfig],
     filename: str,
 ) -> None:
     print(f"Writing best config to {filename}...")
@@ -274,7 +270,7 @@ def get_config_filename(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     per_channel_quant: bool,
-    block_shape: List[int],
+    block_shape: list[int],
 ) -> str:
     dtype_str = get_config_dtype_str(
         dtype,
@@ -301,7 +297,7 @@ def get_config_filename(
     return filename
 
 
-def get_default_batch_sizes() -> List[int]:
+def get_default_batch_sizes() -> list[int]:
     return [
         1,
         2,
@@ -341,7 +337,7 @@ def benchmark_config(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     per_channel_quant: bool,
-    block_shape: List[int] = None,
+    block_shape: list[int] = None,
     num_iters: int = 100,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -519,7 +515,7 @@ def benchmark_config(
         end_events[i].record()
     torch.cuda.synchronize()
 
-    latencies: List[float] = []
+    latencies: list[float] = []
     for i in range(num_iters):
         latencies.append(start_events[i].elapsed_time(end_events[i]))
     avg = sum(latencies) / (num_iters * 10) * 1000  # us
@@ -552,8 +548,8 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         per_channel_quant: bool,
-        block_shape: List[int],
-    ) -> Tuple[Dict[str, int], float]:
+        block_shape: list[int],
+    ) -> tuple[dict[str, int], float]:
         torch.cuda.manual_seed_all(0)
         dtype_str = get_config_dtype_str(
             dtype,
@@ -620,9 +616,9 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         per_channel_quant: bool,
-        block_shape: List[int],
-        search_space: List[Dict[str, int]],
-    ) -> Dict[str, int]:
+        block_shape: list[int],
+        search_space: list[dict[str, int]],
+    ) -> dict[str, int]:
         best_config = None
         best_time = float("inf")
         with (
@@ -695,7 +691,7 @@ def main(args: argparse.Namespace):
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed, server_args) for _ in range(num_gpus)]
 
-    def _distribute(method: str, inputs: List[Any]) -> List[Any]:
+    def _distribute(method: str, inputs: list[Any]) -> list[Any]:
         outputs = []
         worker_idx = 0
         for input_args in inputs:
@@ -709,7 +705,7 @@ def main(args: argparse.Namespace):
     if args.tune:
         search_space = get_configs_compute_bound()
         if block_shape is not None:
-            block_n, block_k = block_shape[0], block_shape[1]
+            block_k = block_shape[1]
             # Block-wise FP8 clamps BLOCK_SIZE_K up to block_k at runtime (one weight scale per
             # block_k-wide K tile), so only BLOCK_SIZE_K >= block_k configs run as tuned.
             search_space = [
@@ -758,7 +754,7 @@ def main(args: argparse.Namespace):
             ],
         )
         best_configs = {
-            M: sort_config(config) for M, config in zip(batch_sizes, configs)
+            M: sort_config(config) for M, config in zip(batch_sizes, configs, strict=True)
         }
         save_configs(
             best_configs,
@@ -788,7 +784,7 @@ def main(args: argparse.Namespace):
             ],
         )
 
-        for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
+        for batch_size, (config, kernel_time) in zip(batch_sizes, outputs, strict=True):
             print(f"Batch size: {batch_size}, config: {config}")
             print(f"Kernel time: {kernel_time:.2f} us")
 

@@ -18,16 +18,19 @@ from nemo_automodel.components.distributed.cp_vision_frame_shard import (
     set_cp_vision_group,
 )
 from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
-from nemo_automodel.components.distributed.parallelizer import (
-    PARALLELIZATION_STRATEGIES,
-    Qwen3_5ParallelizationStrategy,
-    register_parallel_strategy,
-)
 from nemo_automodel.components.models.common import BackendConfig
+from nemo_automodel.components.models.qwen3_5.parallelization import PARALLELIZER as QWEN3_5_PARALLELIZER
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
+from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeForConditionalGeneration
 
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
 CP_VISION_SHARDING = CpVisionFrameShardingConfig(enabled=True)
+
+# Qwen3.5 has fp32 weights (GatedDeltaNet A_log and dt_bias). The Qwen3.5 parallelizer gives them their
+# own fp32 FSDP group. At EP=1, dense and MoE models both take the FSDP2 path, which uses the class
+# `parallelizer`; AutoModel sets it only on the dense classes, so set it on the MoE class here.
+# At EP>1, the MoE parallelizer groups the same weights through `_keep_in_fp32_modules_strict`.
+Qwen3_5MoeForConditionalGeneration.parallelizer = QWEN3_5_PARALLELIZER
 
 
 def _is_moe(config) -> bool:
@@ -68,12 +71,6 @@ def build_backend_config(args):
     )
 
 
-def register_qwen3_5_moe_parallel_strategy() -> None:
-    model_name = "Qwen3_5MoeForConditionalGeneration"
-    if model_name not in PARALLELIZATION_STRATEGIES:
-        register_parallel_strategy(name=model_name)(Qwen3_5ParallelizationStrategy)
-
-
 def build_model(
     config,
     args,
@@ -85,7 +82,6 @@ def build_model(
     if routing_replay and not _is_moe(config):
         raise ValueError("rollout routing replay requires Qwen3.5 MoE")
 
-    register_qwen3_5_moe_parallel_strategy()
     kwargs = {
         # AdamW keeps no master copy, so the stored weights are the master weights.
         "torch_dtype": torch.float32 if args.master_weight_dtype == "fp32" else "auto",
