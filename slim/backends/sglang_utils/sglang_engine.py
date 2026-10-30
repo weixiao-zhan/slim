@@ -305,7 +305,7 @@ class SGLangEngine(RayWorker):
     def get_weight_version(self):
         if self.node_rank != 0:
             return
-        url = f"http://{self.server_host}:{self.server_port}/get_weight_version"
+        url = f"http://{self.server_host}:{self.server_port}/model_info"
         response = requests.get(url)
         response.raise_for_status()
         return response.json()["weight_version"]
@@ -389,24 +389,13 @@ class SGLangEngine(RayWorker):
         response.raise_for_status()
         return response
 
-    def post_process_weights(
-        self,
-        restore_weights_before_load: bool = False,
-        post_process_quantization: bool = False,
-    ):
-        """
-        Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
-        Note: The model should be on GPUs rather than CPU for this functionality to work properly.
-        If you encounter issues, ensure your model is loaded on GPU devices rather than CPU.
-        """
+    def begin_weight_update(self):
+        """Open the weight-update session that update_weights_from_tensor/distributed load into."""
+        return self._make_request("begin_weight_update")
 
-        return self._make_request(
-            "post_process_weights",
-            {
-                "restore_weights_before_load": restore_weights_before_load,
-                "post_process_quantization": post_process_quantization,
-            },
-        )
+    def end_weight_update(self):
+        """Close the weight-update session and finalize in-place-quantized weights."""
+        return self._make_request("end_weight_update")
 
     def start_profile(
         self,

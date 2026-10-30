@@ -77,6 +77,29 @@ def patch_sglang_base_processor(base_processor: Path) -> bool:
     )
 
 
+def patch_sglang_processor_output_contract(api_types: Path) -> bool:
+    """Admit processor-output media items in the ``/generate`` JSON schema.
+
+    The schema decodes every dict media item as a ``MediaRef``, which rejects the
+    processor-output dict that carries locally computed processor tensors.
+    """
+    media_ref_arm = """    if isinstance(value, dict):
+        return decode_MediaRef(value)
+    raise _invalid_type(value, expected="one of the MediaItem shapes")
+"""
+    processor_output_arm = """    if isinstance(value, dict):
+        if value.get("format") == "processor_output":
+            return value
+        return decode_MediaRef(value)
+    raise _invalid_type(value, expected="one of the MediaItem shapes")
+"""
+    return patch_file(
+        api_types,
+        [(media_ref_arm, processor_output_arm)],
+        log_reason="SGLang /generate schema admits processor-output media items",
+    )
+
+
 def patch_sglang_return_processor_outputs(sglang_dir: Path) -> tuple[Path, ...]:
     """Add opt-in multimodal processor outputs to SGLang's per-request meta_info.
 
@@ -304,26 +327,11 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
 """,
             ),
             (
-                """            if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
-                state.output_top_logprobs.extend(
-                    self.detokenize_top_logprobs_tokens(
-                        state.output_top_logprobs_val[len(state.output_top_logprobs) :],
-                        state.output_top_logprobs_idx[len(state.output_top_logprobs) :],
-                        return_text_in_logprobs,
-                    )
-                )
-            meta_info["output_top_logprobs"] = state.output_top_logprobs
-""",
-                """            if not envelopes:
+                """            if not use_flat_output:
                 if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
-                    state.output_top_logprobs.extend(
-                        self.detokenize_top_logprobs_tokens(
-                            state.output_top_logprobs_val[len(state.output_top_logprobs) :],
-                            state.output_top_logprobs_idx[len(state.output_top_logprobs) :],
-                            return_text_in_logprobs,
-                        )
-                    )
-                meta_info["output_top_logprobs"] = state.output_top_logprobs
+""",
+                """            if not use_flat_output and not envelopes:
+                if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
 """,
             ),
             (
@@ -401,13 +409,11 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
         [
             (
                 """            return_text_in_logprobs=True,
-            modalities=processed_messages.modalities,
-""",
+            return_flat_raw_output_top_logprobs=""",
                 """            # Only the streaming choices print token text; the rest reads meta_info.
             return_text_in_logprobs=request.stream,
             return_tensor_envelopes=True,
-            modalities=processed_messages.modalities,
-""",
+            return_flat_raw_output_top_logprobs=""",
             ),
             (
                 """            choice_logprobs = None
@@ -495,8 +501,10 @@ def apply() -> None:
     patch_sglang_base_processor(base_processor)
     qwen_vl = sglang_dir / "srt" / "multimodal" / "processors" / "qwen_vl.py"
     patch_sglang_qwen_vl_image_token(qwen_vl)
+    api_types = sglang_dir / "api" / "v1" / "api_types.py"
+    patch_sglang_processor_output_contract(api_types)
     openai_files = patch_sglang_return_processor_outputs(sglang_dir)
     envelope_files = patch_sglang_meta_info_tensor_envelopes(sglang_dir)
     install_triton_configs(sglang_dir)
-    for path in (base_processor, qwen_vl, *openai_files, *envelope_files):
+    for path in (base_processor, qwen_vl, api_types, *openai_files, *envelope_files):
         py_compile.compile(str(path), doraise=True)

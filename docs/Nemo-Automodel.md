@@ -18,7 +18,7 @@ SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processi
 
 ## Patches
 
-AutoModel 0.6.0 provides Qwen3.5 token sharding, block-diagonal attention, CP-aware Gated DeltaNet, and CP vision frame sharding.
+AutoModel 0.7.0 provides Qwen3.5 token sharding, block-diagonal attention, CP-aware Gated DeltaNet, and CP vision frame sharding.
 `dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, native contiguous primary sharding for dense and MoE, and the original `config.json` in consolidated exports.
 Dense blocks use AutoModel's Qwen3.5 MoE full-attention class for packed dispatch; CP1 uses the same packed path as higher CP degrees.
 `models/qwen3_5.py` selects the packed runtime, binds CP meshes, and synchronizes heterogeneous vision branches across the FSDP group.
