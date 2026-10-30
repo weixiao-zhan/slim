@@ -103,7 +103,7 @@ async def custom_rm(args, episodes: list[Episode], **kwargs) -> None
 
 A reward function can set one scalar per episode on `episode.reward`, which is auto broadcast to every trajectory, or set `trajectory.reward` on each of `episode.trajectories`, and returns nothing; setting both levels is an error.
 The reward function runs in the same `RolloutWorker` as the generate function, on the same event loop, so heavy scoring goes through `asyncio.to_thread` or a process pool as well.
-The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `ifbench`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
+The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
 
 ### Group filter (`--rollout-group-filter-path`)
 

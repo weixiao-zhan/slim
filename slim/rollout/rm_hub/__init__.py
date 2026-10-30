@@ -35,10 +35,6 @@ async def _rule_based_reward(args, episode: Episode, **kwargs) -> int | float:
         return f1_score(response, label)[0]
     elif rm_type == "gpqa":
         return compute_gpqa_reward(response, label, metadata=metadata)
-    elif rm_type == "ifbench":
-        from .ifbench import compute_ifbench_reward
-
-        return compute_ifbench_reward(response, label, metadata=metadata)
     elif rm_type == "random":
         return random.randint(0, 1)
     elif rm_type:

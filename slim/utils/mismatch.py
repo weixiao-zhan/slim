@@ -13,7 +13,7 @@ def compute_mismatch_metrics(
 ) -> tuple[None, list[torch.Tensor], dict[str, list[torch.Tensor]]]:
     metrics: dict[str, list[torch.Tensor]] = {}
 
-    for train_lp, rollout_lp, lm in zip(train_log_probs, rollout_log_probs, loss_masks, strict=False):
+    for train_lp, rollout_lp in zip(train_log_probs, rollout_log_probs, strict=False):
         log_ratio = train_lp - rollout_lp
         kl_k3 = torch.exp(log_ratio) - log_ratio - 1
         metrics.setdefault("kl_k3", []).append(kl_k3)

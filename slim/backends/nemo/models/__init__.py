@@ -10,6 +10,8 @@ from transformers import AutoConfig
 from . import qwen3_5
 from .qwen3_5 import build_packed_position_ids, validate_config
 
+__all__ = ["build_model", "build_packed_position_ids", "validate_config"]
+
 
 def build_model(
     args,

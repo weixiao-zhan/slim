@@ -10,13 +10,9 @@ import torch.nn as nn
 from nemo_automodel.components.distributed.blockdiag_cp import make_cp_blockdiag_batch_and_ctx
 
 from slim.backends.nemo.base import NeMoTrainer
-from slim.backends.nemo.models.qwen3_5 import (
-    _global_media_presence,
-    build_packed_position_ids,
-)
+from slim.backends.nemo.models.qwen3_5 import _global_media_presence, build_packed_position_ids
 from slim.utils.trajectory_batch import TrajectoryBatch
 from slim.utils.types import Trajectory
-
 
 NUM_GPUS = 0
 
@@ -193,6 +189,7 @@ def _native_primary_model(model_kind, cp_mesh):
     model.cp_mesh = cp_mesh
     model.model = DecoderInput()
     model.lm_head = nn.Identity()
+    model.mtp = None
     model.vision_scale = nn.Parameter(torch.tensor(0.5))
     model.embed_calls = []
 
