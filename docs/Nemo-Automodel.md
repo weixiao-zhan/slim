@@ -10,6 +10,7 @@ First-party support covers:
 |---|---|
 | Dense Qwen3.5 | FSDP2 and context parallelism |
 | Qwen3.5 MoE | FSDP2, context parallelism, and expert parallelism |
+| Qwen4, language model only | FSDP2, context parallelism, and expert parallelism greater than one |
 
 Tensor parallelism, pipeline parallelism, and sequence parallelism are not supported by this backend.
 Training updates either all model parameters or LoRA adapters on a frozen base, as [PEFT](#peft) describes.
@@ -19,7 +20,7 @@ SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processi
 ## Patches
 
 AutoModel 0.7.0 provides Qwen3.5 token sharding, block-diagonal attention, CP-aware Gated DeltaNet, and CP vision frame sharding.
-`dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, native contiguous primary sharding for dense and MoE, and the original `config.json` in consolidated exports.
+`dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, FLA's varlen short convolution for packed Gated DeltaNet outside CP, native contiguous primary sharding for dense and MoE, the original `config.json` in consolidated exports, and dynamic-shape compilation of Qwen4's sparse FlexAttention, so that packs of every length reuse one kernel.
 Dense blocks use AutoModel's Qwen3.5 MoE full-attention class for packed dispatch; CP1 uses the same packed path as higher CP degrees.
 `models/qwen3_5.py` selects the packed runtime, binds CP meshes, and synchronizes heterogeneous vision branches across the FSDP group.
 `packed_cp_forward.py` owns the RL batch fields, token sharding, and forward context.
@@ -27,7 +28,7 @@ The corresponding upstream tracker is [NVIDIA-NeMo/Automodel#2985](https://githu
 
 ## Model Construction
 
-Backend-level model, forward, packing, LoRA, and trainer modules are model-independent. Model-family validation, construction, position IDs, and computation-graph patches are registered under `slim.backends.nemo.models`; the Qwen3.5 implementation lives in `models/qwen3_5.py`. The shared `models.build_model` sets the storage dtypes and the LoRA adapters for every model family, and `peft.py` holds the LoRA support over AutoModel's PEFT modules.
+Backend-level model, forward, packing, LoRA, and trainer modules are model-independent. `slim.backends.nemo.models.model_family(config)` selects a model-family module by the Hugging Face `model_type`. A family module validates the topology, builds the model, builds the unsharded model inputs of a pack, builds the CP sharder of those inputs and the RL token fields, and names the module types whose parameters the rollout engines keep from their own checkpoint. The Qwen3.5 family lives in `models/qwen3_5.py` and the Qwen4 family lives in `models/qwen4.py`. The shared `models.build_model` sets the storage dtypes and the LoRA adapters for every model family, and `peft.py` holds the LoRA support over AutoModel's PEFT modules.
 
 Policy and reference models are created with:
 
@@ -35,11 +36,11 @@ Policy and reference models are created with:
 NeMoAutoModelForImageTextToText.from_pretrained(...)
 ```
 
-`BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults are `torch`, `torch_fp32`, `torch_mm`, and `torch`. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, while prefetch scheduling follows AutoModel's FSDP2 defaults. `--master-weight-dtype` sets the storage dtype of the trained policy and critic. The optimizer updates the stored parameters in place and keeps no master copy, so the default `fp32` makes them the master weights while FSDP2 still computes in BF16; `auto` keeps the checkpoint's dtype. The frozen reference model has no optimizer and keeps the checkpoint's dtype. FSDP2 shards at every world size, including one GPU, so its precision policy always applies; `dependency_patches/nemo_automodel.py` removes AutoModel's single-GPU skip. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units that compute in fp32. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer runs over the resulting distributed parameters.
+Qwen3.5's `BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Its packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults are `torch`, `torch_fp32`, `torch_mm`, and `torch`. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, while prefetch scheduling follows AutoModel's FSDP2 defaults. `--master-weight-dtype` sets the storage dtype of the trained policy and critic. The optimizer updates the stored parameters in place and keeps no master copy, so the default `fp32` makes them the master weights while FSDP2 still computes in BF16; `auto` keeps the checkpoint's dtype. The frozen reference model has no optimizer and keeps the checkpoint's dtype. FSDP2 shards at every world size, including one GPU, so its precision policy always applies; `dependency_patches/nemo_automodel.py` removes AutoModel's single-GPU skip. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units that compute in fp32. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer runs over the resulting distributed parameters.
 
-`--optimizer` selects `muon` (default) or `adamw`. `adamw` is AutoModel's `AdamWConfig` with `--weight-decay`, `--adam-beta1`, `--adam-beta2`, and `--adam-eps`. `muon` is Dion's FSDP2 `Muon` with Moonshot's Moonlight recipe: Nesterov momentum `--muon-momentum` (default 0.95), five quintic Newton-Schulz steps with coefficients $(3.4445, -4.7750, 2.0315)$, update scale $0.2\sqrt{\max(m, n)}$ so that the update RMS matches AdamW, and decoupled weight decay `--weight-decay`. The Muon update applies to the 2D matrices and the 3D grouped expert weights. Embeddings, the output embedding, biases, 1D parameters, convolution weights, and the critic value head use Dion's AdamW with the AdamW flags. When experts are FSDP-sharded over `ep_shard > 1` (EP smaller than the FSDP size), their matrix shards are outside Dion's FSDP mesh, so they use AdamW and the backend logs this. Each Slim parameter group splits into a Muon subgroup and an AdamW subgroup with the same `max_lr` and `start_step`. Optimizer state from one optimizer does not load into the other; use `--no-load-optim` to switch.
+`--optimizer` selects `muon` (default) or `adamw`. `adamw` is AutoModel's `AdamWConfig` with `--weight-decay`, `--adam-beta1`, `--adam-beta2`, and `--adam-eps`. `muon` is Dion's FSDP2 `Muon` with Moonshot's Moonlight recipe: Nesterov momentum `--muon-momentum` (default 0.95), five quintic Newton-Schulz steps with coefficients $(3.4445, -4.7750, 2.0315)$, update scale $0.2\sqrt{\max(m, n)}$ so that the update RMS matches AdamW, and decoupled weight decay `--weight-decay`. The Muon update applies to the 2D matrices and the 3D grouped expert weights. Embeddings, the output embedding, biases, 1D parameters, convolution weights, and the critic value head use Dion's AdamW with the AdamW flags. When experts are FSDP-sharded over `ep_shard > 1` (EP smaller than the FSDP size), their matrix shards are outside Dion's FSDP mesh, so they use AdamW and the backend logs this. Each Slim parameter group splits into a Muon subgroup and an AdamW subgroup with the same `max_lr` and `start_step`. Every grouped expert tensor gets its own Muon subgroup: Dion stacks the same-shape parameters of a subgroup into one Newton-Schulz batch, and stacking the expert tensors of all MoE layers needs tens of GiB of temporaries. Optimizer state from one optimizer does not load into the other; use `--no-load-optim` to switch.
 
-AutoModel applies the parameter freeze configuration before sharding and optimizer construction. Vision, audio, and language model parameters are trainable by default. The CLI flags `--freeze-vision-tower`, `--freeze-audio-tower`, and `--freeze-language-model` explicitly select frozen components.
+AutoModel applies the parameter freeze configuration before sharding and optimizer construction. Vision and language model parameters are trainable by default. The CLI flags `--freeze-vision-tower` and `--freeze-language-model` explicitly select frozen components. `--freeze-ngram` freezes the PLE n-gram table of Qwen4.
 
 Training constructs the policy without MTP layers. SGLang retains the checkpoint's draft weights through its draft-weight backup while policy updates stream the trained backbone.
 
@@ -75,7 +76,7 @@ Relevant arguments are:
 --activation-checkpointing
 ```
 
-The backend does not expose TP, PP, or sequence-parallel arguments. It rejects dense Qwen3.5 with EP greater than one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
+The backend does not expose TP, PP, or sequence-parallel arguments. It rejects dense Qwen3.5 with EP greater than one, Qwen4 with EP of one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
 
 ## Unified Batch Interface
 
@@ -87,9 +88,10 @@ Dense and MoE training use the same Slim batch, forward, token-sharding, gather,
 |---|---|---|
 | `input_ids` | `[1, S]` | Concatenated document tokens |
 | `labels` | `[1, S]` | Next-token labels with `-100` at document ends |
-| `_packed_seq_ids` | `[1, S]` | One-based document IDs |
+| `position_ids` | `[1, S]`; `[3, 1, S]` for Qwen3.5 mRoPE | Document-local positions |
+| `_packed_seq_ids` | `[1, S]` | One-based document IDs (Qwen3.5) |
 | RL token fields | `[1, S, ...]` | Source-token-aligned training values |
-| `cu_seqlens` | `[N + 1]` | Document boundaries before CP |
+| `cu_seqlens` | `[N + 1]` | Document boundaries before CP, a model input of Qwen4 |
 
 For document tokens \(x_0, x_1, \ldots, x_{n-1}\):
 
@@ -103,7 +105,7 @@ $$
 
 No label or prediction crosses a document boundary.
 
-`prepare_forward` constructs one contiguous block-diagonal `ContextParallelSharder`. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
+`prepare_forward` constructs the `ContextParallelSharder` of the model family. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
 
 Before role-local packing, the Ray `AdvantageEstimator` writes source-token-aligned training targets to each `Trajectory`. GRPO and GSPO produce `advantages`. PPO GAE consumes source-token-aligned critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
 
@@ -127,12 +129,15 @@ Every physical microbatch uses the indexed packed layout, including a pack conta
 
 | Configuration | Physical pack | AutoModel layout |
 |---|---|---|
-| CP1, dense or MoE | One or more documents | Full token order, even-length padding, block-diagonal per-document attention |
-| CP greater than one, dense or MoE | One or more documents | Contiguous block-diagonal CP |
+| Qwen3.5 CP1, dense or MoE | One or more documents | Full token order, even-length padding, block-diagonal per-document attention |
+| Qwen3.5 CP greater than one, dense or MoE | One or more documents | Contiguous block-diagonal CP |
+| Qwen4 CP1 | One or more documents | Full token order without padding; the model reads `cu_seqlens` |
+| Qwen4 CP greater than one | One or more documents | AutoModel's model-owned contiguous CP, padded to a multiple of \(4C\) |
 
-Full attention exchanges K/V through AutoModel's block-diagonal CP runtime. Gated DeltaNet consumes the same global document boundaries and resets convolution and recurrent state at each boundary.
+For Qwen3.5, full attention exchanges K/V through AutoModel's block-diagonal CP runtime. Gated DeltaNet consumes the same global document boundaries and resets convolution and recurrent state at each boundary.
 AutoModel's dense and MoE forwards embed and splice the full sequence, then select the contiguous primary-token shard.
 CP1 uses the same packed path with padding to a multiple of two; it is distinct from execution outside the packed context.
+For Qwen4, AutoModel's model-owned sharder slices the token inputs into contiguous rank-local shards before the forward, and the CP context carries the global token IDs and document boundaries that QSA, Gated DeltaNet, and PLE read.
 Slim's embedding and vision integration aligns image and video branches across FSDP ranks while retaining gradients through the trainable vision tower.
 
 Text positions restart at zero for every document. Mixed-modality packs call the Qwen3.5 mRoPE builder once per document with that document's image and video grids, then concatenate the resulting position axes before CP sharding.
@@ -142,7 +147,7 @@ Text positions restart at zero for every document. Mixed-modality packs call the
 The training loop follows AutoModel recipe ordering:
 
 1. Count the global document weight sum and valid tokens over logical DP ranks.
-2. Resolve and apply the common packed CP sharder.
+2. Resolve and apply the model family's packed CP sharder.
 3. Enter the CP context and NeMo gradient synchronization context.
 4. Run the model with filtered forward arguments.
 5. Compute CP-local target log probabilities, entropy, policy loss, or value loss.
@@ -150,7 +155,7 @@ The training loop follows AutoModel recipe ordering:
 7. Multiply the local scalar by the DP and CP gradient-reduction group size before backward.
 8. Use NeMo gradient scaling, clipping, EP gradient normalization, and optimizer stepping.
 
-Qwen3.5 policy construction sets `router_aux_loss_coef` to zero. The RL loss graph therefore contains only the configured policy, entropy, and reference-KL terms.
+Every model family builds the policy with `router_aux_loss_coef` set to zero. The RL loss graph therefore contains only the configured policy, entropy, and reference-KL terms.
 
 For policy token-sum reduction:
 
@@ -184,7 +189,81 @@ Rollout routing choices are source-token aligned with shape:
 
 The final token row is zero because it has no prediction target. Packing concatenates routing rows with the same token boundaries as the model input, and the selected CP sharder maps them to model-local token order. Router replay remains active through backward so activation-checkpoint recomputation sees the same expert indices. The registry is process owned and clears replay state on context exit.
 
-Routing replay is valid only for Qwen3.5 MoE.
+Routing replay is valid for Qwen3.5 MoE and Qwen4.
+
+## Qwen4
+
+Slim builds the Qwen4 policy with `language_model_only`, so it has no vision tower and no MTP layer. Only a speculative-decoding draft in SGLang loads the checkpoint's MTP weights.
+The rollout engines also serve the language model only, through `--sglang-json-model-override-args {"language_model_only":true}`, so they hold no vision tower, which the policy neither trains nor sends.
+Packs with images or videos are an error.
+The family requires `--freeze-vision-tower` and `--freeze-ngram`, and rejects `--freeze-language-model`.
+
+| Component | Training |
+|---|---|
+| MoE experts, router, shared expert | Trained; EP greater than one is required |
+| Gated DeltaNet and full-attention projections | Trained |
+| Hyper-connections | Trained, as ordinary FSDP2 parameters of each decoder block |
+| PLE projections, norms, and short convolution | Trained |
+| PLE n-gram table, \(320{,}001{,}536 \times 160\) rows by width | Frozen by `--freeze-ngram` and stored in BF16; owner-sharded over the training world, excluded from FSDP2, the optimizer, and the weight sync |
+| QSA indexer | Frozen by AutoModel; its top-k is recomputed in every forward and replayed only within activation-checkpoint recomputation |
+
+The n-gram table holds 51.2B parameters, which is 102.4 GB in BF16. Each of \(W\) training ranks holds \(1/W\) of its rows, and lookups use two all-to-all exchanges over the training world. The checkpoint stores the table as 128 row shards, so \(W\) must divide 128.
+The table stays in BF16 at every `--master-weight-dtype`, which keeps the checkpoint's values, and the PLE layer casts the rows to the BF16 block activations.
+SGLang keeps its copy of the table in pinned host memory with `--sglang-ple-offload-embedding`, outside the GPU weights that a colocated engine releases, so the engines keep the table that they loaded.
+
+QSA uses AutoModel's FlexAttention sparse GQA. Query positions before 2,051 select every complete compressed block, which is dense causal attention; later positions select the 512 top-scoring compressed blocks of four tokens and the tokens of the current incomplete block. Under CP, each rank all-gathers the main K/V with their gradients, the indexer all-gathers the raw index keys and their RoPE values without gradients and compresses every document itself, the Gated DeltaNet passes its state across ranks, and the PLE short convolution reads a nine-token left halo.
+
+On sixteen GPUs, each rank holds 7.86B of the 125.7B trained parameters: 7.55B of expert weights and 0.31B of other weights.
+The two-node run uses fp32 master weights and Muon with EP16, so `ep_shard` is one and the Muon update covers the experts.
+The trained state is then about 88 GiB per GPU: fp32 weights, fp32 gradients, and one fp32 momentum per matrix, with two AdamW moments only for the small non-matrix parameters.
+The BF16 table adds 6.0 GiB per GPU.
+With EP8, the experts are FSDP-sharded over `ep_shard` two and use AdamW, which takes about 117 GiB per GPU before activations.
+`--master-weight-dtype auto` stores BF16 weights, and an update smaller than half a BF16 ulp of its weight is lost, which at a learning rate of \(10^{-6}\) is nearly every matrix entry.
+
+The two-node GRPO run needs the checkpoint at the same path on both nodes:
+
+```bash
+MASTER_ADDR=<head IP> WORKER_HOST=<worker ssh host> \
+QWEN4_MODEL_DIR=/path/to/Qwen4 \
+bash tests/e2e/run_nemo_qwen4.sh
+```
+
+On two p5en.48xlarge nodes, the run completes three rollouts, three optimizer steps, and four weight synchronizations:
+
+| Measurement | Result |
+|---|---|
+| Rollout | 436 to 643 seconds; mean rewards 0.469, 0.625, and 0.594; 59 to 72 percent of the responses reach the 16K context |
+| Actor step | 372 seconds for the first step, which compiles the kernels, then 68 and 52 seconds |
+| Weight synchronization | 24.5 to 26.5 seconds for 251.5 GB of BF16 weights |
+| Train/rollout mismatch | `pg_kl_k3` of \(5.2 \times 10^{-4}\), \(4.7 \times 10^{-4}\), and \(4.7 \times 10^{-4}\) |
+| Gradient norm | 0.344, 0.155, and 0.137 |
+| GPU memory | 140 to 142 GB of 143.7 GB in use per GPU at the training peak, including the caching allocator's reserve |
+
+The packed CP harness qualifies Qwen4 with a first document that crosses the sparse QSA boundary and the CP shard boundary.
+It runs forward and backward without an optimizer step, so on one node it stores BF16 weights with `--master-weight-dtype auto`.
+With `--routing-replay`, the CP1 baseline records its expert selection and the CP2 candidate replays it, as RL training replays the rollout's selection.
+Without replay, BF16 differences between layouts flip some of the top-10 expert choices, so the comparison measures those flips instead of CP: CP2 differs from CP1 by up to 6.6 nats at single tokens of this document, and on natural text a CP1 run with EP4 already differs from EP8 by up to 1.9 nats.
+
+```bash
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
+  --checkpoint /path/to/Qwen4 \
+  --context-parallel-size 1 \
+  --expert-parallel-size 8 \
+  --master-weight-dtype auto \
+  --first-document-length 4096 \
+  --routing-replay \
+  --output /tmp/qwen4-cp1-ep8.pt
+
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
+  --checkpoint /path/to/Qwen4 \
+  --context-parallel-size 2 \
+  --expert-parallel-size 8 \
+  --master-weight-dtype auto \
+  --first-document-length 4096 \
+  --routing-replay \
+  --output /tmp/qwen4-cp2-ep8.pt \
+  --baseline-output /tmp/qwen4-cp1-ep8.pt
+```
 
 ## Learning Rate Schedule
 
@@ -222,6 +301,9 @@ Asynchronous save uses AutoModel staging and upload futures. Slim publishes `lat
 ## SGLang Weight Synchronization
 
 Every policy state tensor is converted through the model's `convert_single_tensor_to_hf` adapter before transport. This conversion handles Qwen3.5 native names, Gated DeltaNet fp32 holders, and grouped expert layouts.
+Parameters of the family's `ROLLOUT_STATIC_MODULES` are not sent: the engines keep the values they loaded from `--rollout-load`. These parameters must be outside the GPU memory that a colocated engine releases.
+`--check-weight-update-equal` is an error for such a family, because SGLang's weight checker resets every engine tensor and the sync does not restore these.
+For Qwen4 this is the frozen n-gram table, which SGLang holds in pinned host memory, so the rollout checkpoint must hold the same table as the policy checkpoint.
 
 The configured rollout quantizer runs after conversion. Colocated engines receive flattened CUDA IPC buckets. Separate engines receive tensors through the temporary NCCL update group.
 
@@ -247,6 +329,7 @@ actor_peft_config:
 Without `target_modules`, `exclude_modules`, and `match_all_linear`, AutoModel adapts the modules that match `*_proj`.
 On Qwen3.5, `*_proj` covers the attention and MLP projections and the Gated DeltaNet `out_proj`, but not the Gated DeltaNet inputs `in_proj_qkv`, `in_proj_z`, `in_proj_b`, and `in_proj_a`; add `*in_proj_*` to adapt them.
 On Qwen3.5 MoE, `*.experts` adds LoRA to the grouped expert weights of every MoE layer, and `moe_rank_scaling` divides their rank by the number of activated experts.
+On Qwen4, `*_proj` also matches `index_qk_proj` of the frozen QSA indexer, whose integer top-k passes no gradient, so these adapters stay at zero.
 For an adapted weight $W$ with LoRA factors $A$ and $B$ of rank $r$ (`dim`), the effective weight is $W + s B A$ with $s = \alpha / r$.
 `match_all_linear` adapts every `nn.Linear`, `lm_head` included, and takes no `exclude_modules`; `exclude_modules: ["*lm_head"]` alone adapts every other `nn.Linear`.
 Neither form adapts the grouped experts or the MoE router, which are not `nn.Linear`, so expert LoRA needs `target_modules` with `*.experts`.
@@ -409,7 +492,7 @@ uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qua
   --baseline-output /tmp/qwen35-cp1-ep8.pt
 ```
 
-The harness verifies finite outputs and gradients, exact packed-document isolation, block-diagonal attention execution, target log-probability parity, mean-loss parity, aggregate gradient parity, and first-sequence-layer parity. Baseline and candidate artifacts must use the same expert-parallel size.
+The harness verifies finite outputs and gradients, exact packed-document isolation, block-diagonal attention execution (Qwen3.5), target log-probability parity, mean-loss parity, aggregate gradient parity, and first-sequence-layer parity. Baseline and candidate artifacts must use the same expert-parallel size.
 
 `tests/e2e/sweep_e2e.sh` trains its replay combos on a fixed fixture in which DP rank 1 holds the vision episodes and every other DP rank holds pure text. The vision tower is trainable in the full-parameter combos and frozen as part of the PEFT base in the LoRA combos. Every physical rank enters the synchronized vision path: text-only ranks use a dummy visual input to preserve FSDP collective ordering, and the dummy result contributes a zero-valued autograd dependency when the vision tower is trainable.
 
@@ -425,3 +508,5 @@ The eight-GPU qualification results for the pinned revision are:
 | Qwen3.5 MoE actor step | CP2 and EP8 | All 40 routing layers replayed at least twice, including activation-checkpoint recomputation. Loss was -0.1109375 and gradient norm was 329.1560. |
 | Dense state-dict conversion | CP2 | Converted 474 tensors totaling 2,214,532,352 bytes. |
 | MoE grouped-expert conversion | CP2 and EP8 | Converted 1,026 tensors totaling 70,214,367,712 bytes. |
+| Qwen4 packed parity with routing replay | CP1 and CP2, EP8 | Mean losses were 9.860187 and 9.860061. The largest target log-probability delta was 0.350, and the gradient relative L2 was 0.065. |
+| Qwen4 state-dict conversion | CP1 and EP8, fp32 master weights | Converted 1,166 tensors totaling 251,487,314,712 bytes, without the n-gram table. |

@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""AutoModel optional dependencies and packed Qwen3.5 context parallelism."""
+"""AutoModel optional dependencies, packed context parallelism, and packed-sequence kernels."""
 
 import py_compile
 from pathlib import Path
@@ -364,6 +364,85 @@ def patch_qwen3_5_packed_cp(automodel_dir: Path) -> tuple[Path, ...]:
     return sharder, gdn, dense, moe
 
 
+def patch_packed_gdn_varlen_conv(gdn: Path) -> None:
+    """Reset the packed Gated DeltaNet short convolution at every document boundary outside CP."""
+    patch_file(
+        gdn,
+        [
+            (
+                """            if self.causal_conv1d_fn is not None:
+                # ``seq_idx`` for causal_conv1d_fn marks per-token segment ids.
+                # Flattened batches need globally unique ids derived from the
+                # cumulative boundaries; document ids restart in every row.
+                if not is_packed:
+                    seq_idx_for_conv = None
+                elif needs_unpad:
+                    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+                    seq_idx_for_conv = torch.repeat_interleave(
+                        torch.arange(lengths.numel(), device=lengths.device, dtype=torch.int32),
+                        lengths,
+                        output_size=indices.numel(),
+                    ).unsqueeze(0)
+                else:
+                    seq_idx_for_conv = attention_mask.to(torch.int32).contiguous()
+                # HF's fallback calls this input hidden_states; the CUDA kernel uses x.
+                mixed_qkv = self.causal_conv1d_fn(
+                    mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    seq_idx=seq_idx_for_conv,
+                )
+            else:
+""",
+                """            if is_packed:
+                # FLA's varlen convolution, which the CP path also runs, resets at every boundary of
+                # cu_seqlens. The Transformers fallback for a missing causal_conv1d package ignores seq_idx.
+                from fla.modules.convolution import causal_conv1d as fla_causal_conv1d
+
+                packed_qkv, _ = fla_causal_conv1d(
+                    x=mixed_qkv.transpose(1, 2).reshape(1, eff_batch * eff_seq_len, -1),
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    cu_seqlens=cu_seqlens,
+                    cu_seqlens_cpu=cu_seqlens_cpu,
+                )
+                mixed_qkv = packed_qkv.reshape(eff_batch, eff_seq_len, -1).transpose(1, 2)
+            elif self.causal_conv1d_fn is not None:
+                # HF's fallback calls this input hidden_states; the CUDA kernel uses x.
+                mixed_qkv = self.causal_conv1d_fn(
+                    mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                )
+            else:
+""",
+            ),
+        ],
+        log_reason="AutoModel packed Gated DeltaNet varlen convolution outside CP",
+    )
+
+
+def patch_qwen4_flex_qsa_dynamic(flex_qsa: Path) -> None:
+    """Compile Qwen4's sparse FlexAttention for dynamic pack lengths.
+
+    With static shapes every new pack length recompiles, and past Dynamo's recompile limit the eager fallback
+    materializes the dense attention scores. The model's other compiled kernels already use dynamic shapes.
+    """
+    patch_file(
+        flex_qsa,
+        [
+            (
+                "    return torch.compile(flex_attention, dynamic=False)\n",
+                "    return torch.compile(flex_attention, dynamic=True)\n",
+            )
+        ],
+        log_reason="AutoModel Qwen4 FlexAttention QSA with dynamic shapes",
+    )
+
+
 def apply() -> None:
     import nemo_automodel
 
@@ -373,10 +452,14 @@ def apply() -> None:
     batch, exchange = blockdiag_dir / "batch.py", blockdiag_dir / "exchange.py"
     fsdp2 = automodel_dir / "components" / "distributed" / "fsdp2.py"
     addons = automodel_dir / "components" / "checkpoint" / "addons.py"
+    gdn = automodel_dir / "components" / "models" / "qwen3_5_moe" / "cp_linear_attn.py"
+    flex_qsa = automodel_dir / "components" / "models" / "qwen3_8_flash_next" / "flex_qsa.py"
     patch_automodel_optional_transformer_engine(parallelizer)
     patch_automodel_fsdp2_single_gpu(fsdp2)
     patch_automodel_original_hf_config(addons)
     patch_automodel_blockdiag_cp1(batch, exchange)
     model_files = patch_qwen3_5_packed_cp(automodel_dir)
-    for path in (parallelizer, fsdp2, addons, batch, exchange, *model_files):
+    patch_packed_gdn_varlen_conv(gdn)
+    patch_qwen4_flex_qsa_dynamic(flex_qsa)
+    for path in (parallelizer, fsdp2, addons, batch, exchange, gdn, flex_qsa, *model_files):
         py_compile.compile(str(path), doraise=True)

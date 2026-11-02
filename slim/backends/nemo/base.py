@@ -52,7 +52,7 @@ from .data_packing import (
 )
 from .loss import count_global_denominators, reduce_weighted_sequence_mean
 from .lr_scheduler import get_lr_scheduler
-from .models import validate_config
+from .models import model_family
 from .packed_cp_forward import prepare_forward
 from .topology import NeMoTopology
 
@@ -194,7 +194,7 @@ class NeMoTrainer(RayWorker):
                     self.processor = load_processor(model_checkpoint, trust_remote_code=True)
             dist.barrier(group=get_gloo_group())
 
-        validate_config(self.hf_config, self.topology)
+        model_family(self.hf_config).validate_config(self.hf_config, args, self.topology)
         self.global_step = 0
         self._create_model_and_optimizer(model_checkpoint)
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)

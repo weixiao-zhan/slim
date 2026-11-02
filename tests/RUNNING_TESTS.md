@@ -88,11 +88,19 @@ Pass combo or case names to run a subset.
 | `sweep_e2e.sh` | placement, trainer, weight sync, FP8 rollout, estimator, surrogate, batch layout, LoRA, MoE EP, profiler | 5 live + 8 replay | Qwen3.5-4B (+ FP8 forge), Qwen3.5-35B-A3B-tiny |
 | `run_nemo_mixed_cp_ep.sh` | GRPO with TP2 rollout, CP2 and EP8 training, routing replay | 1 | Qwen3.6-35B-A3B |
 | `run_nemo_grad_norm_matrix.sh` | gradient norm parity of CP and EP on captured rollouts | 1 capture + 2 | Qwen3.6-35B-A3B |
+| `run_nemo_qwen4.sh` | two-node GRPO with one TP8 and EP8 rollout replica per node, CP2 and EP16 training on 16 GPUs with Muon, routing replay | 1 | Qwen4 |
 
 ```bash
 bash tests/e2e/sweep_e2e.sh                     # all combos
 bash tests/e2e/sweep_e2e.sh ppo_colocate_critic # a single combo
 bash tests/e2e/sweep_e2e.sh save resume         # resume needs the checkpoint of save
+```
+
+`run_nemo_qwen4.sh` runs on the head of two 8-GPU nodes that hold the repository, the checkpoint, and `datasets/mixed` at the same paths.
+It starts the Ray worker on the other node over ssh:
+
+```bash
+MASTER_ADDR=<head IP> WORKER_HOST=<worker ssh host> bash tests/e2e/run_nemo_qwen4.sh
 ```
 
 #### `sweep_e2e.sh`
@@ -132,3 +140,6 @@ script; edit the script directly to change paths. The only runtime env vars are:
 | `NUM_GPUS` | all visible GPUs | Number of GPUs for ray |
 | `SWEEP_E2E_REPLAY_DIR` | `outputs/sweep-e2e-replay` | Rollouts of `capture` and the replay fixture |
 | `SWEEP_E2E_CKPT_DIR` | `/mnt/sagemaker-nvme/checkpoints/sweep-e2e` | Checkpoints of `sweep_e2e.sh`, deleted when it exits |
+| `MASTER_ADDR` | `127.0.0.1`; required by `run_nemo_qwen4.sh` | Head node IP that the Ray workers reach |
+| `WORKER_HOST` | required by `run_nemo_qwen4.sh` | ssh host of the worker node |
+| `QWEN4_MODEL_DIR` | `models/Qwen3.8-Flash-Next` | Checkpoint of `run_nemo_qwen4.sh` |

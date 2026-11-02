@@ -85,8 +85,8 @@ def build_optimizer(args, device_mesh, model: nn.Module, *, param_groups: list[d
 
     With ``--optimizer muon``, each group splits into a Muon subgroup for the matrices of
     ``model`` and an AdamW subgroup for the other parameters, one per parameter dtype
-    because Dion runs one fused update per subgroup. All subgroups keep the group's
-    scheduler keys.
+    because Dion runs one fused update per subgroup, and one Muon subgroup per grouped
+    expert tensor. All subgroups keep the group's scheduler keys.
     """
     if args.optimizer == "adamw":
         config = AdamWConfig(
@@ -105,8 +105,12 @@ def build_optimizer(args, device_mesh, model: nn.Module, *, param_groups: list[d
         subgroups = {}
         for parameter in group["params"]:
             algorithm = "muon" if id(parameter) in muon_ids else "adamw"
-            subgroups.setdefault((algorithm, parameter.dtype), []).append(parameter)
-        for (algorithm, _), parameters in subgroups.items():
+            # Dion stacks the same-shape parameters of a subgroup into one Newton-Schulz batch. A grouped expert
+            # tensor already batches its local experts, so each one gets its own subgroup, which bounds the
+            # temporaries to one MoE layer.
+            expert = id(parameter) if algorithm == "muon" and parameter.ndim == 3 else None
+            subgroups.setdefault((algorithm, parameter.dtype, expert), []).append(parameter)
+        for (algorithm, *_), parameters in subgroups.items():
             groups.append({**group, "params": parameters, "algorithm": algorithm})
     return Muon(
         groups,

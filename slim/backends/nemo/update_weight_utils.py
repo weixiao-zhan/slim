@@ -25,6 +25,7 @@ from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.quant import FUSED_EXPERT_SUFFIXES
 from slim.utils.timer import timer
 
+from .models import model_family
 from .peft import LORA_MODULES, merged_lora_weights
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,17 @@ def _compute_dtypes(model: torch.nn.Module) -> dict[str, torch.dtype]:
     return dtypes
 
 
+def _rollout_static_names(model: torch.nn.Module) -> frozenset[str]:
+    """State-dict names of the parameters that the engines keep from their own checkpoint."""
+    static_modules = model_family(model.config).ROLLOUT_STATIC_MODULES
+    return frozenset(
+        f"{prefix}.{name}".replace(_CHECKPOINT_PREFIX, "")
+        for prefix, module in model.named_modules()
+        if isinstance(module, static_modules)
+        for name, _ in module.named_parameters()
+    )
+
+
 class UpdateWeight(abc.ABC):
     def __init__(self, args: Namespace, model: torch.nn.Module, quantizer=None) -> None:
         self.args = args
@@ -85,6 +97,10 @@ class UpdateWeight(abc.ABC):
         self.quantizer = quantizer
         self.state_dict_adapter = model.state_dict_adapter
         self.compute_dtypes = _compute_dtypes(model)
+        self.static_names = _rollout_static_names(model)
+        # SGLang's weight checker resets every engine tensor, and the sync never restores the rollout-static ones.
+        if self.static_names and args.check_weight_update_equal:
+            raise ValueError("--check-weight-update-equal does not support a model family with ROLLOUT_STATIC_MODULES")
         # Under PEFT the engines receive every adapted weight merged into its base, and no adapter tensors.
         self.lora_modules = {
             f"{name}.".replace(_CHECKPOINT_PREFIX, ""): module
@@ -141,18 +157,18 @@ class UpdateWeight(abc.ABC):
     def _state_tensors(self) -> dict[str, torch.Tensor]:
         """The trainer state that the engines receive, by state dict name.
 
-        Colocated engines release their weights while the actor trains, so every synchronization sends every weight.
+        Colocated engines release their GPU weights while the actor trains, so every synchronization sends every
+        weight except the rollout-static ones, which the engines keep from their own checkpoint outside that memory.
         Under PEFT each adapted weight is replaced by its merge, and no adapter tensor goes out.
         """
-        state_dict = self.model.state_dict()
-        if not self.lora_modules:
-            return state_dict
-        merged = self.staged_merges if self.staged_merges is not None else self._merged_weights()
+        merged = {}
+        if self.lora_modules:
+            merged = self.staged_merges if self.staged_merges is not None else self._merged_weights()
         # AutoModel names every adapter tensor with a `lora_` component.
         return {
             name: merged.get(name, tensor)
-            for name, tensor in state_dict.items()
-            if not any(part.startswith("lora_") for part in name.split("."))
+            for name, tensor in self.model.state_dict().items()
+            if name not in self.static_names and not any(part.startswith("lora_") for part in name.split("."))
         }
 
     def _hf_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
@@ -181,7 +197,10 @@ class UpdateWeight(abc.ABC):
         rank = dist.get_rank()
         if rank == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            # Colocated engines flushed their caches when they released the KV cache, which stays released
+            # during the update. Clearing the pools of a released KV cache writes unmapped memory.
+            if not self.args.rollout_colocate:
+                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
             ray.get([engine.begin_weight_update.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 

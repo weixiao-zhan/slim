@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+from functools import partial
 from types import MethodType
 
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForImageTextToText
 from nemo_automodel.components._peft.lora import PeftConfig
-from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
+from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen, make_cp_blockdiag_batch_and_ctx
+from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
+from nemo_automodel.components.distributed.context_parallel.sharder import contiguous_local_indices
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
 from nemo_automodel.components.distributed.cp_vision_frame_shard import (
     CpVisionFrameShardingConfig,
@@ -24,9 +27,12 @@ from nemo_automodel.components.models.qwen3_5.parallelization import PARALLELIZE
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
 from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeForConditionalGeneration
 
+from .. import data_packing
 from ..data_packing import multimodal_item_offsets
 
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
+# Module types whose parameters the rollout engines keep from their own checkpoint.
+ROLLOUT_STATIC_MODULES: tuple[type, ...] = ()
 CP_VISION_SHARDING = CpVisionFrameShardingConfig(enabled=True)
 
 # Qwen3.5 has fp32 weights (GatedDeltaNet A_log and dt_bias). The Qwen3.5 parallelizer gives them their
@@ -40,14 +46,7 @@ def _is_moe(config) -> bool:
     return config.model_type == "qwen3_5_moe"
 
 
-def validate_config(config, topology) -> None:
-    model_type = config.model_type
-    if model_type not in MODEL_TYPES:
-        supported = ", ".join(MODEL_TYPES)
-        raise ValueError(
-            f"first-party NeMo training does not support model_type={model_type!r}; supported: {supported}"
-        )
-
+def validate_config(config, args, topology) -> None:
     if not _is_moe(config):
         if topology.expert_model_parallel_size != 1:
             raise ValueError("dense Qwen3.5 requires expert_model_parallel_size=1")
@@ -101,7 +100,6 @@ def build_model(
         "text_config": {"router_aux_loss_coef": 0.0},
         "freeze_config": {
             "freeze_vision_tower": args.freeze_vision_tower,
-            "freeze_audio_tower": args.freeze_audio_tower,
             "freeze_language_model": args.freeze_language_model,
         },
     }
@@ -284,13 +282,35 @@ def _multimodal_position_ids(model: torch.nn.Module, pack: dict) -> torch.Tensor
 
 def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: dict) -> torch.Tensor:
     """Build document-local text or multimodal positions for one physical pack."""
-    device = model_batch["input_ids"].device
     if not pack.get("multimodal_inputs"):
-        return pack["position_ids"].to(device=device, non_blocking=True).unsqueeze(0)
+        return pack["position_ids"].unsqueeze(0)
 
     _promote_image_grid(model_batch)
     # The positions come from CPU tensors, so they need no device sync, and every forward of the
     # pack (reference, critic values, train) reuses them.
     if "mrope_position_ids" not in pack:
         pack["mrope_position_ids"] = _multimodal_position_ids(model, pack)
-    return pack["mrope_position_ids"].to(device=device, non_blocking=True)
+    return pack["mrope_position_ids"]
+
+
+def build_model_batch(model: torch.nn.Module, pack: dict) -> dict:
+    """Build the unsharded CPU model inputs of one physical pack."""
+    batch = data_packing.build_model_batch(pack)
+    batch["position_ids"] = build_packed_position_ids(model, pack, batch)
+    return batch
+
+
+def build_packed_cp_sharder(
+    model: torch.nn.Module,
+    device_mesh,
+    model_batch: dict,
+    *,
+    padding_token_id: int,
+) -> ContextParallelSharder:
+    """Build the contiguous block-diagonal sharder that every CP degree uses."""
+    return ContextParallelSharder(
+        device_mesh=device_mesh,
+        shard_batch=partial(make_cp_blockdiag_batch_and_ctx, shard_primary=False),
+        local_token_global_indices=contiguous_local_indices,
+        padding_token_id=padding_token_id,
+    )

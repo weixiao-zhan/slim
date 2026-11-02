@@ -43,8 +43,9 @@ class NeMoArgs:
     nemo_experts_backend: Literal["torch", "te", "gmm", "torch_mm"] = "torch_mm"
     nemo_dispatcher: Literal["torch", "deepep", "hybridep", "uccl_ep"] = "torch"
     freeze_vision_tower: bool = False
-    freeze_audio_tower: bool = False
     freeze_language_model: bool = False
+    # The PLE n-gram table of Qwen4.
+    freeze_ngram: bool = False
     activation_checkpointing: bool = False
     defer_fsdp_grad_sync: bool = False
 

@@ -33,7 +33,7 @@ from slim.backends.nemo.data_packing import (
 from slim.backends.nemo.packed_cp_forward import prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
 from slim.backends.nemo.lr_scheduler import get_lr_scheduler
-from slim.backends.nemo.models import validate_config
+from slim.backends.nemo.models import model_family
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.seqlen_balancing import build_token_budget_partitions
@@ -117,6 +117,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         adam_eps=1e-8,
         advantage_estimator="grpo",
         async_save=False,
+        check_weight_update_equal=False,
         checkpoint_cpu_offload=False,
         checkpoint_save_consolidated="every",
         ckpt_step=None,
@@ -130,8 +131,8 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         eps_clip_c=None,
         eps_clip_high=0.2,
         expert_model_parallel_size=cli.expert_parallel_size,
-        freeze_audio_tower=False,
         freeze_language_model=False,
+        freeze_ngram=True,
         freeze_vision_tower=cli.freeze_vision_tower,
         global_batch_size=8,
         hf_checkpoint=cli.checkpoint,
@@ -453,7 +454,7 @@ def _build_trainer(
     trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)
-    validate_config(trainer.hf_config, trainer.topology)
+    model_family(trainer.hf_config).validate_config(trainer.hf_config, trainer.args, trainer.topology)
     record("topology_built")
 
     backend_module = actor_module if cli.role == "actor" else critic_module
@@ -645,6 +646,9 @@ def _qualify_weight_conversion(trainer: ActorNeMoTrainer) -> dict[str, int]:
         converted_bytes += tensor.numel() * tensor.element_size()
 
     expected = {name for name in getattr(trainer.model, "_pre_shard_hf_state_dict_keys", ()) if not name.endswith("_extra_state")}
+    # The engines keep the rollout-static parameters from their own checkpoint, so the updater never converts them.
+    state = trainer.model.state_dict()
+    expected -= set(updater.state_dict_adapter.get_hf_state_dict_keys({name: state[name] for name in updater.static_names}))
     actual = set(converted)
     if expected != actual:
         missing = sorted(expected - actual)

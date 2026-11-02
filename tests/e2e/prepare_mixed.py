@@ -15,6 +15,7 @@ Outputs (the geometry split is the "vision" eval task, so the test scripts' eval
 paths stay unchanged):
   <repo>/datasets/mixed/train.parquet          — mixed text + vision (for training)
   <repo>/datasets/mixed/train_balanced.parquet — every vision row of train.parquet and as many random text rows
+  <repo>/datasets/mixed/train_math.parquet     — the text rows of train.parquet (for language-only models)
   <repo>/datasets/mixed/test_math.parquet      — text-only math (for eval)
   <repo>/datasets/mixed/test_vision.parquet    — geometry vision reasoning (for eval)
 
@@ -104,6 +105,9 @@ def main():
     train = concatenate_datasets([dapo_train, geo3k_train]).shuffle(seed=42)
     train.to_parquet(OUT_DIR / "train.parquet")
     print(f"Wrote train.parquet ({len(train)} rows: {len(dapo_train)} text + {len(geo3k_train)} vision)")
+
+    dapo_train.to_parquet(OUT_DIR / "train_math.parquet")
+    print(f"Wrote train_math.parquet ({len(dapo_train)} rows)")
 
     # Every vision row and as many random text rows
     balanced = concatenate_datasets([dapo_train.select(range(len(geo3k_train))), geo3k_train]).shuffle(seed=42)

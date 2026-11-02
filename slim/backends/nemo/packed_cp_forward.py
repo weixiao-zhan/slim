@@ -6,15 +6,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import cached_property, partial
+from functools import cached_property
 
 import torch
-from nemo_automodel.components.distributed.blockdiag_cp import make_cp_blockdiag_batch_and_ctx
-from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
-from nemo_automodel.components.distributed.context_parallel.sharder import contiguous_local_indices
 
-from .data_packing import build_model_batch, build_training_fields
-from .models import build_packed_position_ids
+from .data_packing import build_training_fields
+from .models import model_family
 
 
 def move_to_device(value, device):
@@ -45,16 +42,6 @@ class PreparedForward:
         return self.sharder.gather_token_tensor(tensor, seq_dim=1, trim=True, fill=fill)
 
 
-def build_packed_cp_sharder(device_mesh, *, padding_token_id: int):
-    """Build the common contiguous block-diagonal sharder."""
-    return ContextParallelSharder(
-        device_mesh=device_mesh,
-        shard_batch=partial(make_cp_blockdiag_batch_and_ctx, shard_primary=False),
-        local_token_global_indices=contiguous_local_indices,
-        padding_token_id=padding_token_id,
-    )
-
-
 def prepare_forward(
     model,
     device_mesh,
@@ -62,12 +49,12 @@ def prepare_forward(
     *,
     padding_token_id: int,
 ) -> PreparedForward:
-    """Shard packed model inputs and RL fields through one block-diagonal sharder."""
+    """Shard packed model inputs and RL fields through the model family's sharder."""
     device = torch.device("cuda", torch.cuda.current_device())
-    model_batch = move_to_device(build_model_batch(pack), device)
-    model_batch["position_ids"] = build_packed_position_ids(model, pack, model_batch)
+    family = model_family(model.config)
+    model_batch = move_to_device(family.build_model_batch(model, pack), device)
     full_fields = move_to_device(build_training_fields(pack), device)
-    sharder = build_packed_cp_sharder(device_mesh, padding_token_id=padding_token_id)
+    sharder = family.build_packed_cp_sharder(model, device_mesh, model_batch, padding_token_id=padding_token_id)
     context_factory, model_batch = sharder.shard(model_batch)
     labels = model_batch.pop("labels")
     fields = {}

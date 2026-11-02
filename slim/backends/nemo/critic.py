@@ -81,11 +81,12 @@ class CriticNeMoTrainer(NeMoTrainer):
         return checkpoint_path
 
     def _build_value_head(self) -> nn.Module:
-        self.model.get_output_embeddings().requires_grad_(False)
-        # The trained head is stored in --master-weight-dtype; `auto` follows the backbone.
+        output_embeddings = self.model.get_output_embeddings()
+        output_embeddings.requires_grad_(False)
+        # The trained head is stored in --master-weight-dtype; `auto` follows the backbone's output embedding.
         head = ScalarValueHead(
             hidden_size=self.model.config.get_text_config().hidden_size,
-            dtype=torch.float32 if self.args.master_weight_dtype == "fp32" else self.model.dtype,
+            dtype=torch.float32 if self.args.master_weight_dtype == "fp32" else output_embeddings.weight.dtype,
             device=torch.device("cuda", torch.cuda.current_device()),
         )
         strategy = self.distributed_setup.strategy_config
