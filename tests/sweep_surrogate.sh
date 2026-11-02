@@ -36,7 +36,6 @@ COMMON_ARGS="
 
     --advantage-estimator grpo
     --disable-group-advantage-std-normalization
-    --old-logprob-source rollout
 
     --lr 1e-6
 

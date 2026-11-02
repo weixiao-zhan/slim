@@ -7,8 +7,10 @@ source "$(dirname "$0")/common.sh"
 MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B"
 DATASET_DIR="$REPO_DIR/datasets/mixed"
 RESULT_DIR="${NEMO_GRAD_NORM_RESULT_DIR:-/tmp/slim-nemo-grad-norm-matrix}"
-ROLLOUT_DATA="${NEMO_GRAD_NORM_ROLLOUT_DATA:-$RESULT_DIR/rollout-{rollout_id}.pt}"
-ROLLOUT_CAPTURE="${NEMO_GRAD_NORM_ROLLOUT_CAPTURE:-$RESULT_DIR/rollout-capture-{rollout_id}.pt}"
+# The str.format field of the per-rollout paths. A literal `}` would end a `${VAR:-default}` expansion.
+ROLLOUT_ID_FIELD="{rollout_id}"
+ROLLOUT_DATA="${NEMO_GRAD_NORM_ROLLOUT_DATA:-$RESULT_DIR/rollout-$ROLLOUT_ID_FIELD.pt}"
+ROLLOUT_CAPTURE="${NEMO_GRAD_NORM_ROLLOUT_CAPTURE:-$RESULT_DIR/rollout-capture-$ROLLOUT_ID_FIELD.pt}"
 PROMPT_DATA="$RESULT_DIR/prompts.parquet"
 MAX_TOKENS_PER_GPU="${NEMO_GRAD_NORM_MAX_TOKENS_PER_GPU:-$(K 2)}"
 MAX_RESPONSE_TOKENS="${NEMO_GRAD_NORM_MAX_RESPONSE_TOKENS:-256}"
@@ -33,7 +35,6 @@ FIRST_ROLLOUT_CAPTURE="${ROLLOUT_CAPTURE//\{rollout_id\}/0}"
 if [[ ! -f "$FIRST_ROLLOUT_CAPTURE" || "${NEMO_GRAD_NORM_REGENERATE_ROLLOUT:-0}" == "1" ]]; then
     start_ray
     run_train_wait "
-        --debug-rollout-only
         --num-rollout $NUM_ROLLOUTS
         --rollout-batch-size 8
         --n-samples-per-prompt 4
@@ -45,7 +46,6 @@ if [[ ! -f "$FIRST_ROLLOUT_CAPTURE" || "${NEMO_GRAD_NORM_REGENERATE_ROLLOUT:-0}"
         --rm-type math
         --skip-eval-before-train
 
-        --rollout-num-gpus 8
         --rollout-num-gpus-per-replica 2
         --sglang-mem-fraction-static 0.7
         --sglang-attention-backend fa3
@@ -53,6 +53,15 @@ if [[ ! -f "$FIRST_ROLLOUT_CAPTURE" || "${NEMO_GRAD_NORM_REGENERATE_ROLLOUT:-0}"
         --sglang-mamba-radix-cache-strategy extra_buffer_lazy
         --sglang-max-mamba-cache-size 512
         --sglang-page-size 64
+        --rollout-colocate
+
+        --actor-num-gpus 8
+        --context-parallel-size 2
+        --expert-model-parallel-size 8
+        --activation-checkpointing
+        --use-dynamic-batch-size
+        --max-tokens-per-gpu $(K 8)
+        --lr 0
 
         --hf-checkpoint $MODEL_DIR
         --save-debug-rollout-data $ROLLOUT_CAPTURE
@@ -104,7 +113,6 @@ do
         --advantage-estimator grpo
         --policy-surrogate ppo_clip
         --disable-group-advantage-std-normalization
-        --old-logprob-source actor
         --eps-clip 0.2
         --eps-clip-high 0.28
 

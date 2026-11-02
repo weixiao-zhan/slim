@@ -26,114 +26,6 @@ See [Placement](placement.md) for how engines are mapped onto GPUs.
 
 A small set of fields (`model_path`, `tp_size`, `port`, `base_gpu_id`) are managed by slim and cannot be overridden.
 
-## YAML Config (`--sglang-config`)
-
-For advanced deployments (PD disaggregation, multi-model serving, per-group overrides), pass a YAML config file:
-
-```bash
---sglang-config config/rollout.yaml
-```
-
-Top-level structure:
-
-```yaml
-sglang:
-  - name: actor
-    model_path: /models/Qwen3-8B
-    update_weights: true
-    num_gpus_per_replica: 2
-    server_groups:
-      - worker_type: regular
-        num_gpus: 8
-```
-
-### Model-level fields
-
-| Field | Description |
-|-------|-------------|
-| `name` (required) | Unique model name (e.g. `"actor"`, `"ref"`, `"reward"`). |
-| `model_path` | HF checkpoint path. Falls back to `--hf-checkpoint`. |
-| `update_weights` | Whether this model receives weight updates. Auto-inferred from whether `model_path` matches `--hf-checkpoint`. |
-| `num_gpus_per_replica` | Default GPUs per engine for all groups in this model. |
-| `server_groups` (required) | List of server group configurations. |
-
-### Server group fields
-
-| Field | Description |
-|-------|-------------|
-| `worker_type` (required) | One of `regular`, `prefill`, `decode`, `placeholder`, `encoder`. |
-| `num_gpus` (required) | Total GPUs allocated to this group. |
-| `num_gpus_per_replica` | Per-group override for GPUs per engine. |
-| `overrides` | SGLang `ServerArgs` field overrides (highest priority). |
-
-### Worker types
-
-| Type | Behavior |
-|------|----------|
-| `regular` | Handles both prefill and decode. |
-| `prefill` | Prefill-only engine for PD disaggregation. |
-| `decode` | Decode-only engine for PD disaggregation. |
-| `placeholder` | Reserves GPU slots without creating engines. |
-| `encoder` | Encoder-only engine for EPD disaggregation. |
-
-### Resolution priority
-
-1. Per-group `overrides` (highest)
-2. Per-group `num_gpus_per_replica`
-3. Model-level `num_gpus_per_replica`
-4. CLI `--rollout-num-gpus-per-replica` (lowest)
-
-All server groups within a single model entry must resolve to the same `model_path`.
-
-### Multi-model serving
-
-The YAML config supports multiple model entries, each with its own router and engine pool:
-
-```yaml
-sglang:
-  - name: actor
-    update_weights: true
-    server_groups:
-      - worker_type: regular
-        num_gpus: 8
-
-  - name: ref
-    model_path: /models/Qwen3-8B-ref
-    update_weights: false
-    server_groups:
-      - worker_type: regular
-        num_gpus: 4
-```
-
-Access model URLs in custom rollout functions via `get_model_url(args, "actor", "/generate")`.
-Only models with `update_weights: true` receive weight updates; frozen models retain their initial weights.
-
-### Mutual exclusion
-
-These flags are mutually exclusive: `--sglang-config`, `--prefill-num-servers`, `--rollout-external`.
-
-## PD Disaggregation
-
-Prefill-Decode disaggregation splits inference into separate prefill and decode server groups.
-Prefill engines handle prompt processing and transfer KV cache to decode engines, which handle autoregressive generation.
-
-```yaml
-sglang:
-  - name: actor
-    num_gpus_per_replica: 2
-    server_groups:
-      - worker_type: prefill
-        num_gpus: 4
-      - worker_type: decode
-        num_gpus: 8
-        num_gpus_per_replica: 4
-```
-
-This yields 2 prefill engines (TP=2) and 2 decode engines (TP=4).
-
-Prefill is compute-bound so fewer large-TP engines are efficient; decode is memory-bound so more smaller-TP engines can increase throughput.
-Total GPUs across all groups must equal `--rollout-num-gpus`.
-
 ## Speculative Decoding
 
 For models with MTP layers (e.g. GLM-4.7, DeepSeek-V3/R1), speculative decoding could accelerate generation under low concurrency by drafting multiple tokens that the target model verifies in a batch.
@@ -176,7 +68,9 @@ After each training step, updated BF16 weights are re-quantized online to match 
 ### Block-FP8 format
 
 - e4m3 weights, 128x128 blocks, one scale per block stored as `<weight>.weight_scale_inv`.
-- Two scale formats: `fp32` (default, works on SM89/SM90/SM120) and `ue8m0` (power-of-two scales for DeepGEMM on Blackwell SM120).
+- Two scale formats: `fp32` (default, works on SM89/SM90/SM120) and `ue8m0` (power-of-two scales).
+  SGLang repacks `ue8m0` scales into the DeepGEMM int32 layout only for the layers that DeepGEMM runs: dense layers on SM100 (`--sglang-fp8-gemm-backend` `auto` or `deep_gemm`), and grouped MoE layers on the DeepGEMM MoE runner (`--sglang-moe-runner-backend deep_gemm`, or `auto` with `--sglang-moe-a2a-backend` `deepep`, `deepep_v2`, `mooncake`, `nixl` or `pplx`).
+  All other layers keep fp32 power-of-two scales, and the online weight sync sends the layout that the engine uses.
 - Modules listed in `quantization_config.modules_to_not_convert` remain unquantized.
 - Fused MoE experts (`mlp.experts.gate_up_proj` / `down_proj`) are written split per expert, so sglang loads their scales.
 
@@ -215,7 +109,7 @@ python tools/convert_hf_to_nvfp4.py \
 
 ## Router
 
-Each model gets its own sglang-router instance for load balancing.
+One sglang-router instance balances the requests across the engines.
 
 | `--router-policy` | Description |
 |--------------------|-------------|
@@ -247,7 +141,7 @@ Request:
 | `image_data[0]` = `{"format": "processor_output", ...}` | processor tensors |
 | `sampling_params` | `temperature`, `max_new_tokens` from what is left of `episode.max_tokens`, and `sampling_seed` (`episode.sampling_seed`) under `--sglang-enable-deterministic-inference` |
 | `return_logprob: true` | gates `meta_info.output_token_logprobs` |
-| `top_logprobs_num` | `K` under `--use-score-centering K`; gates `meta_info.output_top_logprobs` |
+| `top_logprobs_num` | `K` under `--use-score-centering K`; gates the `meta_info.output_top_logprobs_*` fields |
 | `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; set the start to the number of tokens already recorded, so only record and append the latest user turn + model turn. Note the capture is keyed by KV-cache slot and earlier tokens' should not be re-read |
 
 Response:
@@ -255,10 +149,10 @@ Response:
 | Field | Location |
 |-------|----------|
 | output token ids and logprobs | `meta_info.output_token_logprobs` = `{"logprobs": float32 [T], "token_ids": int32 [T]}` |
-| sampler top-$K$ | `meta_info.output_top_logprobs` = `{"logprobs": float32 [T, K], "token_ids": int32 [T, K]}`, one row per output token |
+| sampler top-$K$ | `meta_info.output_top_logprobs_val_flat_b64` (float32) and `meta_info.output_top_logprobs_idx_flat_b64` (int32), shaped by `meta_info.output_top_logprobs_shape` = `[T, K]`, one row per output token |
 | expert indices | `meta_info.routed_experts`, int32, one row per prediction over `[routed_experts_start_len, seqlen - 1)`, reshaped to `[prediction, num_layers, top_k]` |
 
-Every array is a [tensor envelope](#tensor-envelope).
+See [Tensor envelope](#tensor-envelope) for the array encodings.
 
 ### `/v1/chat/completions` fields
 
@@ -272,8 +166,8 @@ Request:
 | `chat_template_kwargs` | `--apply-chat-template-kwargs`, e.g. `enable_thinking`, `preserve_thinking`; |
 | `stream: false` | every field below is unavailable when streaming |
 | `logprobs: true` | gates `choices[i].meta_info.output_token_logprobs` |
-| `return_prompt_token_ids: true` | gates `choices[i].meta_info.prompt_token_ids` |
-| `top_logprobs` | `K` under `--use-score-centering K`; gates `choices[i].meta_info.output_top_logprobs` |
+| `return_prompt_token_ids: true` | gates `choices[i].prompt_token_ids` |
+| `top_logprobs` | `K` under `--use-score-centering K`; gates the `choices[i].meta_info.output_top_logprobs_*` fields |
 | `return_meta_info: true` | gates `choices[i].meta_info`, and so every field in it |
 | `return_processor_outputs: true` | gates `choices[i].meta_info.processor_outputs` |
 | `return_routed_experts`, `routed_experts_start_len` | expert indices, under `--use-rollout-routing-replay`; always `0`, since one call is one whole trajectory |
@@ -283,20 +177,20 @@ Response:
 | Field | Location |
 |-------|----------|
 | generated message, finish reason | `choices[i].message` (`.content`, `.tool_calls`) and `choices[i].finish_reason`, OpenAI convention, consumed by the agent framework |
-| input token ids | `choices[i].meta_info.prompt_token_ids`, int32 `[P]` |
+| input token ids | `choices[i].prompt_token_ids`, a JSON list `[P]` |
 | output token ids and logprobs | `choices[i].meta_info.output_token_logprobs` = `{"logprobs": float32 [T], "token_ids": int32 [T]}` |
-| sampler top-$K$ | `choices[i].meta_info.output_top_logprobs` = `{"logprobs": float32 [T, K], "token_ids": int32 [T, K]}` |
+| sampler top-$K$ | `choices[i].meta_info.output_top_logprobs_val_flat_b64` (float32) and `choices[i].meta_info.output_top_logprobs_idx_flat_b64` (int32), shaped by `choices[i].meta_info.output_top_logprobs_shape` = `[T, K]` |
 | processor tensors | `choices[i].meta_info.processor_outputs` |
 | expert indices | `choices[i].meta_info.routed_experts`, int32, one row per prediction over `[0, seqlen - 1)`, reshaped to `[prediction, num_layers, top_k]` |
 
-Every array is a [tensor envelope](#tensor-envelope). The OpenAI `choices[i].logprobs` and
-`choices[i].prompt_token_ids` stay empty: slim reads `meta_info` only.
+See [Tensor envelope](#tensor-envelope) for the array encodings. The OpenAI `choices[i].logprobs`
+stays empty: slim reads `meta_info` and `choices[i].prompt_token_ids` only.
 
 Prompt positions carry no logprobs; `logprob_start_len` is fixed at `-1` and is not a request field.
 
 ### Tensor envelope
 
-Processor tensors travel as JSON in both directions, and the per-token arrays of `meta_info` come
+Processor tensors travel as JSON in both directions, and the output logprobs of `meta_info` come
 back the same way, so each one is a base64 envelope of its raw bytes:
 
 ```json
@@ -307,10 +201,17 @@ Field names match what `AutoProcessor` returns (`pixel_values`, `pixel_values_vi
 `input_features`, `image_grid_thw`, ...). `slim/utils/processing_utils.py` owns the codec for both
 directions; `patch_dependencies.py` wires SGLang's call sites to it rather than restating it.
 
+The sampler top-$K$ and the expert indices use SGLang's own form: base64 of the raw array bytes,
+without a shape. `output_top_logprobs_shape` gives the top-$K$ shape and the
+`output_top_logprobs_{val,idx}_flat_b64_dtype` fields its dtypes; the expert indices are int32.
+
 Upstream SGLang returns the logprobs as one JSON list per token, and the top-$K$ as $K$ of them.
 Building and serializing those lists runs on the engine's HTTP process, and on a long generation
-it blocks the process for longer than a health check waits. Streaming requests keep the upstream
-lists.
+it blocks the process for longer than a health check waits. So the patched engine sets SGLang's
+`return_flat_raw_output_top_logprobs` and `return_flat_raw_top_logprobs_b64` itself on every
+non-streaming `/generate` and chat request, as the gateway does not forward them. These return the
+top-$K$ as flat arrays, and with them the patch returns the output logprobs as envelopes, both
+encoded once on the finished output. Streaming requests keep the upstream lists.
 
 ### Router passthrough
 

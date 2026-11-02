@@ -46,7 +46,7 @@ and `Episode.get_reward_value()` returns one scalar whichever level carries the 
 | `rollout_log_probs` | `list[float]` or `FloatTensor [T]` | Source-token-aligned log-probabilities under the rollout policy |
 | `rollout_topk_log_probs` | `FloatTensor [T, K] \| ObjectRef \| None` | Source-token-aligned sampler top-$K$ log-probabilities, under `--use-score-centering K` |
 | `rollout_topk_token_ids` | `IntTensor [T, K] \| ObjectRef \| None` | Token ids of `rollout_topk_log_probs`, in the same order |
-| `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| ObjectRef \| None` | Source-token-aligned MoE expert indices recorded during rollout |
+| `rollout_routed_experts` | `IntTensor [T, num_layers, top_k] \| ObjectRef \| None` | Source-token-aligned MoE expert indices recorded during rollout, stored as int16 |
 | `multimodal_inputs` | `dict[str, Tensor] \| ObjectRef \| None` | Non-token-aligned processor outputs (pixel_values, image_grid_thw, etc.) |
 | `reward` | `float \| None` | Raw scalar reward for this trajectory |
 | `text` | `str \| None` | Decoded full trajectory (prompt + response) |
@@ -134,7 +134,7 @@ The `RolloutManager` coordinator holds only their refs.
 | generate and reward functions (`RolloutWorker`) | `Tensor` or `dict[str, Tensor]`, prediction length | `list`, prediction length |
 | end of `RolloutWorker.run_group` | finalized, then `ray.put`, becomes `ObjectRef` | finalized CPU tensors of length `T` |
 | filters, batch hooks, rollout logging, `build_dp_batches`, `AdvantageEstimator`, `--custom-reward-post-process-path` | `ObjectRef`, never read | CPU tensors of length `T` |
-| `process_rollout_data` (trainer) | one `ray.get` over the real trajectories' refs, written back as tensors | CPU tensors of length `T` |
+| `process_rollout_data` (trainer) | one `ray.get` over the real trajectories' refs of the fields the role reads, written back as tensors; the other bulk fields become `None` | CPU tensors of length `T` |
 | packing and training | tensors | tensors |
 
 A field the run does not produce stays `None` at every stage.
@@ -142,8 +142,14 @@ Each stage relies on the form the stage before it produces and does not re-valid
 The worker skips the processing when its abort flag is set, because the pool drops every group that returns after abort.
 
 The worker owns the objects and lives for the run, and Ray keeps nested refs alive while the batch that contains them is alive.
+The train loop drops a step's batch refs after `train_step`, so the next rollout does not keep them in the object store.
 `AdvantageEstimator.compute_training_targets` fetches and re-puts batches without moving any bulk tensor.
-`compute_log_probs` and `train` each call `process_rollout_data`, so a rank fetches the bulk fields twice per step.
+Each trainer role fetches only the bulk fields it reads: the actor all of them, the critic only `multimodal_inputs`.
+`compute_log_probs` and `compute_values` pack the batch and cache the packs, so the `train` call of the same step fetches only the batch, for its training targets.
+
+slim sets `RAY_ENABLE_ZERO_COPY_TORCH_TENSORS=1` in the job-level runtime env, so every Ray process of the job fetches rollout data with it.
+Ray then pickles a CPU tensor as an out-of-band buffer, so `ray.get` maps it from the object store without a copy, and a tensor view sends only its own bytes.
+A fetched tensor is a read-only view of an object that other readers share, so code that receives rollout data replaces a tensor instead of writing it in place.
 
 `build_dp_batches` builds padding trajectories in the coordinator, so `create_dp_padding_trajectory` takes the optional fields and their per-token shapes from the run configuration: `rollout_log_probs` always, $(K,)$ top-$K$ fields under `--use-score-centering K`, and `(num_layers, top_k)` routed experts from the `--hf-checkpoint` config under `--use-rollout-routing-replay`.
 Padding trajectories carry these fields inline, and `process_rollout_data` resolves refs only on trajectories with an `episode_index`.
@@ -173,7 +179,8 @@ a `TrajectoryBatch` (`slim/utils/trajectory_batch.py`).
 **Step count in episodes, work distribution by trajectory.** `global_batch_size` is
 denominated in episodes, so the number of optimizer steps per rollout does not depend on how
 many generation calls the rollout made and the LR decay horizon stays
-`num_rollout * rollout_batch_size * n_samples_per_prompt // global_batch_size`. The unit of
+`num_rollout * num_steps_per_rollout`, with
+`num_steps_per_rollout = rollout_batch_size * n_samples_per_prompt // global_batch_size`. The unit of
 *work* is the trajectory: an episode with 50 trajectories is 50 documents, 50 attention blocks, and
 potentially 50 micro-batches, so distributing trajectories is what equalizes document counts per
 rank.

@@ -14,7 +14,6 @@ Each accepts a dotted Python path (e.g. `my_package.module.function`) loaded at 
 | `--rollout-sample-filter-path` | None | Sample-level masking after rollout |
 | `--rollout-all-samples-process-path` | None | Post-rollout hook over all groups (including filtered) |
 | `--custom-loss-function-path` | None | Custom training loss (requires `--loss-type custom_loss`) |
-| `--custom-mismatch-correction-function-path` | None | Importance-weight correction for train/rollout mismatch |
 | `--custom-reward-post-process-path` | None | Reward shaping before advantage estimation |
 | `--custom-rollout-log-function-path` | None | Custom logging for train rollout |
 | `--custom-eval-rollout-log-function-path` | None | Custom logging for eval rollout |
@@ -33,6 +32,7 @@ Rollout is split between one `RolloutManager` coordinator process and `--rollout
 
 Every rollout node imports the custom generate and reward modules and loads the tokenizer and processor from `--hf-checkpoint`, so both must be reachable from every rollout node.
 Hooks running in the coordinator or `AdvantageEstimator` see finalized trajectories: `token_ids`, `loss_mask`, and `rollout_log_probs` are CPU tensors of length `len(token_ids)`, and `multimodal_inputs`, `rollout_routed_experts`, `rollout_topk_log_probs`, and `rollout_topk_token_ids` are `ray.ObjectRef`, which they pass through without reading (see [Bulk Field Lifecycle](data-layout.md#bulk-field-lifecycle)).
+These tensors are read-only views of the object store, so a hook assigns a new tensor instead of writing one in place.
 
 ## Key Interfaces
 
@@ -50,10 +50,12 @@ It returns finalized episodes with bulk fields as `ObjectRef`, the form `Rollout
 ### Generate function (`--custom-generate-function-path`)
 
 ```python
-async def custom_generate(state: GenerateState, episode: Episode) -> Episode
+async def custom_generate(state: GenerateState, episode: Episode, evaluation: bool = False) -> Episode
 ```
 
 Substitutes only the per-episode generation logic.
+slim always passes `evaluation` as a keyword; it is `True` for the episodes of an eval rollout.
+Only training reads the sampler top-$K$ and the routed experts, so the built-in generate functions request neither under `evaluation`.
 The episode arrives with no trajectory; the function appends every `Trajectory` it generates, each with its own `token_ids`, `loss_mask`, and `rollout_log_probs`, and returns the episode.
 An agentic workload appends further `Trajectory` objects to `episode.trajectories`, one per contiguous generation, and sets `episode.status` for the attempt as a whole.
 
@@ -74,7 +76,7 @@ Abort is cooperative, so the function must return on its own in both the normal 
 - Run blocking or CPU-heavy calls (environment calls, heavy processor or reward work) through `asyncio.to_thread` or a process pool. One event loop serves all groups of a worker, so a blocking call stalls every episode of that worker and delays abort.
 
 ```python
-async def generate(state: GenerateState, episode: Episode) -> Episode:
+async def generate(state: GenerateState, episode: Episode, evaluation: bool = False) -> Episode:
     container = None
     try:
         container = await start_container(episode.example)
@@ -104,6 +106,7 @@ async def custom_rm(args, episodes: list[Episode], **kwargs) -> None
 A reward function can set one scalar per episode on `episode.reward`, which is auto broadcast to every trajectory, or set `trajectory.reward` on each of `episode.trajectories`, and returns nothing; setting both levels is an error.
 The reward function runs in the same `RolloutWorker` as the generate function, on the same event loop, so heavy scoring goes through `asyncio.to_thread` or a process pool as well.
 The built-in `--rm-type` options (`math`, `deepscaler`, `f1`, `gpqa`, `random`), used when `--custom-rm-path` is not set, score `episode.trajectories[-1].generated_text` against `episode.example["label"]`, except `random`, which ignores both.
+slim serves only the policy. An LLM judge runs as a separate deployment that the reward function calls; a reward function that uses the policy itself as the judge sends its requests to the router at `args.router_ip:args.router_port`.
 
 ### Group filter (`--rollout-group-filter-path`)
 
@@ -147,7 +150,7 @@ Set `--loss-type custom_loss` to use it. The function owns the entire loss math
 (policy, entropy, KL as it sees fit) and replaces the built-in policy loss.
 `unpacked_batches` is the per-document list from `unpack_sequences`, one entry per
 trajectory; each dict carries the raw `reward`, `loss_weights`, `cur_log_probs`,
-`advantages`, `loss_masks`, and the old/ref log-probs when available.
+`advantages`, `loss_masks`, `rollout_log_probs`, and `ref_log_probs` when `--kl-loss-coef` is nonzero.
 The log-probs and `entropy` are computed only where `loss_masks` is nonzero and are zero elsewhere.
 Return `(loss, metrics)` where `loss` is the summed-microbatch loss (the
 framework applies global-batch normalization and `backward()`) and `metrics` is
@@ -185,7 +188,7 @@ See [Endpoints and Tokenization Ownership](sglang-config.md#endpoints-and-tokeni
 
 ## Testing Custom Hooks
 
-Contract tests in `tests/plugin_contracts/` check, without GPU, how `generate_and_rm` dispatches to a custom generate function: a per-episode function takes precedence over `--custom-generate-function-path`, `evaluation` reaches functions that accept it, and every trajectory is decoded from its own ids:
+Contract tests in `tests/plugin_contracts/` check, without GPU, how `generate_and_rm` dispatches to a custom generate function: a per-episode function takes precedence over `--custom-generate-function-path`, `evaluation` reaches the function, and every trajectory is decoded from its own ids:
 
 ```bash
 pytest tests/plugin_contracts/ -v

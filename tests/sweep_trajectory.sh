@@ -35,7 +35,6 @@ COMMON_ARGS="
     --use-dynamic-batch-size
     --max-tokens-per-gpu $(K 16)
 
-    --old-logprob-source rollout
 
     --lr 1e-6
 

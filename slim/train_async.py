@@ -3,36 +3,15 @@
 
 import ray
 
-from slim.ray.advantage_estimator import RayAdvantageEstimator
-from slim.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_groups
-from slim.train import save, start_lr_decay, train_step
+from slim.train import save, setup, start_lr_decay, teardown, train_step
 from slim.utils.arguments import parse_args
-from slim.utils.logging_utils import configure_logger, finish_tracking, init_tracking
 from slim.utils.misc import should_run_periodic_action
 
 
 # The framework supports other asynchronous approaches such as fully async (which is shown in examples/full_async).
 def train(args):
     assert not args.rollout_colocate, "Rollout colocation is not supported for async training."
-    configure_logger()
-    # allocate the GPUs
-    pgs = create_placement_groups(args)
-    init_tracking(args)
-
-    # create the rollout manager, with sglang engines inside.
-    # need to initialize rollout manager first to calculate num_rollout
-    rollout_manager = create_rollout_manager(args, pgs["rollout"])
-
-    # create the actor and critic training groups
-    actor_train_group, critic_train_group = create_training_groups(args, pgs, rollout_manager)
-    advantage_estimator = RayAdvantageEstimator.remote(args)
-
-    # always update weight first so that sglang has the loaded weights from training.
-    if not args.critic_train_only:
-        actor_train_group.update_weights()
-
-        if args.check_weight_update_equal:
-            ray.get(rollout_manager.check_weights.remote(action="compare"))
+    rollout_manager, actor_train_group, critic_train_group, advantage_estimator = setup(args)
 
     # async train loop.
     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
@@ -50,6 +29,8 @@ def train(args):
             rollout_data_next_future = rollout_manager.generate.remote(rollout_id + 1)
 
         train_step(args, rollout_id, rollout_data_curr_ref, actor_train_group, critic_train_group, advantage_estimator)
+        # The batches keep the rollout's bulk fields in the object store; free them while the next rollout runs.
+        del rollout_data_curr_ref
 
         if should_run_periodic_action(rollout_id, args.save_interval, args.num_rollout):
             save(args, rollout_id, actor_train_group, critic_train_group, rollout_manager)
@@ -66,9 +47,7 @@ def train(args):
 
         rollout_id += 1
 
-    ray.get(rollout_manager.dispose.remote())
-    ray.kill(advantage_estimator)
-    finish_tracking(args)
+    teardown(args, rollout_manager, advantage_estimator)
 
 
 def main():

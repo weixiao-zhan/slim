@@ -2,12 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-from collections import defaultdict
 
-try:
-    import ray
-except ModuleNotFoundError:  # pragma: no cover - lightweight import fallback
-    ray = None
+import ray
 
 from slim.utils.http_utils import is_port_available
 
@@ -36,13 +32,8 @@ class SingletonMeta(type):
             cls._instances[cls] = instance
         return cls._instances[cls]
 
-    def clear_instances(cls):
-        cls._instances = {}
-
 
 def get_current_node_ip():
-    if ray is None:
-        raise ModuleNotFoundError("ray is required to query the current node IP")
     address = ray._private.services.get_node_ip_address()
     # strip ipv6 address
     address = address.strip("[]")
@@ -77,11 +68,3 @@ def should_run_periodic_action(
         return True
 
     return (rollout_id + 1) % interval == 0
-
-
-def group_by(iterable, key=None):
-    """Similar to itertools.groupby, but do not require iterable to be sorted"""
-    ret = defaultdict(list)
-    for item in iterable:
-        ret[key(item) if key is not None else item].append(item)
-    return dict(ret)

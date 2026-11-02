@@ -41,16 +41,19 @@ from slim.utils.profile_utils import TrainProfiler
 from slim.utils.seqlen_balancing import build_token_budget_partitions
 from slim.utils.timer import Timer, inverse_timer, timer, with_defer
 from slim.utils.trajectory_batch import TrajectoryBatch
+from slim.utils.types import BULK_FIELDS
 
 from . import checkpoint
 from .data_packing import (
+    PACK_FIELDS,
+    build_document_ids,
     pack_sequences,
-    unpack_sequences,
     update_packed_targets,
 )
-from .loss import count_global_denominators
+from .loss import count_global_denominators, reduce_weighted_sequence_mean
 from .lr_scheduler import get_lr_scheduler
 from .models import validate_config
+from .packed_cp_forward import prepare_forward
 from .topology import NeMoTopology
 
 logger = logging.getLogger(__name__)
@@ -105,6 +108,9 @@ class NeMoTrainer(RayWorker):
     """Compose Slim's rollout lifecycle with NeMo distributed components."""
 
     _train_log_prefix = "train"
+    # The bulk fields and the optional per-token trajectory fields the role reads.
+    bulk_fields: tuple[str, ...] = BULK_FIELDS
+    pack_fields: tuple[str, ...] = PACK_FIELDS
 
     def __init__(self, world_size, rank, master_addr, master_port):
         configure_logger()
@@ -123,9 +129,6 @@ class NeMoTrainer(RayWorker):
     @property
     def model_parts(self) -> list[torch.nn.Module]:
         return [self.model]
-
-    def _steps_per_rollout(self) -> int:
-        return self.args.rollout_batch_size * self.args.n_samples_per_prompt // self.args.global_batch_size
 
     def _init_distributed(self, args: Namespace) -> None:
         self.args = args
@@ -173,13 +176,6 @@ class NeMoTrainer(RayWorker):
         self._init_distributed(args)
         self._setup_topology()
         torch.manual_seed(args.seed)
-        self.train_parallel_config = {
-            "dp_size": self.dp_size,
-            "cp_size": self.cp_size,
-            "ep_size": self.topology.expert_model_parallel_size,
-        }
-        if args.debug_rollout_only:
-            return 0
 
         self._need_offload = args.rollout_colocate or args.critic_colocate
         if dist.get_rank() == 0:
@@ -224,10 +220,27 @@ class NeMoTrainer(RayWorker):
 
     @property
     def checkpoint_model(self) -> torch.nn.Module:
-        return getattr(self, "_checkpoint_model", self.model)
+        return self.model
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         raise NotImplementedError
+
+    def _microbatch_loss(
+        self,
+        pack: dict,
+        prepared,
+        *,
+        num_documents: int,
+        global_sequences: torch.Tensor,
+        global_tokens: torch.Tensor,
+        loss_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Run the forward pass of one prepared microbatch and return its loss and detached metrics."""
+        raise NotImplementedError
+
+    def _forward_context(self, model: torch.nn.Module, prepared):
+        """Context for the forward and backward passes of `model` on one prepared microbatch."""
+        return contextlib.nullcontext()
 
     def _train_microbatch(
         self,
@@ -237,7 +250,68 @@ class NeMoTrainer(RayWorker):
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        raise NotImplementedError
+        loss_weights = torch.tensor(
+            pack["loss_weights"],
+            dtype=torch.float32,
+            device=torch.cuda.current_device(),
+        )
+        prepared = prepare_forward(
+            self.model,
+            self.device_mesh,
+            pack,
+            padding_token_id=self.tokenizer.pad_token_id,
+        )
+        if is_final:
+            self._prepare_final_backward()
+        with (
+            self._sync_context(is_final),
+            prepared.context_factory(),
+            self._forward_context(self.model, prepared),
+        ):
+            loss, metrics = self._microbatch_loss(
+                pack,
+                prepared,
+                num_documents=pack["cu_seqlens"].numel() - 1,
+                global_sequences=global_sequences,
+                global_tokens=global_tokens,
+                loss_weights=loss_weights,
+            )
+            (loss * self.backward_group_size).backward()
+        return metrics
+
+    def _forward_only(
+        self,
+        model: torch.nn.Module,
+        packed_batches: list[dict],
+        name: str,
+        *,
+        store_key: str,
+        forward,
+    ) -> None:
+        """Store the gathered output of `forward` for every pack under `store_key`, without gradients.
+
+        `forward` maps one prepared pack to a CP-local value per token.
+        """
+        modules = self.model_parts if model is self.model else [model]
+        training = [module.training for module in modules]
+        for module in modules:
+            module.eval()
+        try:
+            with timer(name), torch.no_grad():
+                iterator = tqdm(packed_batches, desc=name, disable=dist.get_rank() != 0)
+                for pack in self.prof.iterate_train_log_probs(iterator):
+                    prepared = prepare_forward(
+                        model,
+                        self.device_mesh,
+                        pack,
+                        padding_token_id=self.tokenizer.pad_token_id,
+                    )
+                    with prepared.context_factory(), self._forward_context(model, prepared):
+                        local_values = forward(prepared)
+                    pack[store_key] = prepared.gather(local_values).squeeze(0).cpu()
+        finally:
+            for module, mode in zip(modules, training, strict=True):
+                module.train(mode)
 
     def _run_optimizer_steps(self, packed_batches: list[dict], grad_accum: list[int], name: str) -> None:
         """Run one optimizer step per gradient-accumulation group of packed microbatches."""
@@ -273,12 +347,10 @@ class NeMoTrainer(RayWorker):
 
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
-        if not self.args.debug_rollout_only and dist.get_rank() == 0:
-            ray.get(rollout_manager.set_train_parallel_config.remote(self.train_parallel_config))
 
     @timer
     def sleep(self) -> None:
-        if not self._need_offload or self.args.debug_rollout_only:
+        if not self._need_offload:
             return
         for model_part in self.model_parts:
             _move_module(model_part, "cpu")
@@ -288,7 +360,7 @@ class NeMoTrainer(RayWorker):
 
     @timer
     def wake_up(self) -> None:
-        if not self._need_offload or self.args.debug_rollout_only:
+        if not self._need_offload:
             return
         device = torch.device("cuda", torch.cuda.current_device())
         for model_part in self.model_parts:
@@ -297,7 +369,7 @@ class NeMoTrainer(RayWorker):
         dist.barrier(group=get_gloo_group())
 
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
-        if self.args.debug_rollout_only or self._checkpoint_save_dir is None:
+        if self._checkpoint_save_dir is None:
             return
         checkpoint.save(self, rollout_id, force_sync=force_sync)
 
@@ -331,7 +403,7 @@ class NeMoTrainer(RayWorker):
                     num_packs=pack_count,
                 )
 
-            step_batches = pack_sequences(step_trajectories, partitions=partitions)
+            step_batches = pack_sequences(step_trajectories, partitions=partitions, fields=self.pack_fields)
             for pack in step_batches:
                 pack["_document_indices"] = [index + start for index in pack["_document_indices"]]
             packed_batches.extend(step_batches)
@@ -346,7 +418,7 @@ class NeMoTrainer(RayWorker):
             return self._packed_data(batch)
         packed_batches, grad_accum = self._precomputed_packed_data
         self._precomputed_packed_data = None
-        update_packed_targets(packed_batches, batch.trajectories)
+        update_packed_targets(packed_batches, batch.trajectories, self.pack_fields)
         return packed_batches, grad_accum
 
     @staticmethod
@@ -357,11 +429,11 @@ class NeMoTrainer(RayWorker):
             start = end
 
     def train(self, rollout_id: int, rollout_data_ref: list) -> None:
-        if self.args.debug_rollout_only:
-            return
         self.wake_up()
         with inverse_timer("train_wait"), timer("train"):
-            batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+            # Cached packs already hold the bulk fields, so a cache hit fetches only the batch, for its targets.
+            bulk_fields = () if self._precomputed_packed_data is not None else self.bulk_fields
+            batch = process_rollout_data(rollout_data_ref, self.dp_rank, bulk_fields)
             packed_batches, grad_accum = self._take_packed_data(batch)
             self._train_core(rollout_id, packed_batches, grad_accum)
 
@@ -369,7 +441,6 @@ class NeMoTrainer(RayWorker):
             rollout_id=rollout_id,
             args=self.args,
             is_primary_rank=dist.get_rank() == 0,
-            compute_total_fwd_flops=None,
         )
         self.sleep()
         clear_memory()
@@ -466,21 +537,29 @@ class NeMoTrainer(RayWorker):
             self.dp_group,
             torch.cuda.current_device(),
         )
+        weight_sum = weight_sum.cpu()
         sums = torch.zeros(len(metric_keys), dtype=torch.float64)
         for packed_batch in packed_batches:
-            for document in unpack_sequences(packed_batch):
-                mask = document["loss_masks"].to(torch.float64)
-                denominator = mask.sum().clamp_min(1)
-                for slot, metric_key in enumerate(metric_keys):
-                    metric = document.get(metric_key)
-                    if isinstance(metric, torch.Tensor):
-                        sums[slot] += document["loss_weights"] * (metric.to(torch.float64) * mask).sum() / denominator
+            mask = packed_batch["loss_masks"].to(torch.float64)
+            document_ids = build_document_ids(packed_batch["cu_seqlens"])
+            num_documents = packed_batch["cu_seqlens"].numel() - 1
+            loss_weights = torch.tensor(packed_batch["loss_weights"], dtype=torch.float64)
+            for slot, metric_key in enumerate(metric_keys):
+                sums[slot] += reduce_weighted_sequence_mean(
+                    packed_batch[metric_key].to(torch.float64),
+                    mask,
+                    document_ids,
+                    num_documents,
+                    weight_sum,
+                    None,
+                    loss_weights,
+                )
         sums = sums.to(device=torch.cuda.current_device(), dtype=torch.float32)
         dist.all_reduce(sums, group=self.dp_group)
         if dist.get_rank() == 0:
             log_dict = {
                 f"{self._train_log_prefix}/{metric_key}": value
-                for metric_key, value in zip(metric_keys, (sums / weight_sum).tolist(), strict=True)
+                for metric_key, value in zip(metric_keys, sums.tolist(), strict=True)
             }
             log_dict["train/step"] = self.global_step
             logging_utils.log(self.args, log_dict)

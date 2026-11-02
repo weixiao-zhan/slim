@@ -41,16 +41,10 @@ class RolloutDataSource(DataSource):
         self.sample_offset = 0
         self.requeue: list[dict] = []
 
-        if args.rollout_global_dataset:
-            self.base_dataset = load_hf_dataset(args.prompt_data)
-            self.dataset = self._dataset_for_epoch(self.epoch_id)
-        else:
-            self.base_dataset = None
-            self.dataset = None
+        self.base_dataset = load_hf_dataset(args.prompt_data)
+        self.dataset = self._dataset_for_epoch(self.epoch_id)
 
     def _dataset_for_epoch(self, epoch_id):
-        if self.base_dataset is None:
-            return None
         if not self.args.rollout_shuffle:
             return self.base_dataset
         return self.base_dataset.shuffle(seed=self.args.rollout_seed + epoch_id)
@@ -60,9 +54,6 @@ class RolloutDataSource(DataSource):
         remaining = num_prompts - len(examples)
         if remaining <= 0:
             return examples
-
-        if self.dataset is None:
-            return examples + [{} for _ in range(remaining)]
 
         if self.sample_offset + remaining <= len(self.dataset):
             examples.extend(self.dataset[idx] for idx in range(self.sample_offset, self.sample_offset + remaining))
@@ -90,9 +81,6 @@ class RolloutDataSource(DataSource):
             self.requeue.extend(examples)
 
     def save(self, rollout_id):
-        if not self.args.rollout_global_dataset:
-            return
-
         state_dict = {
             "sample_offset": self.sample_offset,
             "epoch_id": self.epoch_id,
@@ -103,8 +91,6 @@ class RolloutDataSource(DataSource):
         torch.save(state_dict, path)
 
     def load(self, rollout_id=None):
-        if not self.args.rollout_global_dataset:
-            return
         if self.args.load is None:
             return
 

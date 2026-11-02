@@ -76,6 +76,7 @@ def test_multimodal_positions_are_built_per_document_with_local_media():
             return {"position_ids": positions}
 
     pack = {
+        "tokens": torch.tensor([10, 11, 20, 21, 22]),
         "cu_seqlens": torch.tensor([0, 2, 5], dtype=torch.int32),
         "multimodal_inputs": {
             "image_grid_thw": torch.tensor([[1, 2, 2]]),
@@ -87,7 +88,7 @@ def test_multimodal_positions_are_built_per_document_with_local_media():
         },
     }
     model_batch = {
-        "input_ids": torch.tensor([[10, 11, 20, 21, 22]]),
+        "input_ids": pack["tokens"].unsqueeze(0),
         **pack["multimodal_inputs"],
     }
 
@@ -99,6 +100,9 @@ def test_multimodal_positions_are_built_per_document_with_local_media():
     assert "video_grid_thw" not in calls[0]
     assert "image_grid_thw" not in calls[1]
     assert calls[1]["video_grid_thw"].tolist() == [[2, 2, 2]]
+    # Every later forward of the pack reuses its positions.
+    assert torch.equal(build_packed_position_ids(Model(), pack, dict(model_batch)), positions)
+    assert len(calls) == 2
 
 
 @pytest.mark.unit

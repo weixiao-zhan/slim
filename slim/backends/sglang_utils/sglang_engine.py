@@ -1,7 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import ipaddress
 import logging
 import multiprocessing
 import os
@@ -14,23 +13,9 @@ from sglang.srt.utils import kill_process_tree
 from urllib3.exceptions import NewConnectionError
 
 from slim.ray.ray_worker import RayWorker
-from slim.utils.http_utils import get_host_info
+from slim.utils.http_utils import _wrap_ipv6, get_host_info
 
 logger = logging.getLogger(__name__)
-
-
-def get_base_gpu_id(args, rank):
-    num_gpus = min(args.num_gpus_per_node, args.rollout_num_gpus_per_replica)
-    # Rollout engines start after the training span (0 when colocated/rollout-only).
-    if args.debug_rollout_only or args.rollout_colocate:
-        rollout_offset = 0
-    elif args.critic_train_only:
-        rollout_offset = args.critic_num_gpus
-    elif args.critic_colocate or not args.use_critic:
-        rollout_offset = args.actor_num_gpus
-    else:
-        rollout_offset = args.actor_num_gpus + args.critic_num_gpus
-    return (rollout_offset + rank * num_gpus) % args.num_gpus_per_node
 
 
 def _to_local_gpu_id(physical_gpu_id: int) -> int:
@@ -52,10 +37,7 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
 
 
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
-    if getattr(server_args, "encoder_only", False):
-        from sglang.srt.disaggregation.encode_server import launch_server
-    else:
-        from sglang.srt.entrypoints.http_server import launch_server
+    from sglang.srt.entrypoints.http_server import launch_server
 
     multiprocessing.set_start_method("spawn", force=True)
     # This flag pin SGLang CUDA_VISIBLE_DEVICES per rank 
@@ -113,58 +95,20 @@ def _wait_server_healthy(base_url, api_key, is_process_alive):
 
 
 class SGLangEngine(RayWorker):
-    def __init__(
-        self,
-        args,
-        rank: int,
-        worker_type: str = "regular",
-        base_gpu_id: int | None = None,
-        sglang_overrides: dict | None = None,
-        num_gpus_per_replica: int | None = None,
-    ):
+    def __init__(self, args, rank: int, base_gpu_id: int):
         self.args = args
         self.rank = rank
-        self.worker_type = worker_type
         self.base_gpu_id = base_gpu_id
-        self.sglang_overrides = sglang_overrides or {}
-        self.num_gpus_per_replica = num_gpus_per_replica
+        self.weights_update_group_name = None
 
-    def init(
-        self,
-        dist_init_addr,
-        port,
-        nccl_port,
-        host=None,
-        disaggregation_bootstrap_port=None,
-    ):
+    def init(self, dist_init_addr, port, nccl_port, host=None):
         host = host or get_host_info()[1]
-
-        def _format_v6_uri(addr):
-            if not addr or addr.startswith("["):
-                return addr
-            try:
-                if ipaddress.ip_address(addr).version == 6:
-                    return f"[{addr}]"
-            except ValueError:
-                pass
-            return addr
-
-        host = _format_v6_uri(host)
+        host = _wrap_ipv6(host)
         ip_part, port_part = dist_init_addr.rsplit(":", 1)
-        dist_init_addr = f"{_format_v6_uri(ip_part)}:{port_part}"
+        dist_init_addr = f"{_wrap_ipv6(ip_part)}:{port_part}"
 
         server_args_dict, external_engine_need_check_fields = _compute_server_args(
-            self.args,
-            self.rank,
-            dist_init_addr,
-            nccl_port,
-            host,
-            port,
-            self.worker_type,
-            disaggregation_bootstrap_port,
-            base_gpu_id=self.base_gpu_id,
-            sglang_overrides=self.sglang_overrides,
-            num_gpus_per_replica=self.num_gpus_per_replica,
+            self.args, self.rank, dist_init_addr, nccl_port, host, port, self.base_gpu_id
         )
 
         self.node_rank = server_args_dict["node_rank"]
@@ -326,19 +270,12 @@ class SGLangEngine(RayWorker):
     def check_weights(self, action: str):
         return self._make_request("weights_checker", {"action": action})
 
-    def update_weights_from_disk(self, model_path: str, load_format: str | None = None):
-        """Reload weights from *model_path* without restarting the engine.
-
-        Used for non-updatable (frozen) models that overlap with training:
-        after offload, weights are restored from disk instead of CPU cache.
-        """
-        payload = {"model_path": model_path}
-        if load_format is not None:
-            payload["load_format"] = load_format
-        return self._make_request("update_weights_from_disk", payload)
-
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
-        return self._make_request(
+        # The trainer reconnects every engine after another engine restarts, so a surviving engine
+        # still holds the group of the last connection.
+        if self.weights_update_group_name is not None:
+            self._make_request("destroy_weights_update_group", {"group_name": self.weights_update_group_name})
+        result = self._make_request(
             "init_weights_update_group",
             {
                 "master_address": master_address,
@@ -349,21 +286,18 @@ class SGLangEngine(RayWorker):
                 "backend": backend,
             },
         )
-
-    def destroy_weights_update_group(self, group_name):
-        try:
-            return self._make_request(
-                "destroy_weights_update_group",
-                {
-                    "group_name": group_name,
-                },
-            )
-        except requests.exceptions.RequestException:
-            # catch the case there the engine is just created and does not have the group.
-            pass
+        self.weights_update_group_name = group_name
+        return result
 
     def update_weights_from_distributed(
-        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+        self,
+        names,
+        dtypes,
+        shapes,
+        group_name,
+        flush_cache=False,
+        weight_version: str | None = None,
+        load_format: str | None = None,
     ):
         payload = {
             "names": names,
@@ -371,6 +305,7 @@ class SGLangEngine(RayWorker):
             "shapes": shapes,
             "group_name": group_name,
             "flush_cache": flush_cache,
+            "load_format": load_format,
         }
         if weight_version is not None:
             payload["weight_version"] = weight_version
@@ -397,40 +332,6 @@ class SGLangEngine(RayWorker):
         """Close the weight-update session and finalize in-place-quantized weights."""
         return self._make_request("end_weight_update")
 
-    def start_profile(
-        self,
-        # The output directory
-        output_dir: str | None = None,
-        # If set, it profile as many as this number of steps.
-        # If it is set, profiling is automatically stopped after this step, and
-        # the caller doesn't need to run stop_profile.
-        start_step: int | None = None,
-        num_steps: int | None = None,
-        activities: list[str] | None = None,
-        profile_by_stage: bool = False,
-        with_stack: bool | None = None,
-        record_shapes: bool | None = None,
-    ):
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/start_profile",
-            json={
-                "output_dir": output_dir,
-                "start_step": start_step,
-                "num_steps": num_steps,
-                "activities": activities,
-                "profile_by_stage": profile_by_stage,
-                "with_stack": with_stack,
-                "record_shapes": record_shapes,
-            },
-        )
-        response.raise_for_status()
-        return response
-
-    def stop_profile(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/stop_profile", json={})
-        response.raise_for_status()
-        return response
-
     def simulate_crash(self):
         if self.args.rollout_external or not getattr(self, "process", None):
             logger.info(
@@ -450,17 +351,11 @@ def _compute_server_args(
     nccl_port,
     host,
     port,
-    worker_type: str = "regular",
-    disaggregation_bootstrap_port: int | None = None,
-    base_gpu_id: int | None = None,
-    sglang_overrides: dict | None = None,
-    num_gpus_per_replica: int | None = None,
+    base_gpu_id: int,
 ):
-    _gpus_per_replica = num_gpus_per_replica or args.rollout_num_gpus_per_replica
-    nnodes = max(1, _gpus_per_replica // args.num_gpus_per_node)
+    nnodes = max(1, args.rollout_num_gpus_per_replica // args.num_gpus_per_node)
     node_rank = rank % nnodes
-    base = base_gpu_id if base_gpu_id is not None else get_base_gpu_id(args, rank)
-    base = _to_local_gpu_id(base)
+    base = _to_local_gpu_id(base_gpu_id)
     kwargs = {
         "model_path": args.rollout_load,
         "trust_remote_code": True,
@@ -477,7 +372,7 @@ def _compute_server_args(
         "gpu_id_step": 1,
         "base_gpu_id": base,
         # parallel
-        "tp_size": _gpus_per_replica // args.sglang_pp_size,
+        "tp_size": args.rollout_num_gpus_per_replica // args.sglang_pp_size,
         "dp_size": args.sglang_dp_size,
         "pp_size": args.sglang_pp_size,
         "ep_size": args.sglang_ep_size,
@@ -501,57 +396,20 @@ def _compute_server_args(
     if args.use_rollout_routing_replay:
         kwargs["enable_return_routed_experts"] = True
 
-    if worker_type == "prefill":
-        kwargs["disaggregation_mode"] = "prefill"
-        kwargs["load_balance_method"] = "round_robin"
-        kwargs["disaggregation_bootstrap_port"] = disaggregation_bootstrap_port
-    elif worker_type == "decode":
-        kwargs["disaggregation_mode"] = "decode"
-        kwargs["prefill_round_robin_balance"] = True
-    elif worker_type == "encoder":
-        kwargs["encoder_only"] = True
-
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 
     server_arg_fields = fields(ServerArgs)
-    server_arg_field_names = {attr.name for attr in server_arg_fields}
-    unused_keys = set(kwargs.keys())
     for attr in server_arg_fields:
-        if worker_type == "decode" and attr.name == "enable_hierarchical_cache":
-            continue
         if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
-        unused_keys.discard(attr.name)
 
     # Default context_length from the single source of truth if not set via --sglang-context-length.
     if kwargs.get("context_length") is None:
         kwargs["context_length"] = args.max_context_len
 
-    # Per-server-group overrides from --sglang-config YAML.
-    # Applied after base args so they take highest priority.
-    if sglang_overrides:
-        for key, value in sglang_overrides.items():
-            normalized_key = key.replace("-", "_")
-            if normalized_key != key:
-                logger.warning(
-                    f"sglang_overrides key '{key}' normalized to '{normalized_key}' (rank={rank}). "
-                    "Please use underscore style in YAML overrides."
-                )
-            if normalized_key in kwargs:
-                logger.info(
-                    f"sglang_overrides: overriding {normalized_key}={kwargs[normalized_key]} -> {value} (rank={rank})"
-                )
-            kwargs[normalized_key] = value
-            if normalized_key in server_arg_field_names:
-                unused_keys.discard(normalized_key)
-            else:
-                unused_keys.add(normalized_key)
-
-    # for compatibility with old args
-    if len(unused_keys) > 0:
-        logger.info(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
-        for key in unused_keys:
-            kwargs.pop(key)
+    unknown_keys = kwargs.keys() - {attr.name for attr in server_arg_fields}
+    if unknown_keys:
+        raise ValueError(f"Not SGLang ServerArgs fields: {sorted(unknown_keys)} (rank={rank})")
 
     return kwargs, external_engine_need_check_fields
 

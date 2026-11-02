@@ -14,7 +14,7 @@ from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
 
 
-async def _rule_based_reward(args, episode: Episode, **kwargs) -> int | float:
+def _rule_based_reward(args, episode: Episode, **kwargs) -> int | float:
     metadata = episode.example.get("metadata") or {}
     if isinstance(metadata, str):
         import json
@@ -48,7 +48,8 @@ async def async_rm(args, episode: Episode, **kwargs) -> None:
     if args.custom_rm_path is not None:
         await load_function(args.custom_rm_path)(args, episode, **kwargs)
     else:
-        episode.reward = await _rule_based_reward(args, episode, **kwargs)
+        # The built-in scorers are synchronous CPU work, such as SymPy, so they run off the worker's event loop.
+        episode.reward = await asyncio.to_thread(_rule_based_reward, args, episode, **kwargs)
 
 
 async def batched_async_rm(args, episodes: list[Episode], **kwargs) -> None:

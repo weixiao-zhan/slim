@@ -172,7 +172,7 @@ A document is one trajectory. `--loss-normalization-unit` sets $w_d$: `episode` 
 
 GSPO computes differentiable per-document CP reductions before expanding each sequence statistic back to its local tokens.
 
-`--loss-normalization-unit token` selects policy token-sum reduction. Policy diagnostics use the same selected reduction. Entropy, reference KL, mismatch diagnostics, and clipped critic value regression use sequence-mean reduction.
+`--loss-normalization-unit token` selects policy token-sum reduction. Policy diagnostics (`pg_clipfrac`, `pg_kl_k3`) use the same selected reduction. Entropy, reference KL, score-centering diagnostics, and clipped critic value regression use sequence-mean reduction.
 
 ## Routing Replay
 
@@ -210,6 +210,7 @@ AutoModel's `CheckpointingConfig` and `Checkpointer` save model and optimizer st
 ```
 
 Actor checkpoints use the Qwen3.5 state-dict adapter and can export consolidated Hugging Face safetensors according to `--checkpoint-save-consolidated`.
+The export also holds the original `config.json` of `--hf-checkpoint` and the processor files, which include the tokenizer. Without a processor, it holds the tokenizer files.
 
 Critic checkpoints use one native composite module containing the backbone and scalar head. This keeps the value head and all optimizer parameter groups in the same distributed checkpoint. Critic consolidated HF export is disabled because the composite critic is not a Hugging Face causal language model.
 
@@ -268,7 +269,6 @@ RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 uv run --no-sync slim-train \
   --max-tokens-per-gpu 8192 \
   --advantage-estimator grpo \
   --disable-group-advantage-std-normalization \
-  --old-logprob-source rollout \
   --use-rollout-routing-replay \
   --eps-clip 0.2 \
   --eps-clip-high 0.28 \
@@ -336,7 +336,7 @@ The heterogeneous multimodal harness derives one fixed 256-episode fixture from 
 bash tests/run_nemo_heterogeneous_multimodal.sh
 ```
 
-Actor-old log probabilities are recomputed on each fixed pack immediately before backward, which makes actor-old versus current \(k_3\) KL zero. The harness requires every physical rank to enter the synchronized vision path. Text-only ranks use a dummy visual input to preserve FSDP collective ordering, and the dummy result contributes a zero-valued autograd dependency when the vision tower is trainable. It also verifies the DP1-only modality layout, unchanged frozen vision parameters, and nonzero trainable vision updates.
+The harness records the rollout log probabilities with a forward on each fixed pack immediately before backward, which makes the rollout versus current \(k_3\) KL zero. The harness requires every physical rank to enter the synchronized vision path. Text-only ranks use a dummy visual input to preserve FSDP collective ordering, and the dummy result contributes a zero-valued autograd dependency when the vision tower is trainable. It also verifies the DP1-only modality layout, unchanged frozen vision parameters, and nonzero trainable vision updates.
 
 GPU qualification covers dense CP, MoE CP and EP composition, heterogeneous multimodal batches, both vision freeze states, routing replay, checkpoint resume, and NeMo versus SGLang target log-probability parity.
 

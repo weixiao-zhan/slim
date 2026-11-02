@@ -8,18 +8,13 @@ from __future__ import annotations
 import logging
 
 import torch
-import torch.distributed as dist
-from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
-from tqdm import tqdm
 
 from slim.utils.data import process_rollout_data
 from slim.utils.ppo_utils import compute_value_loss
-from slim.utils.timer import timer
 
 from .base import NeMoTrainer
 from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
-from .packed_cp_forward import prepare_forward
 from .loss import reduce_weighted_sequence_mean
 from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
@@ -32,10 +27,16 @@ class CriticNeMoTrainer(NeMoTrainer):
 
     role = "critic"
     _train_log_prefix = "train/critic"
+    bulk_fields = ("multimodal_inputs",)
+    pack_fields = ("values", "value_targets")
 
     @property
     def model_parts(self) -> list[torch.nn.Module]:
         return [self.model, self.value_head]
+
+    @property
+    def checkpoint_model(self) -> torch.nn.Module:
+        return self.critic_model
 
     def _resolve_checkpoint_paths(self) -> str:
         self._checkpoint_load_dir = self.args.critic_load
@@ -55,7 +56,7 @@ class CriticNeMoTrainer(NeMoTrainer):
             self.model,
             self.distributed_setup,
         )
-        self._checkpoint_model = CriticModel(self.model, self.value_head)
+        self.critic_model = CriticModel(self.model, self.value_head)
 
         backbone_parameters = [
             parameter for parameter in self.model.parameters() if parameter.requires_grad
@@ -68,14 +69,14 @@ class CriticNeMoTrainer(NeMoTrainer):
                 "params": backbone_parameters,
                 "name": "critic",
                 "max_lr": self.args.lr_critic,
-                "start_step": self.args.lr_critic_start_step * self._steps_per_rollout(),
+                "start_step": self.args.lr_critic_start_step * self.args.num_steps_per_rollout,
             },
             {
                 "params": head_parameters,
                 "name": "critic_value_head",
                 "max_lr": self.args.lr_critic_value_head,
                 "start_step": self.args.lr_critic_value_head_start_step
-                * self._steps_per_rollout(),
+                * self.args.num_steps_per_rollout,
             },
         ]
         self.optimizer = build_optimizer(
@@ -87,40 +88,22 @@ class CriticNeMoTrainer(NeMoTrainer):
         self.model.train()
         self.value_head.train()
 
-    def _forward_values(self, prepared) -> torch.Tensor:
-        model_batch = dict(prepared.model_batch)
-        model_batch["output_hidden_states"] = True
-        model_batch["logits_to_keep"] = 1
-        output = self.model(**model_batch)
-        return self.value_head(get_final_hidden_states(output))
-
     def compute_values(self, rollout_data_ref: list) -> dict:
-        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.bulk_fields)
         packed_batches, grad_accum = self._packed_data(batch)
 
         self.wake_up()
-        self.model.eval()
-        self.value_head.eval()
-        with timer("critic_compute_values"), torch.no_grad():
-            for pack in tqdm(packed_batches, desc="critic_values", disable=dist.get_rank() != 0):
-                prepared = prepare_forward(
-                    self.model,
-                    self.device_mesh,
-                    pack,
-                    padding_token_id=self.tokenizer.pad_token_id,
-                )
-                with prepared.context_factory():
-                    local_values = self._forward_values(prepared)
-                full_values = prepared.gather(local_values, fill=0)
-                pack["cur_values"] = fill_document_terminal_slots(
-                    full_values.squeeze(0),
-                    pack["cu_seqlens"],
-                ).detach().cpu()
-        self.model.train()
-        self.value_head.train()
+        self._forward_only(
+            self.model,
+            packed_batches,
+            "critic_compute_values",
+            store_key="cur_values",
+            forward=lambda prepared: self.critic_model(**prepared.model_batch),
+        )
 
         all_values: list[torch.Tensor | None] = [None] * len(batch)
         for pack in packed_batches:
+            pack["cur_values"] = fill_document_terminal_slots(pack["cur_values"], pack["cu_seqlens"])
             for document_index, document in zip(
                 pack["_document_indices"],
                 unpack_sequences(pack),
@@ -129,66 +112,53 @@ class CriticNeMoTrainer(NeMoTrainer):
                 all_values[document_index] = document["cur_values"]
 
         self._cache_packed_data(packed_batches, grad_accum)
+        # The advantage estimator reads the values of CP rank 0; every CP rank holds the same values.
         return {
             "dp_rank": self.dp_rank,
             "cp_rank": self.cp_rank,
-            "values": all_values,
+            "values": all_values if self.cp_rank == 0 else None,
         }
 
-    def _train_microbatch(
+    def _microbatch_loss(
         self,
         pack: dict,
+        prepared,
         *,
-        is_final: bool,
+        num_documents: int,
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        prepared = prepare_forward(
-            self.model,
-            self.device_mesh,
-            pack,
-            padding_token_id=self.tokenizer.pad_token_id,
+        loss_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        values = self.critic_model(**prepared.model_batch)
+        mask = prepared.fields["loss_masks"].to(values.dtype)
+        old_values = prepared.fields["old_values"].to(values.dtype)
+        value_targets = prepared.fields["value_targets"].to(values.dtype)
+        value_values, clip_values = compute_value_loss(
+            values,
+            old_values,
+            value_targets,
+            self.args.value_clip,
         )
-        if is_final:
-            self._prepare_final_backward()
-        loss_weights = torch.tensor(
-            pack["loss_weights"],
-            dtype=torch.float32,
-            device=torch.cuda.current_device(),
+        document_ids = prepared.fields["document_ids"]
+        value_loss = reduce_weighted_sequence_mean(
+            value_values,
+            mask,
+            document_ids,
+            num_documents,
+            global_sequences,
+            self.cp_group,
+            loss_weights,
         )
-        with self._sync_context(is_final), prepared.context_factory():
-            values = self._forward_values(prepared)
-            mask = prepared.fields["loss_masks"].to(values.dtype)
-            old_values = prepared.fields["old_values"].to(values.dtype)
-            value_targets = prepared.fields["value_targets"].to(values.dtype)
-            value_values, clip_values = compute_value_loss(
-                values,
-                old_values,
-                value_targets,
-                self.args.value_clip,
-            )
-            document_ids = prepared.fields["document_ids"]
-            num_documents = pack["cu_seqlens"].numel() - 1
-            value_loss = reduce_weighted_sequence_mean(
-                value_values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
-            value_clipfrac = reduce_weighted_sequence_mean(
-                clip_values,
-                mask,
-                document_ids,
-                num_documents,
-                global_sequences,
-                self.cp_group,
-                loss_weights,
-            )
-            (value_loss * self.backward_group_size).backward()
-        return {
+        value_clipfrac = reduce_weighted_sequence_mean(
+            clip_values,
+            mask,
+            document_ids,
+            num_documents,
+            global_sequences,
+            self.cp_group,
+            loss_weights,
+        )
+        return value_loss, {
             "value_loss": value_loss.detach(),
             "value_clipfrac": value_clipfrac.detach(),
         }

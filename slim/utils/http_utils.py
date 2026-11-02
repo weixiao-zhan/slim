@@ -4,9 +4,7 @@
 import asyncio
 import ipaddress
 import logging
-import multiprocessing
 import os
-import random
 import socket
 
 import httpx
@@ -16,17 +14,6 @@ from sglang_router.launch_router import launch_router
 logger = logging.getLogger(__name__)
 
 SLIME_HOST_IP_ENV = "SLIME_HOST_IP"
-
-
-def find_available_port(base_port: int):
-    port = base_port + random.randint(100, 1000)
-    while True:
-        if is_port_available(port):
-            return port
-        if port < 60000:
-            port += 42
-        else:
-            port -= 43
 
 
 def is_port_available(port):
@@ -127,23 +114,6 @@ def run_router(args):
     except Exception as e:
         logger.info(e)
         return 1
-
-
-def terminate_process(process: multiprocessing.Process, timeout: float = 1.0) -> None:
-    """Terminate a process gracefully, with forced kill as fallback.
-
-    Args:
-        process: The process to terminate
-        timeout: Seconds to wait for graceful termination before forcing kill
-    """
-    if not process.is_alive():
-        return
-
-    process.terminate()
-    process.join(timeout=timeout)
-    if process.is_alive():
-        process.kill()
-        process.join()
 
 
 _http_client: httpx.AsyncClient | None = None

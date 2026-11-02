@@ -1,7 +1,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import contextlib
 
 from sglang.srt.server_args import ServerArgs
@@ -92,72 +91,18 @@ def add_sglang_arguments(parser):
     # Default the engine console log level to "warning"
     parser.set_defaults(sglang_log_level="warning")
 
-    # PD disaggregation / multi-group config
-    parser.add_argument(
-        "--prefill-num-servers",
-        type=int,
-        default=None,
-        help="Number of prefill servers for disaggregation.",
-    )
-    parser.add_argument(
-        "--sglang-config",
-        type=str,
-        default=None,
-        help=(
-            "Path to a YAML config for SGLang engine deployment. "
-            "Defines server_groups with worker_type (regular/prefill/decode/placeholder), "
-            "num_gpus per group, and optional per-group 'overrides' dict of "
-            "ServerArgs field names that override the base --sglang-* CLI args. "
-            "Placeholder groups reserve GPU slots without creating engines. "
-            "Mutually exclusive with --prefill-num-servers."
-        ),
-    )
-
     return parser
 
 
 def validate_args(args):
-    # Compute effective TP size considering PP size
     if args.sglang_pp_size > 1:
         assert args.rollout_num_gpus_per_replica % args.sglang_pp_size == 0, (
             f"rollout_num_gpus_per_replica ({args.rollout_num_gpus_per_replica}) must be divisible by "
             f"sglang_pp_size ({args.sglang_pp_size})"
         )
-        args.sglang_tp_size = args.rollout_num_gpus_per_replica // args.sglang_pp_size
-    else:
-        args.sglang_tp_size = args.rollout_num_gpus_per_replica
 
     if args.sglang_dp_size > 1:
         assert args.sglang_enable_dp_attention
 
     if args.router_ip:
         args.router_ip = _wrap_ipv6(args.router_ip)
-
-    # Mutual-exclusion checks for PD disaggregation / sglang-config.
-    assert not (
-        args.prefill_num_servers is not None and args.rollout_external
-    ), "prefill_num_servers cannot be set when rollout_external is set."
-
-    assert not (
-        args.sglang_config is not None and args.rollout_external
-    ), "sglang_config cannot be set when rollout_external is set."
-
-    assert not (
-        args.sglang_config is not None and args.prefill_num_servers is not None
-    ), "sglang_config and prefill_num_servers are mutually exclusive. Use server_groups in the YAML config instead."
-
-
-def sglang_parse_args():
-    """
-    Parse sglang server arguments independently using a separate ArgumentParser.
-    Uses parse_known_args() to only consume sglang-related arguments from sys.argv,
-    allowing the remaining arguments to be parsed by the training backend separately.
-
-    Returns:
-        argparse.Namespace: Parsed sglang arguments (all attributes prefixed with sglang_).
-    """
-    parser = argparse.ArgumentParser(add_help=False)
-    add_sglang_arguments(parser)
-
-    args, _ = parser.parse_known_args()
-    return args

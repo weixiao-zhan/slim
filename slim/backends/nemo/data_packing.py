@@ -10,9 +10,11 @@ contiguous block delimited by ``cu_seqlens``, and every reduction keyed on
 
 from __future__ import annotations
 
+from itertools import accumulate
+
 import torch
 
-from slim.utils.types import Trajectory
+from slim.utils.types import TOKEN_FIELDS, Trajectory, as_cpu_tensor
 
 SEQUENCE_FIELDS = frozenset(
     {
@@ -25,38 +27,47 @@ SEQUENCE_FIELDS = frozenset(
         "rollout_topk_log_probs",
         "rollout_topk_token_ids",
         "rollout_routed_experts",
-        "actor_old_log_probs",
         "ref_log_probs",
         "cur_log_probs",
         "entropy",
         "old_values",
         "cur_values",
-        "mismatch_weights",
-        "mismatch_masks",
     }
 )
 TRAINING_FIELDS = SEQUENCE_FIELDS - {"tokens", "position_ids", "cur_log_probs", "cur_values", "entropy"}
+# Pack field of each trajectory training target.
+_TARGET_PACK_FIELDS = {"advantages": "advantages", "value_targets": "value_targets", "values": "old_values"}
+# Optional per-token trajectory fields a pack can carry. A role packs the subset it reads.
+PACK_FIELDS = (
+    "advantages",
+    "values",
+    "value_targets",
+    "rollout_log_probs",
+    "rollout_topk_log_probs",
+    "rollout_topk_token_ids",
+    "rollout_routed_experts",
+)
 
 
-def _as_tensor(value: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
-    return value.detach().to(device="cpu", dtype=dtype)
-
-
-def _optional_source_field(trajectories: list[Trajectory], indices: list[int], name: str, dtype: torch.dtype):
+def _optional_source_field(trajectories: list[Trajectory], indices: list[int], name: str):
     values = [getattr(trajectories[index], name, None) for index in indices]
     present = [value is not None and len(value) > 0 for value in values]
     if any(present) and not all(present):
         raise ValueError(f"{name} must be present for every trajectory in a pack or for none")
     if not all(present):
         return None
-    return torch.cat([_as_tensor(value, dtype=dtype) for value in values])
+    return torch.cat([as_cpu_tensor(value, dtype=TOKEN_FIELDS[name].dtype) for value in values])
 
 
 def pack_sequences(
     trajectories: list[Trajectory],
     partitions: list[list[int]] | None = None,
+    fields: tuple[str, ...] = PACK_FIELDS,
 ) -> list[dict]:
-    """Build CPU-resident physical packs from explicit trajectory partitions."""
+    """Build CPU-resident physical packs from explicit trajectory partitions.
+
+    `fields` names the optional per-token trajectory fields to pack, from `PACK_FIELDS`.
+    """
     if not trajectories:
         return []
 
@@ -74,10 +85,10 @@ def pack_sequences(
         loss_mask_parts = []
         for index in indices:
             trajectory = trajectories[index]
-            tokens = _as_tensor(trajectory.token_ids, dtype=torch.long)
+            tokens = as_cpu_tensor(trajectory.token_ids, dtype=TOKEN_FIELDS["token_ids"].dtype)
             token_parts.append(tokens)
             position_parts.append(torch.arange(tokens.numel(), dtype=torch.long))
-            loss_mask_parts.append(_as_tensor(trajectory.loss_mask, dtype=torch.int32))
+            loss_mask_parts.append(as_cpu_tensor(trajectory.loss_mask, dtype=TOKEN_FIELDS["loss_mask"].dtype))
             cu_seqlens.append(cu_seqlens[-1] + tokens.numel())
 
         pack = {
@@ -91,21 +102,10 @@ def pack_sequences(
             "_document_indices": list(indices),
         }
 
-        for name, dtype in (
-            ("advantages", torch.float32),
-            ("value_targets", torch.float32),
-            ("rollout_log_probs", torch.float32),
-            ("rollout_topk_log_probs", torch.float32),
-            ("rollout_topk_token_ids", torch.int32),
-            ("rollout_routed_experts", torch.int32),
-        ):
-            value = _optional_source_field(trajectories, indices, name, dtype)
+        for name in fields:
+            value = _optional_source_field(trajectories, indices, name)
             if value is not None:
-                pack[name] = value
-
-        values = [trajectories[index].values for index in indices]
-        if values[0] is not None:
-            pack["old_values"] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
+                pack[_TARGET_PACK_FIELDS.get(name, name)] = value
 
         multimodal_inputs: dict[str, list[torch.Tensor]] = {}
         multimodal_counts: dict[str, list[int]] = {}
@@ -128,16 +128,15 @@ def pack_sequences(
     return packs
 
 
+def multimodal_item_offsets(pack: dict) -> dict[str, list[int]]:
+    """Start offset of each document's items in every multimodal input, followed by the item total."""
+    return {name: [0, *accumulate(counts)] for name, counts in pack.get("multimodal_num_items", {}).items()}
+
+
 def unpack_sequences(pack: dict) -> list[dict]:
     """Return per-document views from a source-token-aligned batch."""
     cu_seqlens = pack["cu_seqlens"].tolist()
-
-    multimodal_offsets = {}
-    for name, counts in pack.get("multimodal_num_items", {}).items():
-        offsets = [0]
-        for count in counts:
-            offsets.append(offsets[-1] + count)
-        multimodal_offsets[name] = offsets
+    multimodal_offsets = multimodal_item_offsets(pack)
 
     documents = []
     for index, (token_start, token_end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=True)):
@@ -151,11 +150,6 @@ def unpack_sequences(pack: dict) -> list[dict]:
                     start, end = multimodal_offsets[media_name][index : index + 2]
                     if end > start:
                         document[name][media_name] = media_tensor[start:end]
-            elif name == "_mismatch_metrics":
-                document[name] = {
-                    metric_name: metric[token_start:token_end]
-                    for metric_name, metric in value.items()
-                }
             elif name in SEQUENCE_FIELDS:
                 document[name] = value[token_start:token_end]
             elif not isinstance(value, torch.Tensor):
@@ -164,19 +158,19 @@ def unpack_sequences(pack: dict) -> list[dict]:
     return documents
 
 
-def update_packed_targets(packs: list[dict], trajectories: list[Trajectory]) -> None:
+def update_packed_targets(
+    packs: list[dict],
+    trajectories: list[Trajectory],
+    fields: tuple[str, ...] = PACK_FIELDS,
+) -> None:
+    targets = [name for name in fields if name in _TARGET_PACK_FIELDS]
     for pack in packs:
-        indices = pack["_document_indices"]
-        for trajectory_field, pack_field in (
-            ("advantages", "advantages"),
-            ("value_targets", "value_targets"),
-            ("values", "old_values"),
-        ):
-            values = [getattr(trajectories[index], trajectory_field) for index in indices]
-            if values[0] is not None:
-                pack[pack_field] = torch.cat([_as_tensor(value, dtype=torch.float32) for value in values])
+        for name in targets:
+            value = _optional_source_field(trajectories, pack["_document_indices"], name)
+            if value is None:
+                pack.pop(_TARGET_PACK_FIELDS[name], None)
             else:
-                pack.pop(pack_field, None)
+                pack[_TARGET_PACK_FIELDS[name]] = value
 
 
 def fill_document_terminal_slots(
@@ -226,7 +220,4 @@ def build_training_fields(pack: dict) -> dict[str, torch.Tensor]:
         value = pack.get(name)
         if isinstance(value, torch.Tensor) and value.numel() > 0:
             fields[name] = value.unsqueeze(0)
-    for name, value in pack.get("_mismatch_metrics", {}).items():
-        if isinstance(value, torch.Tensor) and value.numel() > 0:
-            fields[f"mismatch/{name}"] = value.unsqueeze(0)
     return fields

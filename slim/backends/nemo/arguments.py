@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from types import UnionType
 from typing import Literal, get_args, get_origin, get_type_hints
 
 import yaml
@@ -16,7 +15,6 @@ import yaml
 
 @dataclass
 class NeMoArgs:
-    lr: float = 2e-5
     lr_warmup_init: float = 0.0
     lr_min: float = 0.0
     lr_warmup_steps: int = 0
@@ -51,29 +49,21 @@ class NeMoArgs:
     no_load_optim: bool = False
     no_load_rng: bool = False
 
-    wandb_project: str = "slim-nemo"
-    config: str | None = None
-
 
 def _field_type(field: dataclasses.Field, type_hints: dict[str, object]):
     field_type = type_hints[field.name]
     origin = get_origin(field_type)
-    if origin is UnionType:
-        members = [member for member in get_args(field_type) if member is not type(None)]
-        return members[0] if members else str
     if origin is Literal:
         choices = get_args(field_type)
         return type(choices[0]) if choices else str
     return field_type
 
 
-def _parse_nemo_cli(extra_args_provider=None, ignore_unknown_args=False):
+def _parse_nemo_cli(extra_args_provider):
     parser = argparse.ArgumentParser("NeMo AutoModel Training", allow_abbrev=False)
     parser.add_argument("--config", type=str, default=None, help="YAML config path")
     type_hints = get_type_hints(NeMoArgs)
     for field in dataclasses.fields(NeMoArgs):
-        if field.name == "config":
-            continue
         flag = f"--{field.name.replace('_', '-')}"
         field_type = _field_type(field, type_hints)
         if field_type is bool:
@@ -83,16 +73,12 @@ def _parse_nemo_cli(extra_args_provider=None, ignore_unknown_args=False):
             choices = get_args(annotation) if get_origin(annotation) is Literal else None
             parser.add_argument(flag, type=field_type, choices=choices, default=field.default)
 
-    if extra_args_provider is not None:
-        parser = extra_args_provider(parser)
-    if ignore_unknown_args:
-        args, _ = parser.parse_known_args()
-        return args
+    parser = extra_args_provider(parser)
     return parser.parse_args()
 
 
-def nemo_parse_args(extra_args_provider=None, ignore_unknown_args=False):
-    args = _parse_nemo_cli(extra_args_provider, ignore_unknown_args=ignore_unknown_args)
+def nemo_parse_args(extra_args_provider):
+    args = _parse_nemo_cli(extra_args_provider)
     if args.config:
         with open(args.config) as config_file:
             config = yaml.safe_load(config_file) or {}
@@ -105,7 +91,6 @@ def nemo_parse_args(extra_args_provider=None, ignore_unknown_args=False):
             setattr(args, key, value)
 
     args.rank = 0
-    args.world_size = args.actor_num_gpus
     validate_args(args)
     return args
 
@@ -123,7 +108,7 @@ def validate_args(args) -> None:
 
     cp = args.context_parallel_size
     ep = args.expert_model_parallel_size
-    world_size = getattr(args, "actor_num_gpus", None) or getattr(args, "world_size", 0)
+    world_size = args.actor_num_gpus
 
     for name, value in (
         ("context_parallel_size", cp),

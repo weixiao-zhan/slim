@@ -59,7 +59,7 @@ eval:
 Overridable fields are the `EvalDatasetConfig` fields:
 
 - Runtime: `eval_n_samples_per_prompt`, `max_context_len`
-- Extra: `rm_type`, `custom_generate_function_path`, `app_service`, `metadata_overrides`
+- Extra: `rm_type`, `custom_generate_function_path`, `metadata_overrides`
 
 Sampling is not per-dataset: eval samples at `--rollout-temperature`, and a dataset needing
 anything else points `custom_generate_function_path` at a generate function that sets it.
@@ -80,7 +80,6 @@ Use a separate eval function when inference/eval behavior must differ from train
 - Missing `name` in dataset entries
 - Odd-length `--eval-prompt-data` pairs
 - Setting `--eval-interval` without any eval dataset
-- Mixing reward dict outputs without `eval_reward_key` configuration
 
 ## Reference Locations
 
