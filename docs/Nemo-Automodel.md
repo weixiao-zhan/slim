@@ -10,6 +10,7 @@ First-party support covers:
 |---|---|
 | Dense Qwen3.5 | FSDP2 and context parallelism |
 | Qwen3.5 MoE | FSDP2, context parallelism, and expert parallelism |
+| Qwen3.8-Flash-Next (`qwen4_exp`), language model only | FSDP2, context parallelism, and expert parallelism greater than one |
 
 Tensor parallelism, pipeline parallelism, and sequence parallelism are not supported by this backend.
 Training updates model parameters directly; adapter fine-tuning is not part of the backend.
@@ -19,7 +20,7 @@ SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processi
 ## Patches
 
 AutoModel 0.7.0 provides Qwen3.5 token sharding, block-diagonal attention, CP-aware Gated DeltaNet, and CP vision frame sharding.
-`dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, native contiguous primary sharding for dense and MoE, and the original `config.json` in consolidated exports.
+`dependency_patches/nemo_automodel.py`, applied by `patch_dependencies.py`, enables the CP1 batch context, singleton K/V gather, packed Gated DeltaNet dispatch at CP1, FLA's varlen short convolution for packed Gated DeltaNet outside CP, native contiguous primary sharding for dense and MoE, and the original `config.json` in consolidated exports.
 Dense blocks use AutoModel's Qwen3.5 MoE full-attention class for packed dispatch; CP1 uses the same packed path as higher CP degrees.
 `models/qwen3_5.py` selects the packed runtime, binds CP meshes, and synchronizes heterogeneous vision branches across the FSDP group.
 `packed_cp_forward.py` owns the RL batch fields, token sharding, and forward context.
@@ -27,7 +28,7 @@ The corresponding upstream tracker is [NVIDIA-NeMo/Automodel#2985](https://githu
 
 ## Model Construction
 
-Backend-level model, forward, packing, and trainer modules are model-independent. Model-family validation, construction, position IDs, and computation-graph patches are registered under `slim.backends.nemo.models`; the Qwen3.5 implementation lives in `models/qwen3_5.py`.
+Backend-level model, forward, packing, and trainer modules are model-independent. `slim.backends.nemo.models.model_family(config)` selects a model-family module by the Hugging Face `model_type`. A family module validates the topology, builds the model, builds the unsharded model inputs of a pack, builds the CP sharder of those inputs and the RL token fields, and names the module types whose parameters the rollout engines keep from their own checkpoint. The Qwen3.5 family lives in `models/qwen3_5.py` and the Qwen3.8-Flash-Next family lives in `models/qwen3_8_flash_next.py`.
 
 Policy and reference models are created with:
 
@@ -75,7 +76,7 @@ Relevant arguments are:
 --activation-checkpointing
 ```
 
-The backend does not expose TP, PP, or sequence-parallel arguments. It rejects dense Qwen3.5 with EP greater than one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
+The backend does not expose TP, PP, or sequence-parallel arguments. It rejects dense Qwen3.5 with EP greater than one, Qwen3.8-Flash-Next with EP of one, invalid world-size factorizations, and MoE expert counts that are not divisible by EP.
 
 ## Unified Batch Interface
 
@@ -87,7 +88,8 @@ Dense and MoE training use the same Slim batch, forward, token-sharding, gather,
 |---|---|---|
 | `input_ids` | `[1, S]` | Concatenated document tokens |
 | `labels` | `[1, S]` | Next-token labels with `-100` at document ends |
-| `_packed_seq_ids` | `[1, S]` | One-based document IDs |
+| `_packed_seq_ids` | `[1, S]` | One-based document IDs (Qwen3.5) |
+| `cu_seqlens` | `[N + 1]` | Document boundaries (Qwen3.8-Flash-Next) |
 | RL token fields | `[1, S, ...]` | Source-token-aligned training values |
 | `cu_seqlens` | `[N + 1]` | Document boundaries before CP |
 
@@ -103,7 +105,7 @@ $$
 
 No label or prediction crosses a document boundary.
 
-`prepare_forward` constructs one contiguous block-diagonal `ContextParallelSharder`. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
+`prepare_forward` constructs the `ContextParallelSharder` of the model family. Its `shard_token_tensor` and `gather_token_tensor` methods handle every RL token field. Actor, reference, critic, dense, and MoE forwards use this same contract.
 
 Before role-local packing, the Ray `AdvantageEstimator` writes source-token-aligned training targets to each `Trajectory`. GRPO and GSPO produce `advantages`. PPO GAE consumes source-token-aligned critic value payloads and produces `advantages`, `values`, and `value_targets`. The actor consumes `advantages`; the critic consumes `old_values` and `value_targets`.
 
@@ -127,8 +129,10 @@ Every physical microbatch uses the indexed packed layout, including a pack conta
 
 | Configuration | Physical pack | AutoModel layout |
 |---|---|---|
-| CP1, dense or MoE | One or more documents | Full token order, even-length padding, block-diagonal per-document attention |
-| CP greater than one, dense or MoE | One or more documents | Contiguous block-diagonal CP |
+| Qwen3.5 CP1, dense or MoE | One or more documents | Full token order, even-length padding, block-diagonal per-document attention |
+| Qwen3.5 CP greater than one, dense or MoE | One or more documents | Contiguous block-diagonal CP |
+| Qwen3.8-Flash-Next CP1 | One or more documents | Full token order without padding; the model reads `cu_seqlens` |
+| Qwen3.8-Flash-Next CP greater than one | One or more documents | AutoModel's model-owned contiguous CP, padded to a multiple of \(4C\) |
 
 Full attention exchanges K/V through AutoModel's block-diagonal CP runtime. Gated DeltaNet consumes the same global document boundaries and resets convolution and recurrent state at each boundary.
 AutoModel's dense and MoE forwards embed and splice the full sequence, then select the contiguous primary-token shard.
@@ -184,7 +188,55 @@ Rollout routing choices are source-token aligned with shape:
 
 The final token row is zero because it has no prediction target. Packing concatenates routing rows with the same token boundaries as the model input, and the selected CP sharder maps them to model-local token order. Router replay remains active through backward so activation-checkpoint recomputation sees the same expert indices. The registry is process owned and clears replay state on context exit.
 
-Routing replay is valid only for Qwen3.5 MoE.
+Routing replay is valid for Qwen3.5 MoE and Qwen3.8-Flash-Next.
+
+## Qwen3.8-Flash-Next
+
+AutoModel's `qwen3_8_flash_next` implementation trains the language model of the `qwen4_exp` checkpoint. Slim builds it with `language_model_only`, so the policy has no vision tower and no MTP layer. SGLang keeps the checkpoint's MTP weights.
+
+| Component | Training |
+|---|---|
+| MoE experts, router, shared expert | Trained; EP greater than one is required |
+| Gated DeltaNet and full-attention projections | Trained |
+| Hyper-connections | Trained, as ordinary FSDP2 parameters of each decoder block |
+| PLE projections, norms, and short convolution | Trained |
+| PLE n-gram table, \(320{,}001{,}536 \times 160\) rows by width | Frozen; owner-sharded over the training world, excluded from FSDP2, the optimizer, and the weight sync |
+| QSA indexer | Frozen by AutoModel; its top-k is recomputed in every forward and replayed only within activation-checkpoint recomputation |
+
+The n-gram table holds 51.2B parameters, which is 102.4 GB in BF16. Each of \(W\) training ranks holds \(1/W\) of its rows, and lookups use two all-to-all exchanges over the training world. The checkpoint stores the table as 128 row shards, so \(W\) must divide 128.
+
+QSA uses AutoModel's FlexAttention sparse GQA. Query positions before 2,051 select every complete compressed block, which is dense causal attention; later positions select the 512 top-scoring compressed blocks of four tokens and the tokens of the current incomplete block. Under CP, each rank all-gathers the main K/V and the compressed index keys, the Gated DeltaNet passes its state across ranks, and the PLE short convolution reads a nine-token left halo.
+
+On sixteen H200 GPUs, the trained 125.7B parameters need about 117 GiB per GPU with `--master-weight-dtype fp32` and AdamW, which does not fit. The two-node run therefore uses `--master-weight-dtype auto`, which stores BF16 weights and BF16 AdamW moments; an update smaller than half a BF16 ulp of its weight is lost in that mode.
+
+The two-node GRPO run needs the checkpoint at the same path on both nodes:
+
+```bash
+MASTER_ADDR=<head IP> WORKER_HOST=<worker ssh host> \
+QWEN3_8_FLASH_NEXT_MODEL_DIR=/path/to/Qwen3.8-Flash-Next \
+bash tests/run_nemo_qwen3_8_flash_next.sh
+```
+
+The packed CP harness qualifies Qwen3.8-Flash-Next with a first document that crosses the sparse QSA boundary and the CP shard boundary:
+
+```bash
+uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+  --checkpoint /path/to/Qwen3.8-Flash-Next \
+  --context-parallel-size 1 \
+  --expert-parallel-size 8 \
+  --master-weight-dtype auto \
+  --first-document-length 4096 \
+  --output /tmp/qwen38-cp1-ep8.pt
+
+uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+  --checkpoint /path/to/Qwen3.8-Flash-Next \
+  --context-parallel-size 2 \
+  --expert-parallel-size 8 \
+  --master-weight-dtype auto \
+  --first-document-length 4096 \
+  --output /tmp/qwen38-cp2-ep8.pt \
+  --baseline-output /tmp/qwen38-cp1-ep8.pt
+```
 
 ## Learning Rate Schedule
 
@@ -219,6 +271,7 @@ Asynchronous save uses AutoModel staging and upload futures. Slim publishes `lat
 ## SGLang Weight Synchronization
 
 Every policy state tensor is converted through the model's `convert_single_tensor_to_hf` adapter before transport. This conversion handles Qwen3.5 native names, Gated DeltaNet fp32 holders, and grouped expert layouts.
+Parameters of the family's `ROLLOUT_STATIC_MODULES` are not sent: the engines keep the values they loaded from `--rollout-load`. For Qwen3.8-Flash-Next this is the frozen n-gram table, so the rollout checkpoint must hold the same table as the policy checkpoint.
 
 The configured rollout quantizer runs after conversion. Colocated engines receive flattened CUDA IPC buckets. Separate engines receive tensors through the temporary NCCL update group.
 

@@ -23,6 +23,8 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.quant import FUSED_EXPERT_SUFFIXES
 
+from .models import model_family
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +76,17 @@ def _compute_dtypes(model: torch.nn.Module) -> dict[str, torch.dtype]:
     return dtypes
 
 
+def _rollout_static_names(model: torch.nn.Module) -> frozenset[str]:
+    """State-dict names of the parameters that the engines keep from their own checkpoint."""
+    static_modules = model_family(model.config).ROLLOUT_STATIC_MODULES
+    return frozenset(
+        f"{prefix}.{name}".replace(_CHECKPOINT_PREFIX, "")
+        for prefix, module in model.named_modules()
+        if isinstance(module, static_modules)
+        for name, _ in module.named_parameters()
+    )
+
+
 class UpdateWeight(abc.ABC):
     def __init__(self, args: Namespace, model: torch.nn.Module, quantizer=None) -> None:
         self.args = args
@@ -81,6 +94,7 @@ class UpdateWeight(abc.ABC):
         self.quantizer = quantizer
         self.state_dict_adapter = model.state_dict_adapter
         self.compute_dtypes = _compute_dtypes(model)
+        self.static_names = _rollout_static_names(model)
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -98,7 +112,7 @@ class UpdateWeight(abc.ABC):
     def _hf_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         device = torch.device("cuda", torch.cuda.current_device())
         for name, state_tensor in self.model.state_dict().items():
-            if name.endswith("_extra_state"):
+            if name.endswith("_extra_state") or name in self.static_names:
                 continue
 
             # The engine runs what the trainer computes with, gathered in that dtype. The cast runs on
@@ -121,7 +135,10 @@ class UpdateWeight(abc.ABC):
         rank = dist.get_rank()
         if rank == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
+            # Colocated engines flushed their caches when they released the KV cache, which stays released
+            # during the update. Clearing the pools of a released KV cache writes unmapped memory.
+            if not self.args.rollout_colocate:
+                ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
             ray.get([engine.begin_weight_update.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
 

@@ -19,7 +19,7 @@ from transformers import AutoConfig
 from slim.backends.nemo.data_packing import fill_document_terminal_slots
 from slim.backends.nemo.packed_cp_forward import prepare_forward
 from slim.backends.nemo.loss import selective_log_probs
-from slim.backends.nemo.models import build_model, validate_config
+from slim.backends.nemo.models import build_model, model_family
 from slim.backends.nemo.topology import NeMoTopology
 
 MAX_LOG_PROB_DELTA = 0.3
@@ -42,10 +42,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline-output", type=Path)
     parser.add_argument("--activation-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--master-weight-dtype", choices=("fp32", "auto"), default="fp32")
+    # A first document longer than 2,051 tokens reaches Qwen3.8-Flash-Next's sparse QSA top-k.
+    parser.add_argument("--first-document-length", type=int, default=5)
     return parser.parse_args()
 
 
-def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
+def _model_args(activation_checkpointing: bool, master_weight_dtype: str) -> SimpleNamespace:
     return SimpleNamespace(
         activation_checkpointing=activation_checkpointing,
         defer_fsdp_grad_sync=False,
@@ -57,7 +60,7 @@ def _model_args(activation_checkpointing: bool) -> SimpleNamespace:
         freeze_vision_tower=True,
         freeze_audio_tower=True,
         freeze_language_model=False,
-        master_weight_dtype="fp32",
+        master_weight_dtype=master_weight_dtype,
     )
 
 
@@ -216,7 +219,7 @@ def main() -> None:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
-    args = _model_args(cli.activation_checkpointing)
+    args = _model_args(cli.activation_checkpointing, cli.master_weight_dtype)
     topology = NeMoTopology(
         world_size=world_size,
         context_parallel_size=cli.context_parallel_size,
@@ -225,7 +228,7 @@ def main() -> None:
     setup = topology.build(args)
     device_mesh = setup.mesh_context.device_mesh
     config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
-    validate_config(config, topology)
+    model_family(config).validate_config(config, topology)
     model = build_model(
         args,
         cli.checkpoint,
@@ -234,8 +237,8 @@ def main() -> None:
     )
     model.train()
 
-    baseline_pack = _pack([11, 12, 13, 14, 15])
-    changed_prefix_pack = _pack([21, 22, 23, 24, 25])
+    baseline_pack = _pack(list(range(11, 11 + cli.first_document_length)))
+    changed_prefix_pack = _pack(list(range(21, 21 + cli.first_document_length)))
     with torch.no_grad():
         with _capture_sequence_modules(model) as local_layer_outputs:
             baseline, baseline_prepared = _forward_log_probs(model, device_mesh, baseline_pack)
@@ -274,7 +277,8 @@ def main() -> None:
     gradient_name, gradient = _gradient_vector(model)
 
     fire_count = cp_attn_fire_count()
-    if cli.context_parallel_size > 1 and fire_count == 0:
+    # Models that own their CP attention exchange K/V without the block-diagonal runtime.
+    if cli.context_parallel_size > 1 and not getattr(model, "_owns_cp_attention", False) and fire_count == 0:
         raise RuntimeError("block-diagonal CP attention did not execute")
     if not torch.isfinite(full_log_probs).all() or not torch.isfinite(gradient).all():
         raise RuntimeError("non-finite packed CP outputs or gradients")

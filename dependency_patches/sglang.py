@@ -386,6 +386,28 @@ def patch_sglang_qwen_vl_image_token(qwen_vl: Path) -> bool:
     )
 
 
+def patch_sglang_flush_before_kv_release(weight_updater: Path) -> bool:
+    """Flush the request and cache pools before the memory saver unmaps the KV cache.
+
+    Clearing the hybrid pools (Mamba mapping, PLE short-conv and n-gram pools) writes device memory in the
+    KV cache region, so it must run while that region is still mapped.
+    """
+    return patch_file(
+        weight_updater,
+        [
+            (
+                """            self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
+            self.flush_cache()
+""",
+                """            self.flush_cache()
+            self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
+""",
+            )
+        ],
+        log_reason="SGLang flush before KV cache release",
+    )
+
+
 def apply() -> None:
     import sglang
 
@@ -398,6 +420,8 @@ def apply() -> None:
     patch_sglang_processor_output_contract(api_types)
     openai_files = patch_sglang_return_processor_outputs(sglang_dir)
     envelope_files = patch_sglang_meta_info_tensor_envelopes(sglang_dir)
+    weight_updater = sglang_dir / "srt" / "managers" / "scheduler_components" / "weight_updater.py"
+    patch_sglang_flush_before_kv_release(weight_updater)
     install_triton_configs(sglang_dir)
-    for path in (base_processor, qwen_vl, api_types, *openai_files, *envelope_files):
+    for path in (base_processor, qwen_vl, api_types, weight_updater, *openai_files, *envelope_files):
         py_compile.compile(str(path), doraise=True)

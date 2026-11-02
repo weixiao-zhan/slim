@@ -33,7 +33,7 @@ from slim.backends.nemo.data_packing import (
 from slim.backends.nemo.packed_cp_forward import prepare_forward
 from slim.backends.nemo.loss import count_global_denominators, selective_log_probs
 from slim.backends.nemo.lr_scheduler import get_lr_scheduler
-from slim.backends.nemo.models import validate_config
+from slim.backends.nemo.models import model_family
 from slim.backends.nemo.update_weight_utils import UpdateWeightFromTensor
 from slim.utils.distributed_utils import get_gloo_group, init_gloo_group
 from slim.utils.seqlen_balancing import build_token_budget_partitions
@@ -452,7 +452,7 @@ def _build_trainer(
     trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)
-    validate_config(trainer.hf_config, trainer.topology)
+    model_family(trainer.hf_config).validate_config(trainer.hf_config, trainer.topology)
     record("topology_built")
 
     backend_module = actor_module if cli.role == "actor" else critic_module

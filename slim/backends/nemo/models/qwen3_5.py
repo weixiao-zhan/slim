@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from functools import partial
 from types import MethodType
 
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForImageTextToText
-from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
+from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen, make_cp_blockdiag_batch_and_ctx
+from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
+from nemo_automodel.components.distributed.context_parallel.sharder import contiguous_local_indices
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
 from nemo_automodel.components.distributed.cp_vision_frame_shard import (
     CpVisionFrameShardingConfig,
@@ -23,9 +26,12 @@ from nemo_automodel.components.models.qwen3_5.parallelization import PARALLELIZE
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
 from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeForConditionalGeneration
 
+from .. import data_packing
 from ..data_packing import multimodal_item_offsets
 
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
+# Module types whose parameters the rollout engines keep from their own checkpoint.
+ROLLOUT_STATIC_MODULES: tuple[type, ...] = ()
 CP_VISION_SHARDING = CpVisionFrameShardingConfig(enabled=True)
 
 # Qwen3.5 has fp32 weights (GatedDeltaNet A_log and dt_bias). The Qwen3.5 parallelizer gives them their
@@ -40,13 +46,6 @@ def _is_moe(config) -> bool:
 
 
 def validate_config(config, topology) -> None:
-    model_type = config.model_type
-    if model_type not in MODEL_TYPES:
-        supported = ", ".join(MODEL_TYPES)
-        raise ValueError(
-            f"first-party NeMo training does not support model_type={model_type!r}; supported: {supported}"
-        )
-
     if not _is_moe(config):
         if topology.expert_model_parallel_size != 1:
             raise ValueError("dense Qwen3.5 requires expert_model_parallel_size=1")
@@ -291,3 +290,20 @@ def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: d
     if "mrope_position_ids" not in pack:
         pack["mrope_position_ids"] = _multimodal_position_ids(model, pack)
     return pack["mrope_position_ids"].to(device=device, non_blocking=True)
+
+
+def build_model_batch(model: torch.nn.Module, pack: dict) -> dict:
+    """Build the unsharded CPU model inputs of one physical pack."""
+    batch = data_packing.build_model_batch(pack)
+    batch["position_ids"] = build_packed_position_ids(model, pack, batch)
+    return batch
+
+
+def build_packed_cp_sharder(model: torch.nn.Module, device_mesh, *, padding_token_id: int) -> ContextParallelSharder:
+    """Build the contiguous block-diagonal sharder that every CP degree uses."""
+    return ContextParallelSharder(
+        device_mesh=device_mesh,
+        shard_batch=partial(make_cp_blockdiag_batch_and_ctx, shard_primary=False),
+        local_token_global_indices=contiguous_local_indices,
+        padding_token_id=padding_token_id,
+    )
