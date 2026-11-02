@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import logging
 import os
@@ -15,7 +16,6 @@ import ray
 import torch
 import torch.distributed as dist
 from nemo_automodel.components.moe.router_replay import RouterReplay
-from tqdm import tqdm
 
 from slim.utils.data import process_rollout_data
 from slim.utils.distributed_utils import get_gloo_group
@@ -31,7 +31,6 @@ from .data_packing import (
     SEQUENCE_FIELDS,
     unpack_sequences,
 )
-from .packed_cp_forward import prepare_forward
 from .loss import (
     entropy_from_logits,
     reduce_token_mean,
@@ -52,6 +51,13 @@ class ActorNeMoTrainer(NeMoTrainer):
 
     role = "actor"
     _train_log_prefix = "train/actor"
+    pack_fields = (
+        "advantages",
+        "rollout_log_probs",
+        "rollout_topk_log_probs",
+        "rollout_topk_token_ids",
+        "rollout_routed_experts",
+    )
 
     def _resolve_checkpoint_paths(self) -> str:
         self._checkpoint_load_dir = self.args.load
@@ -77,33 +83,46 @@ class ActorNeMoTrainer(NeMoTrainer):
         )
         self.model.train()
 
+    @contextlib.contextmanager
+    def _policy_offloaded(self, ref_model: torch.nn.Module | None = None):
+        """Hold the policy on CPU for the block, and `ref_model` on GPU if given."""
+        device = torch.device("cuda", torch.cuda.current_device())
+        _move_module(self.model, "cpu")
+        clear_memory()
+        dist.barrier(group=get_gloo_group())
+        if ref_model is not None:
+            _move_module(ref_model, device)
+            dist.barrier(group=get_gloo_group())
+        try:
+            yield
+        finally:
+            if ref_model is not None:
+                _move_module(ref_model, "cpu")
+            _move_module(self.model, device)
+            dist.barrier(group=get_gloo_group())
+
     def _create_ref_model(self, checkpoint_path: str) -> torch.nn.Module:
         if not os.path.isdir(checkpoint_path):
             raise ValueError(f"reference checkpoint must be a local directory: {checkpoint_path}")
 
-        _move_module(self.model, "cpu")
-        clear_memory()
-        dist.barrier(group=get_gloo_group())
-
-        # The frozen reference has no optimizer, so no master weights: it keeps the checkpoint's dtype.
-        ref_args = copy.copy(self.args)
-        ref_args.master_weight_dtype = "auto"
-        ref_model = build_model(
-            ref_args,
-            checkpoint_path,
-            self.distributed_setup,
-            routing_replay=False,
-        )
-        ref_model.eval()
-        ref_model.requires_grad_(False)
-        _move_module(ref_model, "cpu")
-        _move_module(self.model, torch.device("cuda", torch.cuda.current_device()))
-        dist.barrier(group=get_gloo_group())
+        with self._policy_offloaded():
+            # The frozen reference has no optimizer, so no master weights: it keeps the checkpoint's dtype.
+            ref_args = copy.copy(self.args)
+            ref_args.master_weight_dtype = "auto"
+            ref_model = build_model(
+                ref_args,
+                checkpoint_path,
+                self.distributed_setup,
+                routing_replay=False,
+            )
+            ref_model.eval()
+            ref_model.requires_grad_(False)
+            _move_module(ref_model, "cpu")
         return ref_model
 
     def _post_model_setup(self) -> None:
         self.ref_model = self._create_ref_model(self.args.ref_load) if self.args.kl_loss_coef != 0 else None
-        quantizer = Quantizer.maybe_from_checkpoint(self.args.rollout_load)
+        quantizer = Quantizer.maybe_from_checkpoint(self.args.rollout_load, self.args)
         if quantizer is not None:
             logger.info(
                 "Rollout weight quantization enabled with %s from %s",
@@ -113,88 +132,33 @@ class ActorNeMoTrainer(NeMoTrainer):
         updater_type = UpdateWeightFromTensor if self.args.rollout_colocate else UpdateWeightFromDistributed
         self.weight_updater = updater_type(self.args, self.model, quantizer)
 
-    def _compute_log_prob(
-        self,
-        model_tag: str,
-        packed_batches: list[dict],
-        *,
-        store_key: str,
-    ) -> None:
-        is_reference = model_tag == "ref"
-        active_model = self.ref_model if is_reference else self.model
+    def _compute_ref_log_probs(self, packed_batches: list[dict]) -> None:
+        def forward(prepared):
+            output = self.ref_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+            local_log_probs = selective_log_probs(
+                output.logits,
+                prepared.fields["labels"][:, prepared.loss_positions],
+                temperature=self.args.rollout_temperature,
+            )
+            return prepared.scatter_loss_values(local_log_probs)
 
-        if is_reference:
-            _move_module(self.model, "cpu")
-            clear_memory()
-            dist.barrier(group=get_gloo_group())
-            _move_module(active_model, torch.device("cuda", torch.cuda.current_device()))
-            dist.barrier(group=get_gloo_group())
-
-        active_model.eval()
-        try:
-            with timer(store_key), torch.no_grad():
-                iterator = tqdm(packed_batches, desc=store_key, disable=dist.get_rank() != 0)
-                for pack in self.prof.iterate_train_log_probs(iterator):
-                    prepared = prepare_forward(
-                        active_model,
-                        self.device_mesh,
-                        pack,
-                        padding_token_id=self.tokenizer.pad_token_id,
-                    )
-                    replay_enabled = not is_reference and self.args.use_rollout_routing_replay
-                    targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
-                    with prepared.context_factory(), replay_router_targets(targets):
-                        output = active_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
-                        local_log_probs = selective_log_probs(
-                            output.logits,
-                            prepared.fields["labels"][:, prepared.loss_positions],
-                            temperature=self.args.rollout_temperature,
-                        )
-                    pack[store_key] = prepared.gather(prepared.scatter_loss_values(local_log_probs)).squeeze(0).cpu()
-        finally:
-            if is_reference:
-                active_model.eval()
-                _move_module(active_model, "cpu")
-                _move_module(self.model, torch.device("cuda", torch.cuda.current_device()))
-                dist.barrier(group=get_gloo_group())
-            else:
-                active_model.train()
+        with self._policy_offloaded(self.ref_model):
+            self._forward_only(
+                self.ref_model,
+                packed_batches,
+                "ref_log_probs",
+                store_key="ref_log_probs",
+                forward=forward,
+            )
 
     def compute_log_probs(self, rollout_data_ref: list) -> None:
-        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.dp_size)
+        batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.bulk_fields)
         packed_batches, grad_accum = self._packed_data(batch)
-        if self.ref_model is not None or self._needs_actor_old_log_probs():
+        if self.ref_model is not None:
             self.wake_up()
-            if self.ref_model is not None:
-                self._compute_log_prob("ref", packed_batches, store_key="ref_log_probs")
-            if self._needs_actor_old_log_probs():
-                self._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
+            self._compute_ref_log_probs(packed_batches)
 
         self._cache_packed_data(packed_batches, grad_accum)
-
-    def _prepare_mismatch(self, pack: dict) -> None:
-        if not (self.args.mismatch_correction != "none" or self.args.get_mismatch_metrics):
-            return
-        if self.args.mismatch_correction == "none":
-            return
-
-        batches = unpack_sequences(pack)
-        correction = load_function(self.args.custom_mismatch_correction_function_path)
-        weights, masks, custom_metrics = correction(
-            args=self.args,
-            train_log_probs=[batch["actor_old_log_probs"] for batch in batches],
-            rollout_log_probs=[batch["rollout_log_probs"] for batch in batches],
-            loss_masks=[batch["loss_masks"] for batch in batches],
-        )
-        if weights is not None:
-            pack["mismatch_weights"] = torch.cat([torch.as_tensor(value) for value in weights])
-        if masks is not None:
-            pack["mismatch_masks"] = torch.cat([torch.as_tensor(value) for value in masks])
-        if custom_metrics:
-            pack["_mismatch_metrics"] = {
-                name: torch.cat([torch.as_tensor(value) for value in values])
-                for name, values in custom_metrics.items()
-            }
 
     def _policy_loss(
         self,
@@ -228,16 +192,17 @@ class ActorNeMoTrainer(NeMoTrainer):
             scored_token_ids = torch.cat((scored_token_ids, fields["rollout_topk_token_ids"].long()), dim=-1)
         scored_log_probs = selective_log_probs(logits, scored_token_ids, temperature=self.args.rollout_temperature)
         log_probs, topk_log_probs = scored_log_probs[..., 0], scored_log_probs[..., 1:]
-        old_key = "actor_old_log_probs" if self.args.old_logprob_source == "actor" else "rollout_log_probs"
-        old_log_probs = fields[old_key].to(log_probs.dtype)
+        rollout_log_probs = fields["rollout_log_probs"].to(log_probs.dtype)
         advantages = fields["advantages"].to(log_probs.dtype)
 
-        score, old_score = log_probs, old_log_probs
+        score, rollout_score = log_probs, rollout_log_probs
         if self.args.advantage_estimator == "gspo":
             # GSPO weighs the sequence-mean score by the sequence-level ratio.
             score = sequence_mean_at_tokens(log_probs, mask, document_ids, num_documents, self.cp_group)
-            old_score = sequence_mean_at_tokens(old_log_probs, mask, document_ids, num_documents, self.cp_group)
-        policy_log_ratio = old_score - score
+            rollout_score = sequence_mean_at_tokens(
+                rollout_log_probs, mask, document_ids, num_documents, self.cp_group
+            )
+        policy_log_ratio = rollout_score - score
 
         # The detached surrogate, $-A \operatorname{sg}[w_x] \log p_x$.
         surrogate_weight = partial(
@@ -262,10 +227,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             pg_values = pg_values + correction
             sequence_metrics["score_centering/topk_mass"] = topk_mass
             sequence_metrics["score_centering/rho"] = rho
-        effective_mask = fields.get("mismatch_masks", mask).to(mask.dtype)
-        if "mismatch_weights" in fields:
-            pg_values = pg_values * fields["mismatch_weights"].to(pg_values.dtype)
-        pg_loss = policy_mean(pg_values, effective_mask)
+        pg_loss = policy_mean(pg_values)
 
         zero = logits.new_zeros((), dtype=torch.float32)
         entropy_loss = zero if local_entropy is None else sequence_mean(local_entropy)
@@ -273,7 +235,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         if self.args.kl_loss_coef != 0:
             importance_ratio = None
             if self.args.use_unbiased_kl:
-                importance_ratio = torch.exp(log_probs - old_log_probs)
+                importance_ratio = torch.exp(log_probs - rollout_log_probs)
             kl_values = compute_approx_kl(
                 log_probs,
                 fields["ref_log_probs"].to(log_probs.dtype),
@@ -287,16 +249,11 @@ class ActorNeMoTrainer(NeMoTrainer):
             "loss": loss.detach(),
             "pg_loss": pg_loss.detach(),
             "pg_clipfrac": policy_mean(clipped).detach(),
-            "pg_kl_k3": policy_mean(torch.exp(-policy_log_ratio) + policy_log_ratio - 1).detach(),
+            "pg_kl_k3": policy_mean(compute_approx_kl(rollout_score, score, kl_loss_type="k3")).detach(),
             "entropy_loss": entropy_loss.detach(),
         }
         if self.args.kl_loss_coef != 0:
             metrics["kl_loss"] = kl_loss.detach()
-        if "actor_old_log_probs" in fields and "rollout_log_probs" in fields:
-            mismatch_ratio = fields["actor_old_log_probs"] - fields["rollout_log_probs"]
-            sequence_metrics["mismatch/kl_k3"] = torch.exp(mismatch_ratio) - mismatch_ratio - 1
-            sequence_metrics["mismatch/log_prob_abs_diff"] = mismatch_ratio.abs()
-        sequence_metrics.update((name, values) for name, values in fields.items() if name.startswith("mismatch/"))
         for name, values in sequence_metrics.items():
             metrics[name] = sequence_mean(values).detach()
         return loss, metrics
@@ -325,67 +282,46 @@ class ActorNeMoTrainer(NeMoTrainer):
         metrics = {name: value.detach() / normalization for name, value in raw_metrics.items()}
         return loss, metrics
 
-    def _train_microbatch(
+    def _forward_context(self, model: torch.nn.Module, prepared):
+        replay_enabled = model is self.model and self.args.use_rollout_routing_replay
+        return replay_router_targets(prepared.fields["rollout_routed_experts"] if replay_enabled else None)
+
+    def _microbatch_loss(
         self,
         pack: dict,
+        prepared,
         *,
-        is_final: bool,
+        num_documents: int,
         global_sequences: torch.Tensor,
         global_tokens: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        loss_weights = torch.tensor(
-            pack["loss_weights"],
-            dtype=torch.float32,
-            device=torch.cuda.current_device(),
+        loss_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        output = self.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        if self.args.loss_type == "custom_loss":
+            local_entropy = None
+            if self.args.entropy_coef != 0:
+                local_entropy = entropy_from_logits(output.logits)
+            local_log_probs = selective_log_probs(
+                output.logits,
+                prepared.fields["labels"][:, prepared.loss_positions],
+                temperature=self.args.rollout_temperature,
+            )
+            return self._custom_loss(pack, prepared, local_log_probs, local_entropy)
+        # The logits cover only the loss positions, so the loss reads its fields there too.
+        return self._policy_loss(
+            output.logits,
+            {name: value[:, prepared.loss_positions] for name, value in prepared.fields.items()},
+            num_documents=num_documents,
+            global_sequences=global_sequences,
+            global_tokens=global_tokens,
+            loss_weights=loss_weights,
         )
-        prepared = prepare_forward(
-            self.model,
-            self.device_mesh,
-            pack,
-            padding_token_id=self.tokenizer.pad_token_id,
-        )
-        if is_final:
-            self._prepare_final_backward()
-        replay_enabled = self.args.use_rollout_routing_replay
-        targets = prepared.fields["rollout_routed_experts"] if replay_enabled else None
-        with (
-            self._sync_context(is_final),
-            prepared.context_factory(),
-            replay_router_targets(targets),
-        ):
-            output = self.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
-            if self.args.loss_type == "custom_loss":
-                local_entropy = None
-                if self.args.entropy_coef != 0:
-                    local_entropy = entropy_from_logits(output.logits)
-                local_log_probs = selective_log_probs(
-                    output.logits,
-                    prepared.fields["labels"][:, prepared.loss_positions],
-                    temperature=self.args.rollout_temperature,
-                )
-                loss, metrics = self._custom_loss(pack, prepared, local_log_probs, local_entropy)
-            else:
-                # The logits cover only the loss positions, so the loss reads its fields there too.
-                loss, metrics = self._policy_loss(
-                    output.logits,
-                    {name: value[:, prepared.loss_positions] for name, value in prepared.fields.items()},
-                    num_documents=pack["cu_seqlens"].numel() - 1,
-                    global_sequences=global_sequences,
-                    global_tokens=global_tokens,
-                    loss_weights=loss_weights,
-                )
-            (loss * self.backward_group_size).backward()
-        return metrics
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         if self.ref_model is not None and "ref_log_probs" not in packed_batches[0]:
-            self._compute_log_prob("ref", packed_batches, store_key="ref_log_probs")
-        if self._needs_actor_old_log_probs() and "actor_old_log_probs" not in packed_batches[0]:
-            self._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
-        for pack in packed_batches:
-            self._prepare_mismatch(pack)
+            self._compute_ref_log_probs(packed_batches)
 
-        self._log_packed_metrics(packed_batches, ["actor_old_log_probs", "ref_log_probs", "advantages"])
+        self._log_packed_metrics(packed_batches, ["ref_log_probs", "advantages"])
         self._run_optimizer_steps(packed_batches, grad_accum, "actor_train")
 
     def _maybe_update_ref_model(self, rollout_id: int) -> None:
@@ -397,37 +333,23 @@ class ActorNeMoTrainer(NeMoTrainer):
             return
         self.ref_model.load_state_dict(self.model.state_dict())
 
-    def _needs_actor_old_log_probs(self) -> bool:
-        return (
-            self.args.old_logprob_source == "actor"
-            or self.args.mismatch_correction != "none"
-            or self.args.get_mismatch_metrics
-        )
-
     @timer
     def update_weights(self) -> None:  # type: ignore[override]
-        if self.args.debug_train_only or self.args.debug_rollout_only:
+        if self.args.debug_train_only:
             return
 
         if dist.get_rank() == 0:
-            ray.get(self.rollout_manager.recover_updatable_engines.remote())
+            ray.get(self.rollout_manager.recover_engines.remote())
         dist.barrier(group=get_gloo_group())
 
-        rollout_engines, rollout_engine_lock, num_new_engines, engine_gpu_counts, engine_gpu_offsets = ray.get(
-            self.rollout_manager.get_updatable_engines_and_lock.remote()
-        )
+        rollout_engines, num_new_engines, engine_actor_ranks = ray.get(self.rollout_manager.get_engines.remote())
         if dist.get_rank() == 0:
             Timer().add_count("restart_engines", num_new_engines)
         if num_new_engines > 0:
-            self.weight_updater.connect_rollout_engines(
-                rollout_engines,
-                rollout_engine_lock,
-                engine_gpu_counts=engine_gpu_counts,
-                engine_gpu_offsets=engine_gpu_offsets,
-            )
+            self.weight_updater.connect_rollout_engines(rollout_engines, engine_actor_ranks)
             dist.barrier(group=get_gloo_group())
             if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
+                ray.get(self.rollout_manager.clear_num_new_engines.remote())
 
         self.weight_updater.update_weights()
 

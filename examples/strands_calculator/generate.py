@@ -40,9 +40,9 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import AgentTool, ToolChoice, ToolGenerator, ToolSpec, ToolUse
 from strands_tools.calculator import calculator
 
-from slim.rollout.sglang_rollout import GenerateState, get_model_url
+from slim.rollout.sglang_rollout import GenerateState
 from slim.utils.http_utils import post
-from slim.utils.processing_utils import decode_tensor_envelopes
+from slim.utils.processing_utils import decode_b64_array, decode_output_top_logprobs, decode_tensor_envelopes
 from slim.utils.types import Episode, Trajectory
 
 # Generation cap of one model call.
@@ -142,7 +142,10 @@ class _TimeLimitedCalculator(AgentTool):
 class SGLangChatModel(OpenAIModel):
     """Strands' OpenAI provider served by SGLang, recording each call as a trajectory."""
 
-    def __init__(self, state: GenerateState, episode: Episode) -> None:
+    def __init__(self, state: GenerateState, episode: Episode, evaluation: bool) -> None:
+        # Only training reads the sampler top-K and the routed experts, so an eval rollout requests neither.
+        top_k = None if evaluation else state.args.use_score_centering
+        routing_replay_shape = None if evaluation else state.args.routing_replay_shape
         # Everything here is a `/v1/chat/completions` body field; Strands merges
         # `params` into the request it builds. Near the end of the context, the engine
         # lowers `max_tokens` to the tokens left, since slim enables `allow_auto_truncate`.
@@ -158,13 +161,13 @@ class SGLangChatModel(OpenAIModel):
         if episode.sampling_seed is not None:
             # The OpenAI endpoint spells the engine's `sampling_seed` as `seed`.
             params["seed"] = episode.sampling_seed
-        if state.args.use_score_centering is not None:
-            # Score centering reads the sampler top-K from `meta_info["output_top_logprobs"]`.
-            params["top_logprobs"] = state.args.use_score_centering
+        if top_k is not None:
+            # Score centering reads the sampler top-K from the flat `meta_info["output_top_logprobs_*"]` arrays.
+            params["top_logprobs"] = top_k
         if episode.has_multimodal:
             # Training reuses the tensors the engine ran, rather than reprocessing the media.
             params["return_processor_outputs"] = True
-        if state.args.routing_replay_shape is not None:
+        if routing_replay_shape is not None:
             # One call is one whole trajectory, so every position is in scope.
             params["return_routed_experts"] = True
             params["routed_experts_start_len"] = 0
@@ -172,7 +175,9 @@ class SGLangChatModel(OpenAIModel):
 
         self.state = state
         self.episode = episode
-        self.url = get_model_url(state.args, "actor", "/v1/chat/completions")
+        self.top_k = top_k
+        self.routing_replay_shape = routing_replay_shape
+        self.url = f"http://{state.args.router_ip}:{state.args.router_port}/v1/chat/completions"
         self.headers = (
             {"X-SMG-Routing-Key": episode.session_id}
             if state.args.router_policy == "consistent_hashing" and episode.session_id
@@ -203,9 +208,9 @@ class SGLangChatModel(OpenAIModel):
 
     def _record_trajectory(self, choice: Any) -> None:
         """Keep one call's prompt and generation as a standalone trajectory."""
-        # The per-token arrays arrive in meta_info as tensor envelopes.
+        # The per-token output arrays arrive in meta_info as base64 arrays.
         meta_info = choice.meta_info
-        prompt_token_ids = decode_tensor_envelopes(meta_info["prompt_token_ids"]).tolist()
+        prompt_token_ids = choice.prompt_token_ids
         output_logprobs = decode_tensor_envelopes(meta_info["output_token_logprobs"])
         output_token_ids = output_logprobs["token_ids"].tolist()
         prompt_predictions = len(prompt_token_ids) - 1
@@ -215,22 +220,22 @@ class SGLangChatModel(OpenAIModel):
             rollout_log_probs=[0.0] * prompt_predictions + output_logprobs["logprobs"].tolist(),
         )
 
-        if (top_k := self.state.args.use_score_centering) is not None:
+        if (top_k := self.top_k) is not None:
             # Inert rows for the prompt, then one row per generated token.
-            top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
+            top_logprobs, top_token_ids = decode_output_top_logprobs(meta_info)
             trajectory.rollout_topk_log_probs = torch.cat(
-                (torch.zeros((prompt_predictions, top_k), dtype=torch.float32), top_logprobs["logprobs"])
+                (torch.zeros((prompt_predictions, top_k), dtype=torch.float32), top_logprobs)
             )
             trajectory.rollout_topk_token_ids = torch.cat(
-                (torch.zeros((prompt_predictions, top_k), dtype=torch.int32), top_logprobs["token_ids"])
+                (torch.zeros((prompt_predictions, top_k), dtype=torch.int32), top_token_ids)
             )
 
         if self.episode.has_multimodal:
             trajectory.multimodal_inputs = decode_tensor_envelopes(meta_info["processor_outputs"])
 
-        if self.state.args.routing_replay_shape is not None:
-            experts = decode_tensor_envelopes(meta_info["routed_experts"])
-            trajectory.rollout_routed_experts = experts.reshape(-1, *self.state.args.routing_replay_shape)
+        if self.routing_replay_shape is not None:
+            experts = decode_b64_array(meta_info["routed_experts"], torch.int32)
+            trajectory.rollout_routed_experts = experts.reshape(-1, *self.routing_replay_shape)
 
         self.episode.trajectories.append(trajectory)
 
@@ -249,7 +254,7 @@ class SGLangChatModel(OpenAIModel):
         if payload["choices"][0]["finish_reason"] == "abort":
             # `abort` is the engine's own finish reason, outside the OpenAI schema below.
             raise _RequestAborted
-        if payload["usage"]["prompt_tokens"] < payload["choices"][0]["meta_info"]["prompt_token_ids"]["shape"][0]:
+        if payload["usage"]["prompt_tokens"] < len(payload["choices"][0]["prompt_token_ids"]):
             # The conversation outgrew the context and the engine cut the prompt to fit. What the
             # engine ran then matches no prompt the agent sent, so the call is dropped.
             raise MaxTokensReachedException("The conversation outgrew the context")
@@ -261,11 +266,10 @@ class SGLangChatModel(OpenAIModel):
 
 async def generate(state: GenerateState, episode: Episode, evaluation: bool = False) -> Episode:
     """Run one Strands calculator attempt and retain every model call it makes."""
-    del evaluation
     content: list[ContentBlock] = [_image_block(image) for image in episode.example.get("images") or []]
     content.append({"text": episode.example["prompt"]})
 
-    model = SGLangChatModel(state, episode)
+    model = SGLangChatModel(state, episode, evaluation)
     agent = Agent(
         model=model,
         tools=[_TimeLimitedCalculator()],

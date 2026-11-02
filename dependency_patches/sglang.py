@@ -25,6 +25,8 @@ def _install_configs(src_root: Path, dst_root: Path, label: str) -> int:
         if dst.exists() and dst.read_bytes() == src.read_bytes():
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
+        # Unlink first so a file hardlinked to the uv cache is not overwritten in place.
+        dst.unlink(missing_ok=True)
         shutil.copyfile(src, dst)
         copied += 1
     if copied:
@@ -40,7 +42,7 @@ def install_triton_configs(sglang_dir: Path) -> None:
     Source of truth is two in-repo dirs (version controlled, survive sglang upgrades):
       - tools/triton_moe_configs/triton_<ver>/E=*.json -> moe_runner triton_utils configs
         (fused-MoE kernel, keyed by triton version dir)
-      - tools/triton_fp8_configs/N=*.json              -> quantization configs (flat)
+      - tools/triton_fp8_configs/N=*.json              -> gemm configs (flat)
         (block-FP8 W8A8 GEMM; loader has no env override, so the file must live there)
     """
     repo_root = Path(__file__).resolve().parent.parent
@@ -51,7 +53,7 @@ def install_triton_configs(sglang_dir: Path) -> None:
     )
     _install_configs(
         repo_root / "tools" / "triton_fp8_configs",
-        sglang_dir / "kernels" / "ops" / "quantization" / "configs",
+        sglang_dir / "kernels" / "ops" / "gemm" / "configs",
         "Triton FP8 GEMM",
     )
 
@@ -241,56 +243,22 @@ def patch_sglang_return_processor_outputs(sglang_dir: Path) -> tuple[Path, ...]:
 
 
 def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...]:
-    """Return the per-token arrays of ``meta_info`` as tensor envelopes.
+    """Return the per-token output arrays of ``meta_info`` as base64 arrays.
 
     Upstream builds one Python tuple per token, and per top-K entry, then serializes
     them as JSON numbers. On a long generation that blocks the HTTP process long enough
-    to fail health checks. ``/generate`` and chat completions now return the output
-    logprobs, the top-K, the prompt token ids and the routed experts as base64 arrays,
-    and chat completions no longer copies the logprobs and prompt token ids into the
-    OpenAI choice: slim reads ``meta_info``. Streaming keeps the upstream lists, which
-    its per-chunk choices read.
+    to fail health checks. ``/generate`` and chat completions turn on SGLang's flat
+    base64 output top-K for every non-streaming request, and with it the output logprobs
+    come as tensor envelopes, encoded once on the finished output. Chat completions
+    leaves the OpenAI choice logprobs empty: slim reads ``meta_info``. Streaming keeps
+    the upstream lists, which its per-chunk choices read.
     """
-    io_struct = sglang_dir / "srt" / "managers" / "io_struct.py"
     tokenizer_manager = sglang_dir / "srt" / "managers" / "tokenizer_manager.py"
-    detokenizer_manager = sglang_dir / "srt" / "managers" / "detokenizer_manager.py"
     serving_chat = sglang_dir / "srt" / "entrypoints" / "openai" / "serving_chat.py"
     http_server = sglang_dir / "srt" / "entrypoints" / "http_server.py"
 
-    patch_file(
-        io_struct,
-        [
-            (
-                """    # Propagates trace context via Engine.generate/async_generate
-    external_trace_header: Optional[Dict[str, Any]] = None
-    received_time: Optional[float] = None
-""",
-                """    # Propagates trace context via Engine.generate/async_generate
-    external_trace_header: Optional[Dict[str, Any]] = None
-    received_time: Optional[float] = None
-    # Whether to return the per-token arrays of meta_info as tensor envelopes
-    return_tensor_envelopes: bool = False
-""",
-            ),
-            (
-                """            return_processor_outputs=self.return_processor_outputs,
-            external_trace_header=self.external_trace_header,
-            received_time=self.received_time,
-""",
-                """            return_processor_outputs=self.return_processor_outputs,
-            external_trace_header=self.external_trace_header,
-            received_time=self.received_time,
-            return_tensor_envelopes=self.return_tensor_envelopes,
-""",
-            ),
-        ],
-        log_reason="SGLang tensor-envelope request flag",
-    )
-
     slim_import = "from slim.utils.processing_utils import encode_processor_outputs\n"
-    envelope_import = (
-        "from slim.utils.processing_utils import encode_array_to_b64_envelope, encode_tensor_to_b64_envelope\n"
-    )
+    envelope_import = "from slim.utils.processing_utils import encode_array_to_b64_envelope\n"
     patch_file(
         tokenizer_manager,
         [
@@ -309,8 +277,10 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
         meta_info["output_token_logprobs"] = state.output_token_logprobs
         meta_info["output_token_logprobs_length"] = len(state.output_token_logprobs)
 """,
-                """        envelopes = state.obj.return_tensor_envelopes and not state.obj.stream
-        if not envelopes and len(state.output_token_logprobs_val) > len(state.output_token_logprobs):
+                """        # Flat output top logprobs bring the output logprobs as envelopes, encoded once
+        # on the finished output.
+        flat_output = state.obj.return_flat_raw_output_top_logprobs
+        if not flat_output and len(state.output_token_logprobs_val) > len(state.output_token_logprobs):
             state.output_token_logprobs.extend(
                 self.detokenize_logprob_tokens(
                     state.output_token_logprobs_val[len(state.output_token_logprobs) :],
@@ -320,61 +290,14 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
             )
 
         meta_info["input_token_logprobs"] = state.input_token_logprobs
-        # Envelopes are encoded once, on the finished output.
-        if not envelopes:
+        if not flat_output:
             meta_info["output_token_logprobs"] = state.output_token_logprobs
+        elif finished:
+            meta_info["output_token_logprobs"] = {
+                "logprobs": encode_array_to_b64_envelope(state.output_token_logprobs_val, np.float32),
+                "token_ids": encode_array_to_b64_envelope(state.output_token_logprobs_idx, np.int32),
+            }
         meta_info["output_token_logprobs_length"] = len(state.output_token_logprobs_val)
-""",
-            ),
-            (
-                """            if not use_flat_output:
-                if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
-""",
-                """            if not use_flat_output and not envelopes:
-                if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
-""",
-            ),
-            (
-                """                    # BatchStrOutput is pre-encoded by the detokenizer;
-                    # BatchTokenIDOutput (skip_tokenizer_init) bypasses it.
-                    if isinstance(val, torch.Tensor):
-                        val = pybase64.b64encode(val.numpy().tobytes()).decode("utf-8")
-                    meta_info["routed_experts"] = val
-""",
-                """                    # BatchStrOutput is pre-encoded by the detokenizer;
-                    # BatchTokenIDOutput (skip_tokenizer_init) bypasses it.
-                    if isinstance(val, torch.Tensor):
-                        val = encode_tensor_to_b64_envelope(val)
-                    meta_info["routed_experts"] = val
-""",
-            ),
-            (
-                """                meta_info["dp_rank"] = recv_obj.dp_ranks[i]
-
-            state.finished = recv_obj.finished_reasons[i] is not None
-""",
-                """                meta_info["dp_rank"] = recv_obj.dp_ranks[i]
-            # A non-streaming request returns only its finished output, so its envelopes are
-            # encoded here once instead of on every intermediate output.
-            if getattr(state.obj, "return_tensor_envelopes", False) and recv_obj.finished_reasons[i] is not None:
-                if state.prompt_token_ids is not None:
-                    meta_info["prompt_token_ids"] = encode_array_to_b64_envelope(state.prompt_token_ids, np.int32)
-                if state.obj.return_logprob and not state.obj.stream:
-                    meta_info["output_token_logprobs"] = {
-                        "logprobs": encode_array_to_b64_envelope(state.output_token_logprobs_val, np.float32),
-                        "token_ids": encode_array_to_b64_envelope(state.output_token_logprobs_idx, np.int32),
-                    }
-                    if state.obj.top_logprobs_num > 0:
-                        meta_info["output_top_logprobs"] = {
-                            "logprobs": encode_array_to_b64_envelope(
-                                state.output_top_logprobs_val, np.float32, state.obj.top_logprobs_num
-                            ),
-                            "token_ids": encode_array_to_b64_envelope(
-                                state.output_top_logprobs_idx, np.int32, state.obj.top_logprobs_num
-                            ),
-                        }
-
-            state.finished = recv_obj.finished_reasons[i] is not None
 """,
             ),
         ],
@@ -382,59 +305,28 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
     )
 
     patch_file(
-        detokenizer_manager,
-        [
-            (
-                "from sglang.srt.environ import envs\n",
-                "from sglang.srt.environ import envs\n"
-                "from slim.utils.processing_utils import encode_tensor_to_b64_envelope\n",
-            ),
-            (
-                """        routed_experts = self._b64_encode_per_request(recv_obj.routed_experts)
-""",
-                """        # An envelope carries the shape, which the raw base64 leaves to the reader.
-        routed_experts = (
-            None
-            if recv_obj.routed_experts is None
-            else [None if item is None else encode_tensor_to_b64_envelope(item) for item in recv_obj.routed_experts]
-        )
-""",
-            ),
-        ],
-        log_reason="SGLang routed-experts tensor envelope",
-    )
-
-    patch_file(
         serving_chat,
         [
             (
-                """            return_text_in_logprobs=True,
-            return_flat_raw_output_top_logprobs=""",
-                """            # Only the streaming choices print token text; the rest reads meta_info.
-            return_text_in_logprobs=request.stream,
-            return_tensor_envelopes=True,
-            return_flat_raw_output_top_logprobs=""",
+                """            return_flat_raw_output_top_logprobs=request.return_flat_raw_output_top_logprobs,
+            # GenerateReqInput rejects b64 without a flat flag; chat has only the output one
+            return_flat_raw_top_logprobs_b64=(
+                request.return_flat_raw_output_top_logprobs
+                and request.return_flat_raw_top_logprobs_b64
+            ),
+""",
+                """            # A non-streaming choice reads its output logprobs and top-K from meta_info.
+            return_flat_raw_output_top_logprobs=not request.stream,
+            return_flat_raw_top_logprobs_b64=not request.stream,
+""",
             ),
             (
                 """            choice_logprobs = None
             if request.logprobs:
                 choice_logprobs = self._process_response_logprobs(ret_item)
 """,
-                """            # The logprobs travel in meta_info as tensor envelopes.
+                """            # The logprobs travel in meta_info as base64 arrays.
             choice_logprobs = None
-""",
-            ),
-            (
-                """            choice_prompt_token_ids = (
-                ret_item.get("prompt_token_ids")
-                if request.return_prompt_token_ids or request.return_token_ids
-                else None
-            )
-""",
-                """            # return_prompt_token_ids reports them in meta_info as a tensor envelope.
-            choice_prompt_token_ids = (
-                ret_item.get("prompt_token_ids") if request.return_token_ids else None
-            )
 """,
             ),
         ],
@@ -450,14 +342,15 @@ def patch_sglang_meta_info_tensor_envelopes(sglang_dir: Path) -> tuple[Path, ...
 ''',
                 '''async def generate_request(obj: GenerateReqInput, request: Request):
     """Handle a generate request."""
-    obj.return_tensor_envelopes = True
+    # A non-streaming response carries its output logprobs and top-K as base64 arrays.
+    obj.return_flat_raw_output_top_logprobs = obj.return_flat_raw_top_logprobs_b64 = not obj.stream
 ''',
             ),
         ],
         log_reason="SGLang /generate tensor envelopes",
     )
 
-    return io_struct, tokenizer_manager, detokenizer_manager, serving_chat, http_server
+    return tokenizer_manager, serving_chat, http_server
 
 
 def patch_sglang_qwen_vl_image_token(qwen_vl: Path) -> bool:

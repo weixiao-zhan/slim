@@ -7,46 +7,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-_MISSING = object()
-
-# TODO: This is ugly, temporarily leave this. We should unify all the config name for dataset, default, and args. (advice from Tom.)
-DATASET_RUNTIME_SPECS: dict[str, dict[str, tuple[str, ...]]] = {
-    "eval_n_samples_per_prompt": {
-        "dataset_keys": ("eval_n_samples_per_prompt",),
-        "default_keys": ("eval_n_samples_per_prompt",),
-        "arg_attrs": ("eval_n_samples_per_prompt", "n_samples_per_prompt"),
-    },
-    "max_context_len": {
-        "dataset_keys": ("max_context_len",),
-        "default_keys": ("max_context_len",),
-        "arg_attrs": ("max_context_len",),
-    },
-}
-
-
-def _first_not_missing(*values: Any) -> Any:
-    for value in values:
-        if value is not _MISSING:
-            return value
-    return _MISSING
-
-
-def _pick_from_mapping(data: dict[str, Any], key_names: tuple[str, ...] | None) -> Any:
-    if key_names is None:
-        return _MISSING
-    for key_name in key_names:
-        if key_name in data:
-            return data[key_name]
-    return _MISSING
-
-
-def pick_from_args(args: Any, attrs: tuple[str, ...]) -> Any:
-    for attr in attrs:
-        value = getattr(args, attr, None)
-        if value is not None:
-            return value
-    return None
-
 
 def _ensure_metadata_overrides(value: Any) -> dict[str, Any]:
     if value is None:
@@ -70,10 +30,6 @@ class EvalDatasetConfig:
 
     # per-dataset custom generate function (e.g., for tool calling)
     custom_generate_function_path: str | None = None
-
-    # app_service URL for server mode generation (e.g., "http://localhost:18080")
-    # If set, eval will use ServerGenerationProxy to generate through AppServer
-    app_service: str | None = None
 
     metadata_overrides: dict[str, Any] = field(default_factory=dict)
 
@@ -129,19 +85,6 @@ def ensure_dataset_list(config: Any) -> list[dict[str, Any]]:
     raise TypeError("eval.datasets must be either a list or a mapping.")
 
 
-def _apply_dataset_field_overrides(
-    args: Any, dataset_cfg: dict[str, Any], defaults: dict[str, Any], spec_names: dict[str, Any]
-) -> None:
-    for field_name, spec in spec_names.items():
-        dataset_value = _pick_from_mapping(dataset_cfg, spec["dataset_keys"])
-        default_value = _pick_from_mapping(defaults, spec["default_keys"])
-        resolved_value = _first_not_missing(dataset_value, default_value)
-        if resolved_value is not _MISSING:
-            dataset_cfg[field_name] = resolved_value
-            continue
-        dataset_cfg[field_name] = pick_from_args(args, spec["arg_attrs"])
-
-
 def build_eval_dataset_configs(
     args: Any,
     raw_config: Iterable[dict[str, Any]],
@@ -151,7 +94,10 @@ def build_eval_dataset_configs(
     datasets: list[EvalDatasetConfig] = []
     for cfg in raw_config:
         cfg_dict = dict(cfg or {})
-        _apply_dataset_field_overrides(args, cfg_dict, defaults, DATASET_RUNTIME_SPECS)
+        cfg_dict.setdefault(
+            "eval_n_samples_per_prompt", defaults.get("eval_n_samples_per_prompt", args.eval_n_samples_per_prompt)
+        )
+        cfg_dict.setdefault("max_context_len", defaults.get("max_context_len", args.max_context_len))
         dataset = EvalDatasetConfig(**cfg_dict)
         datasets.append(dataset)
     return datasets

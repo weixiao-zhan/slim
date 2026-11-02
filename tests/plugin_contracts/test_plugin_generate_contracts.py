@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 
 import pytest
 
@@ -54,12 +53,8 @@ class FakeGenerateState:
         self.tokenizer = _FakeTokenizer()
         self.aborted = False
 
-    @contextmanager
-    def dp_rank_context(self):
-        yield 0
 
-
-async def custom_generate(state, episode: Episode):
+async def custom_generate(state, episode: Episode, evaluation: bool = False):
     episode.trajectories.append(Trajectory(token_ids=[11, 12, 13], generated_text="generated"))
     episode.reward = 0.25
     episode.status = Episode.Status.COMPLETED
@@ -79,7 +74,7 @@ async def custom_generate_with_evaluation(state, episode: Episode, evaluation: b
     return episode
 
 
-async def custom_generate_multi_trajectory(state, episode: Episode):
+async def custom_generate_multi_trajectory(state, episode: Episode, evaluation: bool = False):
     """Agentic attempt: a second trajectory appended for a sub-agent dispatch."""
     episode.trajectories.append(Trajectory(token_ids=[31, 32], generated_text="main-trajectory"))
     episode.trajectories.append(Trajectory(token_ids=[33, 34], generated_text="sub-agent-trajectory"))

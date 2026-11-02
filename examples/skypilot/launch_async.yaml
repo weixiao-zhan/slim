@@ -170,7 +170,6 @@ run: | # shell
     \
     --advantage-estimator gspo \
     --disable-group-advantage-std-normalization \
-    --old-logprob-source rollout \
     --eps-clip 0.2 \
     --eps-clip-high 0.28 \
     --entropy-coef 0.00 \

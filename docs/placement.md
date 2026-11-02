@@ -15,7 +15,7 @@ Each role declares an overall GPU total. Actor and critic each form one distribu
 | role | within its distributed world | data parallelism |
 |---|---|---|
 | actor / critic | FSDP2 with context parallelism and optional expert parallelism | pure FSDP across each complete training world |
-| rollout | one sglang engine with TP <br> and optional PP / EP / PD-disaggregation | router-balanced (DP) |
+| rollout | one sglang engine with TP <br> and optional PP / EP | router-balanced (DP) |
 
 
 ## Colocate
@@ -31,6 +31,7 @@ Slim supports two independent colocate strategy.
 ## Placement
 
 A single PACK'd Ray placement group (PG) is created over all nodes sorted by `(node_ip, gpu_id)`, then sliced by following per-role offsets (`placement_group.py:create_placement_groups`).
+The result is one `Placement`: the bundle range and GPU ids of each role, and whether rollout shares the training GPUs. The rollout offload and the weight-sync layout of each engine come from it.
 
 | # | rollout colocate | critic colocate | PG total | critic_offset | rollout_offset | async-capable | layout |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|---|
@@ -144,7 +145,7 @@ When actor and critic are on **disjoint** GPUs they run **concurrently**. Each h
                  GPU memory resident
 phase               A      C      
 ─────────────────────────────────
-1. compute          ■      ■      ref/actor-old log-probs (A) ∥ compute_values (C)
+1. compute          ■      ■      ref log-probs (A) ∥ compute_values (C)
 ────────────────────┼──────┼──── ◀ critic values ready
 2. targets          ░      ░      AdvantageEstimator publishes Episode shards with training targets
 3. train            ■      ■      actor.train ∥ critic.train
@@ -171,7 +172,7 @@ phase                A      C
 4. critic.train      ·      ■        critic consumes old values and value targets
 5. critic.sleep() ───┼──────┼──── ◀ HANDOFF: critic is offloaded before actor wakeup
 6. actor.wake_up()   ■      ·
-7. compute_log_probs ■      ·        optional ref and actor-old log probabilities
+7. compute_log_probs ■      ·        optional ref log probabilities
 8. actor.train       ■      ·        actor consumes advantages
 9. actor.update_wts  ■      ·        push weights → rollout engines
 10. actor.sleep()    ·      ·
@@ -180,7 +181,7 @@ legend:
 ■ active resident ░ idle resident · offloaded (CPU)
 ```
 
-Actor and critic construct separate physical packs from the Episode shards containing training targets. This keeps packing and placement role-local. Mismatch correction is also actor-local and runs after actor-old and rollout log probabilities are available.
+Actor and critic construct separate physical packs from the Episode shards containing training targets. This keeps packing and placement role-local.
 
 ---
 
@@ -194,13 +195,15 @@ Each tensor is first cast to the dtype FSDP2 computes it in, so the all-gather a
 
 ![Weight sync paths](images/WeightSync.png)
 
+An engine takes the colocate path when actor ranks hold all of its GPUs. Every other engine takes the separate path, for example an engine on the critic GPUs in layout #2.
+
 ### Colocate path
 
 After training, the actor model is offloaded to CPU.
-During weight update, params are streamed from CPU to GPU one bucket at a time: each param is moved to GPU, all-gathered across the FSDP mesh, pushed to the engine, then freed.
+During weight update, params are streamed from CPU to GPU one bucket at a time: each param shard is copied to GPU, cast there to its compute dtype, all-gathered across the FSDP mesh, pushed to the engine, then freed.
 Only one bucket of params lives on GPU at a time, so the full model never needs to fit in GPU memory alongside the engine.
 
-For each bucket, ranks serialize their tensors as CUDA IPC handles.
+For each bucket, each rank flattens its tensors into one buffer and serializes it as a CUDA IPC handle.
 Gloo collects all handles to the source rank (first rank in the IPC group, e.g. A0, A2).
 The source rank issues a single Ray RPC to the engine, passing all handles.
 The engine dispatches each handle to its corresponding TP worker, which opens it from its colocated actor rank (zero-copy, same GPU).
@@ -208,9 +211,14 @@ The actual tensor data never crosses GPUs; only the small IPC handle metadata is
 
 ### Separate path
 
-The same FSDP all-gather by buckets followed by 
-Only A0 broadcasts to all engine TP workers directly.
-Each TP worker receives the full param and keeps only its slice.
+The same FSDP all-gather by buckets, after which only A0 broadcasts each bucket as one flattened buffer to all engine TP workers directly.
+Each TP worker receives the full params and keeps only its slices.
+
+### Bucket order
+
+The engine views each tensor back out of the flattened buffer at its byte offset, and loads the whole bucket in one `load_weights` call.
+A bucket orders its tensors by descending element size, which keeps every offset aligned to its dtype.
+Fused MoE expert weights come last among the tensors of their element size, because SGLang's Qwen3.5 loader drops every per-expert tensor that follows a fused expert weight in one call; the per-expert FP8 scales are wider than the fused FP8 weights, so they come first.
 
 ### sync with low precision inference
 

@@ -2,29 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
-try:
-    import torch
-except ModuleNotFoundError:  # pragma: no cover - allows lightweight unit imports
-    class _TorchStub:
-        class dtype:
-            pass
-
-        class Size(tuple):
-            pass
-
-    torch = _TorchStub()
+import torch
 
 
-def _as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
+def as_cpu_tensor(value, *, dtype: torch.dtype) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.detach().to(device="cpu", dtype=dtype)
     return torch.as_tensor(value, dtype=dtype)
 
 
+class TokenField(NamedTuple):
+    dtype: torch.dtype
+    fill: float | int | None = None
+    bulk: bool = False
+
+
+# Source-token-aligned trajectory fields. A prediction field has a `fill`, which finalization
+# appends as its terminal slot.
+TOKEN_FIELDS = {
+    "token_ids": TokenField(torch.long),
+    "loss_mask": TokenField(torch.int32, fill=0),
+    "rollout_log_probs": TokenField(torch.float32, fill=0.0),
+    "rollout_topk_log_probs": TokenField(torch.float32, fill=0.0, bulk=True),
+    "rollout_topk_token_ids": TokenField(torch.int32, fill=0, bulk=True),
+    # Expert ids fit int16, half the bytes of the int32 the engine returns; replay widens them on the GPU.
+    "rollout_routed_experts": TokenField(torch.int16, fill=0, bulk=True),
+    "advantages": TokenField(torch.float32),
+    "values": TokenField(torch.float32),
+    "value_targets": TokenField(torch.float32),
+}
+
 # Trajectory fields the rollout worker puts into its node's object store after finalization.
-BULK_FIELDS = ("rollout_topk_log_probs", "rollout_topk_token_ids", "rollout_routed_experts", "multimodal_inputs")
+BULK_FIELDS = (*(name for name, spec in TOKEN_FIELDS.items() if spec.bulk), "multimodal_inputs")
 
 
 @dataclass
@@ -86,7 +97,7 @@ class Trajectory:
     ):
         if value is None:
             return None
-        tensor = _as_cpu_tensor(value, dtype=dtype)
+        tensor = as_cpu_tensor(value, dtype=dtype)
         if tensor.ndim == 0:
             raise ValueError(f"{name} must have a sequence dimension")
 
@@ -108,37 +119,11 @@ class Trajectory:
         if any(target is not None for target in (self.advantages, self.values, self.value_targets)):
             raise ValueError("training targets must not be present before source-token finalization")
 
-        self.token_ids = _as_cpu_tensor(self.token_ids, dtype=torch.long)
-        self.loss_mask = self._finalize_prediction_field(
-            "loss_mask",
-            self.loss_mask,
-            dtype=torch.int,
-            fill=0,
-        )
-        self.rollout_log_probs = self._finalize_prediction_field(
-            "rollout_log_probs",
-            self.rollout_log_probs,
-            dtype=torch.float32,
-            fill=0.0,
-        )
-        self.rollout_topk_log_probs = self._finalize_prediction_field(
-            "rollout_topk_log_probs",
-            self.rollout_topk_log_probs,
-            dtype=torch.float32,
-            fill=0.0,
-        )
-        self.rollout_topk_token_ids = self._finalize_prediction_field(
-            "rollout_topk_token_ids",
-            self.rollout_topk_token_ids,
-            dtype=torch.int32,
-            fill=0,
-        )
-        self.rollout_routed_experts = self._finalize_prediction_field(
-            "rollout_routed_experts",
-            self.rollout_routed_experts,
-            dtype=torch.int32,
-            fill=0,
-        )
+        self.token_ids = as_cpu_tensor(self.token_ids, dtype=TOKEN_FIELDS["token_ids"].dtype)
+        for name, spec in TOKEN_FIELDS.items():
+            if spec.fill is not None:
+                value = self._finalize_prediction_field(name, getattr(self, name), dtype=spec.dtype, fill=spec.fill)
+                setattr(self, name, value)
 
     # --- Derived values ---
 
@@ -151,9 +136,11 @@ class Trajectory:
 
     def set_train_targets(self, advantages, *, values=None, value_targets=None) -> None:
         """Set source-token-aligned training targets after rollout processing."""
-        self.advantages = _as_cpu_tensor(advantages, dtype=torch.float32)
-        self.values = None if values is None else _as_cpu_tensor(values, dtype=torch.float32)
-        self.value_targets = None if value_targets is None else _as_cpu_tensor(value_targets, dtype=torch.float32)
+        self.advantages = as_cpu_tensor(advantages, dtype=TOKEN_FIELDS["advantages"].dtype)
+        self.values = None if values is None else as_cpu_tensor(values, dtype=TOKEN_FIELDS["values"].dtype)
+        self.value_targets = (
+            None if value_targets is None else as_cpu_tensor(value_targets, dtype=TOKEN_FIELDS["value_targets"].dtype)
+        )
 
 
 @dataclass

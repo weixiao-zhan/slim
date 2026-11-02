@@ -15,14 +15,14 @@
 uv sync --extra dev --extra strands
 source "$(dirname "$0")/common.sh"
 
-BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B"
+BF16_MODEL_DIR="$REPO_DIR/models/Qwen3.5-9B"
 # Weightless block-FP8 rollout checkpoint; the first weight sync fills it:
-#   python tools/convert_hf_to_fp8.py --model-dir models/Qwen3.5-4B --save-dir models/Qwen3.5-4B-FP8 \
+#   python tools/convert_hf_to_fp8.py --model-dir models/Qwen3.5-9B --save-dir models/Qwen3.5-9B-FP8 \
 #       --ref-config tools/quant_recipes/qwen35_128blockfp8.json --config-only
-FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-4B-FP8"
+FP8_MODEL_DIR="$REPO_DIR/models/Qwen3.5-9B-FP8"
 # Built by examples/strands_calculator/prepare_dataset.py.
 DATASET_DIR="$REPO_DIR/datasets/strands_calculator"
-SAVE_DIR="$REPO_DIR/outputs/strands-4b-fp8-mis-tok-sc-fp32"
+SAVE_DIR="$REPO_DIR/outputs/strands-9b-fp8-mis-tok-sc-fp32"
 CONCURRENCY=64
 
 TRAIN_ARGS="
@@ -68,18 +68,17 @@ TRAIN_ARGS="
     --eps-clip-high 0.28
     --use-score-centering 127
     --loss-normalization-unit token
-    --old-logprob-source rollout
 
     --optimizer muon
-    --lr 1e-6
-    --lr-warmup-steps 5
+    --lr 2e-6
+    --lr-warmup-steps 4
 
     --hf-checkpoint $BF16_MODEL_DIR
     --rollout-load $FP8_MODEL_DIR
     --load $SAVE_DIR
     --save $SAVE_DIR
-    --save-interval 20
+    --save-interval 50
 "
 
 start_ray
-run_train "$TRAIN_ARGS $(wandb_args "strands-4b-fp8-mis-tok-sc-fp32")"
+run_train "$TRAIN_ARGS $(wandb_args "strands-9b-fp8-mis-tok-sc-fp32")"

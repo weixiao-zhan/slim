@@ -8,7 +8,6 @@ from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from slim.backends.nemo import ActorNeMoTrainer, CriticNeMoTrainer
-from slim.utils.env_utils import get_nvidia_ld_library_path
 
 
 class RayTrainGroup:
@@ -51,11 +50,9 @@ class RayTrainGroup:
         pg, reordered_bundle_indices, _reordered_gpu_ids = pg
 
         env_vars = {
-            **get_nvidia_ld_library_path(),
             # because sglang will always set NCCL_CUMEM_ENABLE to 0
             # we need also set it to 0 to prevent nccl error.
             "NCCL_CUMEM_ENABLE": os.environ.get("NCCL_CUMEM_ENABLE", "0"),
-            "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", "1"),
             "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"),
             **self.args.train_env_vars,
         }

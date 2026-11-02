@@ -7,7 +7,6 @@
 from collections.abc import Callable
 
 import torch
-import torch.nn.functional as F
 
 
 @torch.compile(dynamic=True)
@@ -25,7 +24,7 @@ def compute_approx_kl(
         log_probs: Log probabilities of the new distribution.
         log_probs_base: Log probabilities of the base distribution.
         kl_loss_type: Type of KL estimator (k1, k2, k3, low_var_kl).
-        importance_ratio: Optional IS ratio (π_θ/π_old) for unbiased KL estimation.
+        importance_ratio: Optional IS ratio (π_θ/π_rollout) for unbiased KL estimation.
     """
     log_ratio = log_probs.float() - log_probs_base.float()
 
@@ -49,35 +48,6 @@ def compute_approx_kl(
         kl = torch.clamp(kl, min=-10, max=10)
 
     return kl
-
-
-def compute_gspo_kl(
-    full_log_probs: list[torch.Tensor],
-    full_old_log_probs: list[torch.Tensor],
-    local_log_probs: list[torch.Tensor],
-    loss_masks: list[torch.Tensor],
-) -> torch.Tensor:
-    """Compute GSPO-style per-sequence KL divergence.
-
-    Args:
-        full_log_probs: Current policy log-probs per sample (full or CP-local).
-        full_old_log_probs: Old policy log-probs per sample (full or CP-local).
-        local_log_probs: Local (CP-local) log-probs for expansion shape reference.
-        loss_masks: Loss masks per sample.
-
-    Returns:
-        Concatenated tensor of per-token KL values where each token in a
-        sequence has the same KL value (the sequence-level KL).
-    """
-    # Compute sequence-level KL and expand to per-token
-    ppo_kl = [
-        ((old_logprob - log_prob) * loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
-        for log_prob, old_logprob, loss_mask in zip(full_log_probs, full_old_log_probs, loss_masks, strict=False)
-    ]
-    ppo_kl = [kl.expand_as(log_prob) for kl, log_prob in zip(ppo_kl, local_log_probs, strict=False)]
-    ppo_kl = torch.cat(ppo_kl, dim=0)
-
-    return ppo_kl
 
 
 @torch.compile(dynamic=True)
@@ -254,171 +224,3 @@ def vanilla_gae(
     full_advantages = torch.stack(adv_rev[::-1], dim=1)  # [B, max_len]
     value_targets = full_advantages + values  # [B, max_len]
     return full_advantages, value_targets
-
-
-def chunked_gae(
-    rewards: torch.Tensor,
-    values: torch.Tensor,
-    gamma: float,
-    lambd: float,
-    chunk_size: int = 128,
-):
-    """
-    Compute Generalized Advantage Estimation (GAE) using a FlashLinearAttention-
-    inspired algorithm: parallel prefix scan within chunks and recurrent state
-    propagation across chunks.
-
-    This reduces the sequential dependency length from O(T) to O(T / chunk_size),
-    while keeping chunk computations fully parallelizable (O(C^2) per chunk).
-
-    Args:
-        rewards (Tensor): [B, T] reward sequence.
-        values (Tensor):  [B, T] value predictions. The next-value of the final
-                          step is assumed to be zero (standard PPO convention).
-        gamma (float): discount factor.
-        lam (float): GAE lambda.
-        chunk_size (int): sequence chunk length for parallel scan.
-
-    Returns:
-        advantages (Tensor): [B, T] computed advantages.
-        value_targets (Tensor): [B, T] advantages + values.
-    """
-
-    B, T = rewards.shape
-
-    device = rewards.device
-    dtype = rewards.dtype
-
-    # -------------------------------------------------------------------------
-    # Build δ_t = r_t + γ * V_{t+1} - V_t   with V_{T} = 0
-    # -------------------------------------------------------------------------
-    next_values = torch.cat(
-        [values[:, 1:], torch.zeros(B, 1, device=device, dtype=dtype)],
-        dim=1,
-    )
-    deltas = rewards + gamma * next_values - values
-
-    # Reformulate backward GAE as a forward scan on the reversed sequence:
-    #   S[i] = Δ[i] + w * S[i - 1],   w = γλ
-    w = gamma * lambd
-    deltas_rev = torch.flip(deltas, dims=[1])  # [B, T]
-
-    # -------------------------------------------------------------------------
-    # Pad to a multiple of chunk_size
-    # -------------------------------------------------------------------------
-    if T % chunk_size != 0:
-        pad = chunk_size - (T % chunk_size)
-        deltas_rev = F.pad(deltas_rev, (0, pad))
-    else:
-        pad = 0
-
-    B, T_pad = deltas_rev.shape
-    n_chunks = T_pad // chunk_size
-
-    deltas_chunks = deltas_rev.view(B, n_chunks, chunk_size)
-
-    # -------------------------------------------------------------------------
-    # Construct the intra-chunk parallel scan kernel M
-    #
-    # For a chunk Δ[0..C-1], we want:
-    #   S_local[t] = sum_{k=0..t} w^(t-k) * Δ[k]
-    #
-    # This is implemented as:
-    #   S_local = Δ @ M
-    #
-    # where:
-    #   M[i, j] = w^(j - i)    if j >= i
-    #             0            otherwise
-    # -------------------------------------------------------------------------
-    idx = torch.arange(chunk_size, device=device)
-    row = idx[:, None]
-    col = idx[None, :]
-    diff = col - row
-
-    M = torch.zeros(chunk_size, chunk_size, device=device, dtype=dtype)
-    mask = diff >= 0
-
-    if w == 0.0:
-        M[mask & (diff == 0)] = 1.0
-    else:
-        M[mask] = w ** diff[mask].to(dtype)
-
-    # pow_vec[t] = w^(t+1), used to inject the recurrent state s_prev
-    if w == 0.0:
-        pow_vec = torch.zeros(chunk_size, device=device, dtype=dtype)
-    else:
-        pow_vec = w ** torch.arange(1, chunk_size + 1, device=device, dtype=dtype)
-
-    # -------------------------------------------------------------------------
-    # Parallel compute local chunk results (assuming initial state = 0)
-    # -------------------------------------------------------------------------
-    deltas_flat = deltas_chunks.reshape(B * n_chunks, chunk_size)
-    S_local_flat = deltas_flat @ M
-    S_local_chunks = S_local_flat.view(B, n_chunks, chunk_size)
-
-    # Effective length of each chunk (the last chunk may be padded)
-    lengths = [chunk_size] * n_chunks
-    if pad > 0:
-        lengths[-1] = chunk_size - pad
-
-    # -------------------------------------------------------------------------
-    # Recurrent propagation between chunks
-    #
-    # Each chunk contributes:
-    #   S_global[t] = S_local[t] + w^(t+1) * s_prev
-    #
-    # And updates:
-    #   s_prev = S_global[last_t]
-    # -------------------------------------------------------------------------
-    S_rev = deltas_rev.new_zeros(B, T_pad)
-    s_prev = torch.zeros(B, device=device, dtype=dtype)
-
-    for c in range(n_chunks):
-        Lc = lengths[c]
-        start = c * chunk_size
-        end = start + Lc
-
-        S_local = S_local_chunks[:, c, :Lc]
-        S_global = S_local + s_prev.unsqueeze(1) * pow_vec[:Lc]
-
-        S_rev[:, start:end] = S_global
-        s_prev = S_global[:, -1]  # state for next chunk
-
-    # Remove padding and flip back to original time order
-    if pad > 0:
-        S_rev = S_rev[:, :T]
-
-    advantages = torch.flip(S_rev, dims=[1])
-    value_targets = advantages + values
-
-    return advantages, value_targets
-
-
-def sum_of_sample_mean(x: torch.Tensor, response_lengths: list[int], loss_masks: list[torch.Tensor]) -> torch.Tensor:
-    """Compute sum of per-sample means across variable-length responses.
-
-    Parameters:
-        x: Flat tensor containing concatenated per-token values across samples.
-        response_lengths: Lengths of each sample's response segment in `x`.
-        loss_masks: Per-sample masks aligned with `response_lengths`.
-
-    Returns:
-        A scalar tensor equal to the sum over samples of the mean value within
-        each sample's response segment.
-    """
-    return sum(
-        [
-            (x_i * loss_mask_i).sum() / torch.clamp_min(loss_mask_i.sum(), 1)
-            for x_i, loss_mask_i in zip(x.split(response_lengths, dim=0), loss_masks, strict=False)
-        ]
-    )
-
-
-def sum_of_token(x: torch.Tensor, response_lengths: list[int], loss_masks: list[torch.Tensor]) -> torch.Tensor:
-    """Compute sum of per-token values across samples (no per-sample averaging)."""
-    return sum(
-        [
-            (x_i * loss_mask_i).sum()
-            for x_i, loss_mask_i in zip(x.split(response_lengths, dim=0), loss_masks, strict=False)
-        ]
-    )

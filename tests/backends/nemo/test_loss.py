@@ -273,7 +273,6 @@ def test_policy_loss_adds_score_centering_and_reports_topk_statistics():
     trainer.args = SimpleNamespace(
         loss_normalization_unit="token",
         rollout_temperature=1.0,
-        old_logprob_source="rollout",
         advantage_estimator="grpo",
         eps_clip=0.0,
         eps_clip_high=0.0,
@@ -479,7 +478,6 @@ def test_policy_normalization_keeps_entropy_and_kl_sequence_normalized(
         {
             "loss_normalization_unit": normalization_unit,
             "rollout_temperature": 1.0,
-            "old_logprob_source": "rollout",
             "advantage_estimator": "grpo",
             "eps_clip": 0.2,
             "eps_clip_high": None,

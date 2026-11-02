@@ -21,8 +21,9 @@ def replay_router_targets(routed_experts: torch.Tensor | None):
         raise ValueError(
             f"routing replay has {routed_experts.shape[2]} layers but the model has {len(instances)} routers"
         )
+    # The router gathers with these ids, and gather takes int32 or int64 indices.
     per_layer = [
-        routed_experts[:, :, index, :].reshape(-1, routed_experts.shape[-1]).contiguous()
+        routed_experts[:, :, index, :].reshape(-1, routed_experts.shape[-1]).to(torch.int32)
         for index in range(len(instances))
     ]
     with RouterReplay.replay(per_layer):

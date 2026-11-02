@@ -72,9 +72,6 @@ def prepare_forward(
     labels = model_batch.pop("labels")
     fields = {}
     for name, value in full_fields.items():
-        fill = 0
-        if name == "mismatch_weights":
-            fill = 1
-        fields[name] = sharder.shard_token_tensor(value, seq_dim=1, fill=fill)
+        fields[name] = sharder.shard_token_tensor(value, seq_dim=1, fill=0)
     fields["labels"] = labels
     return PreparedForward(context_factory, model_batch, fields, sharder)

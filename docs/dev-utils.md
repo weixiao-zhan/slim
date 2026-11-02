@@ -11,7 +11,7 @@ Slim has three profiling components.
 | Target | Tool | Scope |
 |--------|------|-------|
 | `train_pg` | torch.profiler | Policy gradient update (fwd+bwd over microbatches) |
-| `train_log_probs` | torch.profiler | Log-prob recompute loop |
+| `train_log_probs` | torch.profiler | Log-prob recompute and critic value loops |
 | `train_overall` | torch.profiler | Entire train loop spanning rollouts |
 | `rollout` | VizTracer | Rollout step in the `RolloutManager` coordinator process (dispatch, filters, batch hooks, abort); work inside [`RolloutWorker`](placement.md#rollout-workers) processes does not appear |
 
@@ -54,7 +54,6 @@ python tools/profile_rollout.py \
 
 | Flag | Effect |
 |------|--------|
-| `--debug-rollout-only` | Skip training, run only the rollout pipeline. |
 | `--debug-train-only` | Skip SGLang, run only the training loop (requires `--load-debug-rollout-data`). |
 | `--save-debug-rollout-data` | Save rollout tensors to `<path>.format(rollout_id)` after each step. |
 | `--load-debug-rollout-data` | Load saved rollout data instead of generating. Implies `--debug-train-only`. |

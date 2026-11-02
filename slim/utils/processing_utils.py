@@ -45,29 +45,43 @@ def encode_tensor_to_b64_envelope(value) -> dict:
         "__tensor__": True,
         "dtype": str(tensor.dtype).removeprefix("torch."),
         "shape": list(tensor.shape),
-        "data": pybase64.b64encode(raw).decode("ascii"),
+        "data": pybase64.b64encode_as_string(raw),
     }
 
 
-def encode_array_to_b64_envelope(values, dtype: type[np.number], columns: int | None = None) -> dict:
-    """Encode a list, or a list of equal-length rows, of numbers as a tensor envelope.
-
-    ``columns`` fixes the row width, so that no rows still encode as ``[0, columns]``.
-    """
+def encode_array_to_b64_envelope(values, dtype: type[np.number]) -> dict:
+    """Encode a list, or a list of equal-length rows, of numbers as a tensor envelope."""
     array = np.asarray(values, dtype=dtype)
-    if columns is not None:
-        array = array.reshape(-1, columns)
     return encode_tensor_to_b64_envelope(torch.from_numpy(array))
+
+
+def decode_b64_array(data: str, dtype: torch.dtype) -> torch.Tensor:
+    """Decode base64 raw array bytes, the form SGLang returns its flat arrays in, as a 1-D tensor."""
+    # A bytearray is writable, so the tensor views it without a copy.
+    raw = pybase64.b64decode_as_bytearray(data, validate=True)
+    if not raw:
+        # `torch.frombuffer` rejects an empty buffer.
+        return torch.empty(0, dtype=dtype)
+    return torch.frombuffer(raw, dtype=dtype)
 
 
 def decode_tensor_from_b64_envelope(value: dict) -> torch.Tensor:
     """Decode a tensor produced by ``encode_tensor_to_b64_envelope``."""
-    raw = pybase64.b64decode(value["data"], validate=True)
-    dtype = getattr(torch, value["dtype"])
-    if not raw:
-        # `torch.frombuffer` rejects an empty buffer.
-        return torch.empty(value["shape"], dtype=dtype)
-    return torch.frombuffer(bytearray(raw), dtype=dtype).reshape(value["shape"])
+    return decode_b64_array(value["data"], getattr(torch, value["dtype"])).reshape(value["shape"])
+
+
+def decode_output_top_logprobs(meta_info: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode SGLang's flat output top-K in ``meta_info`` into log-probs and token ids, each ``[T, K]``."""
+    shape = meta_info["output_top_logprobs_shape"]
+    logprobs = decode_b64_array(
+        meta_info["output_top_logprobs_val_flat_b64"],
+        getattr(torch, meta_info["output_top_logprobs_val_flat_b64_dtype"]),
+    )
+    token_ids = decode_b64_array(
+        meta_info["output_top_logprobs_idx_flat_b64"],
+        getattr(torch, meta_info["output_top_logprobs_idx_flat_b64_dtype"]),
+    )
+    return logprobs.reshape(shape), token_ids.reshape(shape)
 
 
 def decode_tensor_envelopes(value):

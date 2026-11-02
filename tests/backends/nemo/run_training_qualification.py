@@ -133,7 +133,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         freeze_audio_tower=False,
         freeze_language_model=False,
         freeze_vision_tower=cli.freeze_vision_tower,
-        get_mismatch_metrics=False,
         global_batch_size=8,
         hf_checkpoint=cli.checkpoint,
         kl_loss_coef=0.0,
@@ -154,7 +153,6 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         lr_warmup_init=0.0,
         lr_warmup_steps=0,
         master_weight_dtype="fp32",
-        mismatch_correction="none",
         muon_momentum=0.95,
         nemo_dispatcher="torch",
         nemo_experts_backend="torch_mm",
@@ -166,7 +164,7 @@ def _trainer_args(cli: argparse.Namespace) -> SimpleNamespace:
         no_save_optim=False,
         n_samples_per_prompt=1,
         num_rollout=4,
-        old_logprob_source="rollout",
+        num_steps_per_rollout=1,
         optimizer=cli.optimizer,
         policy_surrogate="ppo_clip",
         ref_load=cli.checkpoint,
@@ -885,7 +883,7 @@ def main() -> None:
             group=get_gloo_group(),
         )
         if min(vision_forward_calls) < 2:
-            raise RuntimeError(f"not every rank entered the synchronized vision path for actor-old and training forwards: {vision_forward_calls}")
+            raise RuntimeError(f"not every rank entered the synchronized vision path for the recorded and training forwards: {vision_forward_calls}")
         vision_metrics = _vision_update_metrics(
             trainer,
             vision_before,

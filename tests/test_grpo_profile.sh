@@ -45,7 +45,6 @@ run_train "
     --advantage-estimator grpo
     --disable-group-advantage-std-normalization
     --policy-surrogate cis
-    --old-logprob-source rollout
     --eps-clip 1
     --eps-clip-high 1
 

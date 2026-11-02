@@ -9,7 +9,7 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
 
 from .actor_group import RayTrainGroup
-from .utils import rollout_node_ids, train_span
+from .utils import Placement, rollout_node_ids, train_span
 
 logger = logging.getLogger(__name__)
 
@@ -79,54 +79,45 @@ def _create_placement_group(num_gpus):
     return pg, pg_reordered_bundle_indices, pg_reordered_gpu_ids
 
 
-def _placement_layout(args):
-    """Compute the placement-group total and per-role bundle offsets.
+def _placement_layout(args) -> tuple[range, range, range]:
+    """Compute the actor, critic, and rollout ranges of the sorted bundle list.
 
-    Returns ``(pg_total, critic_offset, rollout_offset)`` where the offsets are
-    indices into the sorted bundle list. Layout follows the (rollout_colocate,
-    critic_colocate) matrix:
+    A, C, and R are the actor, critic, and rollout GPU counts, and S = ``train_span(args)``:
 
-        train_span     = A           if CC else A + C
-        critic_offset  = 0           if CC else A
-        rollout_offset = 0           if RC else train_span
-        pg_total       = train_span  if RC else train_span + R
+        actor   = [0, A)
+        critic  = [0, C)  if critic_colocate or critic_train_only  else [A, A + C);  empty without a critic
+        rollout = [0, R)  if rollout_colocate                      else [S, S + R);  empty with debug_train_only
     """
-    R = args.rollout_num_gpus
-    if args.debug_rollout_only:
-        return R, 0, 0
-
     span = train_span(args)
     separate_critic = args.use_critic and not args.critic_colocate and not args.critic_train_only
     critic_offset = args.actor_num_gpus if separate_critic else 0
+    actor = range(args.actor_num_gpus)
+    critic = range(critic_offset, critic_offset + args.critic_num_gpus) if args.use_critic else range(0)
 
     if args.debug_train_only:
-        return span, critic_offset, span
+        return actor, critic, range(span, span)
 
-    rc = args.rollout_colocate
-    rollout_offset = 0 if rc else span
-    pg_total = span if rc else span + R
-    return pg_total, critic_offset, rollout_offset
+    rollout_offset = 0 if args.rollout_colocate else span
+    return actor, critic, range(rollout_offset, rollout_offset + args.rollout_num_gpus)
 
 
-def create_placement_groups(args):
-    """Create placement groups for actor, critic, and rollout engines."""
+def create_placement_groups(args) -> Placement:
+    """Create the placement group and place the actor, critic, and rollout roles in it."""
 
-    num_gpus, critic_offset, rollout_offset = _placement_layout(args)
+    actor, critic, rollout = _placement_layout(args)
+    num_gpus = max(actor.stop, critic.stop, rollout.stop)
 
     logger.info(f"Creating placement group with {num_gpus} GPUs...")
-    pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids = _create_placement_group(num_gpus)
+    pg, bundle_indices, gpu_ids = _create_placement_group(num_gpus)
 
-    rollout_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[rollout_offset:]
-    rollout_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[rollout_offset:]
-    if args.use_critic:
-        critic_pg_reordered_bundle_indices = actor_pg_reordered_bundle_indices[critic_offset:]
-        critic_pg_reordered_gpu_ids = actor_pg_reordered_gpu_ids[critic_offset:]
-
-    return {
-        "actor": (pg, actor_pg_reordered_bundle_indices, actor_pg_reordered_gpu_ids),
-        "critic": (pg, critic_pg_reordered_bundle_indices, critic_pg_reordered_gpu_ids) if args.use_critic else None,
-        "rollout": (pg, rollout_pg_reordered_bundle_indices, rollout_pg_reordered_gpu_ids),
-    }
+    return Placement(
+        pg=pg,
+        bundle_indices=bundle_indices,
+        gpu_ids=gpu_ids,
+        actor=actor,
+        critic=critic,
+        rollout=rollout,
+    )
 
 
 def allocate_train_group(args, num_gpus, pg, role):
@@ -139,18 +130,18 @@ def allocate_train_group(args, num_gpus, pg, role):
     )
 
 
-def create_training_groups(args, pgs, rollout_manager):
+def create_training_groups(args, placement, rollout_manager):
     actor_train_group = allocate_train_group(
         args=args,
         num_gpus=args.actor_num_gpus,
-        pg=pgs["actor"],
+        pg=placement.role_pg("actor"),
         role="actor",
     )
     if args.use_critic:
         critic_train_group = allocate_train_group(
             args=args,
             num_gpus=args.critic_num_gpus,
-            pg=pgs["critic"],
+            pg=placement.role_pg("critic"),
             role="critic",
         )
     else:
@@ -178,24 +169,23 @@ def create_training_groups(args, pgs, rollout_manager):
 
     actor_train_group.set_rollout_manager(rollout_manager)
 
-    if args.rollout_global_dataset:
-        ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
+    ray.get(rollout_manager.load.remote(args.start_rollout_id - 1))
 
     return actor_train_group, critic_train_group
 
 
-def create_rollout_manager(args, pg):
+def create_rollout_manager(args, placement):
     # Imported here, where the Ray actor is built: the driver calls .remote()
     # and does not run the sglang backend itself.
     from .rollout import RolloutManager
 
     # The manager runs the router, sits on the first rollout node next to the first engine.
-    node_ids = rollout_node_ids(pg)
+    node_ids = rollout_node_ids(placement.role_pg("rollout"))
     rollout_manager = RolloutManager.options(
         num_cpus=1,
         num_gpus=0,
         scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_ids[0], soft=False) if node_ids else None,
-    ).remote(args, pg)
+    ).remote(args, placement)
 
     # calculate num_rollout from num_epoch
     if args.num_rollout is None:

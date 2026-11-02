@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/OpenRLHF/OpenRLHF/blob/10c733694ed9fbb78a0a2ff6a05efc7401584d46/openrlhf/trainer/ray/utils.py#L1
+import dataclasses
+
 import ray
-from slim.ray.ray_worker import RayWorker
+from ray.util.placement_group import PlacementGroup
 
 
 # Refer to
@@ -27,8 +29,6 @@ NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
 
 def train_span(args) -> int:
     """Number of placement-group bundles occupied by the actor and critic trainers."""
-    if args.debug_rollout_only:
-        return 0
     if args.critic_train_only:
         return args.critic_num_gpus
     # Critic-colocate folds the critic onto the actor GPUs, so the span is just the actor's.
@@ -37,28 +37,38 @@ def train_span(args) -> int:
     return args.actor_num_gpus + args.critic_num_gpus
 
 
+@dataclasses.dataclass(frozen=True)
+class Placement:
+    """Where the actor, critic, and rollout roles run in the placement group.
+
+    The bundles are sorted by (node, GPU id), and each role holds a range of the sorted positions.
+    With ``--rollout-colocate`` the rollout range overlaps the training ranges, and rollout time-shares these GPUs
+    through offload.
+    """
+
+    pg: PlacementGroup
+    bundle_indices: list[int]  # bundle index at each sorted position
+    gpu_ids: list[int]  # physical GPU id at each sorted position
+    actor: range
+    critic: range
+    rollout: range
+
+    def role_pg(self, role: str) -> tuple[PlacementGroup, list[int], list[int]]:
+        """``(pg, bundle_indices, gpu_ids)`` of the GPUs of ``role``, in sorted order."""
+        positions = getattr(self, role)
+        return self.pg, [self.bundle_indices[p] for p in positions], [self.gpu_ids[p] for p in positions]
+
+    def actor_ranks(self, rollout_gpus: range) -> list[int] | None:
+        """Actor ranks on the rollout GPUs ``rollout_gpus``, or None if not all of them are actor GPUs."""
+        start = self.rollout.start + rollout_gpus.start
+        stop = self.rollout.start + rollout_gpus.stop
+        if start < self.actor.start or stop > self.actor.stop:
+            return None
+        return list(range(start - self.actor.start, stop - self.actor.start))
+
+
 def rollout_node_ids(pg) -> list[str]:
     """Distinct node ids of the rollout bundles, in sorted bundle order."""
     placement_group, reordered_bundle_indices, _ = pg
     bundles_to_node_id = ray.util.placement_group_table(placement_group)["bundles_to_node_id"]
     return list(dict.fromkeys(bundles_to_node_id[index] for index in reordered_bundle_indices))
-
-
-@ray.remote
-class Lock(RayWorker):
-    def __init__(self):
-        self._locked = False  # False: unlocked, True: locked
-
-    def acquire(self):
-        """
-        Try to acquire the lock. Returns True if acquired, False otherwise.
-        Caller should retry until it returns True.
-        """
-        if not self._locked:
-            self._locked = True
-            return True
-        return False
-
-    def release(self):
-        """Release the lock, allowing others to acquire."""
-        self._locked = False

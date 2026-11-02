@@ -51,7 +51,6 @@ ARGS="
     --advantage-estimator grpo
     --disable-group-advantage-std-normalization
     --loss-normalization-unit episode
-    --old-logprob-source rollout
     --use-rollout-routing-replay
     --lr 1e-6
     --actor-num-gpus 8

@@ -13,8 +13,8 @@ The basic training loop follows:
 | Document | Scope |
 |----------|-------|
 | [Data Layout](data-layout.md) | Episode/Trajectory hierarchy, dataset columns, source-token alignment, VLM processor output, routing replay, flatten-pad-partition |
-| [SGLang Config](sglang-config.md) | Engine deployment, parameter pass-through, PD disaggregation, speculative decoding, FP8 inference, fault tolerance, tokenization ownership and the rollout wire contract |
-| [Training Loss](training-loss.md) | Advantage estimators (PPO-GAE, GRPO, GSPO), policy surrogates, KL penalty, mismatch correction |
+| [SGLang Config](sglang-config.md) | Engine deployment, parameter pass-through, speculative decoding, FP8 inference, fault tolerance, tokenization ownership and the rollout wire contract |
+| [Training Loss](training-loss.md) | Advantage estimators (PPO-GAE, GRPO, GSPO), policy surrogates, KL penalty, rollout-trainer mismatch |
 | [Placement](placement.md) | GPU allocation, colocate modes, rollout workers (placement, dispatch, abort), step timeline, weight update paths |
 | [Dev Utils](dev-utils.md) | Profiling, debugging, reproducibility, tests |
 | [Customization](customization.md) | All `--*-path` extension points, multi-turn/agentic adaptation |

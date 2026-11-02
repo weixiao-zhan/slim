@@ -154,7 +154,7 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> NeMoLRScheduler:
     Returns:
         NeMoLRScheduler: Initialized scheduler bound to ``optimizer``.
     """
-    train_steps = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    train_steps = args.num_rollout * args.num_steps_per_rollout
     if args.lr_warmup_steps + args.lr_decay_steps > train_steps:
         raise ValueError(
             f"lr_warmup_steps {args.lr_warmup_steps} + lr_decay_steps {args.lr_decay_steps} "

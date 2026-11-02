@@ -226,17 +226,6 @@ def _initialize_missing_adamw_state(optimizer: torch.optim.Optimizer) -> None:
                     state["max_exp_avg_sq"] = torch.zeros_like(parameter)
 
 
-def _save_consolidated_processor(trainer: Any, checkpoint_dir: Path, *, is_final: bool) -> None:
-    if trainer.role != "actor" or trainer.processor is None:
-        return
-    mode = trainer.args.checkpoint_save_consolidated
-    if mode == "false" or (mode == "final" and not is_final):
-        return
-    if dist.get_rank() == 0:
-        trainer.processor.save_pretrained(checkpoint_dir / "model" / "consolidated")
-    dist.barrier()
-
-
 def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
     """Save one Slim iteration with NeMo checkpoint components."""
     _complete_pending_save(trainer)
@@ -256,10 +245,9 @@ def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
     trainer.checkpointer.save_model(
         trainer.checkpoint_model,
         str(checkpoint_dir),
-        tokenizer=trainer.tokenizer if trainer.role == "actor" else None,
+        tokenizer=(trainer.processor or trainer.tokenizer) if trainer.role == "actor" else None,
         is_final_checkpoint=force_sync,
     )
-    _save_consolidated_processor(trainer, checkpoint_dir, is_final=force_sync)
     if not trainer.args.no_save_optim:
         if trainer.args.optimizer == "adamw":
             _initialize_missing_adamw_state(trainer.optimizer)

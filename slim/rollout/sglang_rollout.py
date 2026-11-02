@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import inspect
 import logging
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +21,8 @@ from slim.utils.eval_config import EvalDatasetConfig
 from slim.utils.http_utils import post
 from slim.utils.misc import SingletonMeta, load_function
 from slim.utils.processing_utils import (
+    decode_b64_array,
+    decode_output_top_logprobs,
     decode_tensor_envelopes,
     encode_tensor_to_b64_envelope,
     load_processor,
@@ -32,17 +32,9 @@ from slim.utils.types import Episode, Trajectory
 
 from .rm_hub import async_rm, batched_async_rm
 
-__all__ = ["generate_rollout", "get_model_url"]
+__all__ = ["generate_rollout"]
 
 logger = logging.getLogger(__name__)
-
-
-def get_model_url(args: Namespace, model_name: str, endpoint: str = "/generate") -> str:
-    routers = getattr(args, "sglang_model_routers", None)
-    if routers and model_name in routers:
-        ip, port = routers[model_name]
-        return f"http://{ip}:{port}{endpoint}"
-    return f"http://{args.router_ip}:{args.router_port}{endpoint}"
 
 
 @dataclass
@@ -62,22 +54,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.chat_template_kwargs = args.apply_chat_template_kwargs or {}
         self.deterministic_inference = getattr(args, "sglang_enable_deterministic_inference", False)
 
-        self.dp_counts = [0] * (args.sglang_dp_size or 1)
-        self.dp_rank = 0
-
-
         self.reset()
-
-    @contextmanager
-    def dp_rank_context(self):
-        candidates = [i for i, count in enumerate(self.dp_counts) if count == min(self.dp_counts)]
-        dp_rank = candidates[torch.randint(len(candidates), (1,)).item()]
-        self.dp_counts[dp_rank] += 1
-        self.dp_rank = dp_rank
-        try:
-            yield dp_rank
-        finally:
-            self.dp_counts[dp_rank] -= 1
 
     def reset(self) -> None:
         self.aborted = False
@@ -116,7 +93,7 @@ def _examples_to_rollout_groups(examples: list[dict], args) -> list[RolloutGroup
     return groups
 
 
-async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Episode) -> Trajectory:
+async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Episode, top_k: int | None) -> Trajectory:
     """The trajectory that opens an append-only attempt, holding the tokenized prompt."""
     prompt = episode.example.get("prompt", "")
     tools = episode.example.get("tools")
@@ -169,16 +146,19 @@ async def _build_trajectory_with_first_prompt(state: GenerateState, episode: Epi
         rollout_log_probs=[0.0] * edge_len,
         multimodal_inputs=multimodal_inputs,
     )
-    if (top_k := state.args.use_score_centering) is not None:
+    if top_k is not None:
         # The top-K is K entries per token, so it lives in tensors rather than nested lists.
         trajectory.rollout_topk_log_probs = torch.zeros((edge_len, top_k), dtype=torch.float32)
         trajectory.rollout_topk_token_ids = torch.zeros((edge_len, top_k), dtype=torch.int32)
     return trajectory
 
 
-async def generate(state: GenerateState, episode: Episode) -> Episode:
+async def generate(state: GenerateState, episode: Episode, evaluation: bool = False) -> Episode:
     args = state.args
-    trajectory = await _build_trajectory_with_first_prompt(state, episode)
+    # Only training reads the sampler top-K and the routed experts, so an eval rollout requests neither.
+    top_k = None if evaluation else args.use_score_centering
+    routing_replay_shape = None if evaluation else args.routing_replay_shape
+    trajectory = await _build_trajectory_with_first_prompt(state, episode, top_k)
     episode.trajectories.append(trajectory)
 
     max_new_tokens = episode.max_tokens - len(trajectory.token_ids)
@@ -198,10 +178,10 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
         "sampling_params": sampling_params,
         "return_logprob": True,
     }
-    if args.use_score_centering is not None:
-        payload["top_logprobs_num"] = args.use_score_centering
+    if top_k is not None:
+        payload["top_logprobs_num"] = top_k
     routed_experts_start_len = 0
-    if args.routing_replay_shape is not None:
+    if routing_replay_shape is not None:
         # Expert capture is indexed by KV-cache slot, so a position reports the routing
         # of whichever forward pass last wrote its slot. Rows already held end where
         # this call's fresh prefill begins, which is the first token of the new turn.
@@ -239,25 +219,24 @@ async def generate(state: GenerateState, episode: Episode) -> Episode:
     if episode.status == Episode.Status.ABORTED:
         return episode
 
-    # The per-token arrays arrive as tensor envelopes, one row per generated token.
+    # The per-token arrays arrive as base64 arrays, one row per generated token.
     output_logprobs = decode_tensor_envelopes(meta_info["output_token_logprobs"])
     new_tokens = output_logprobs["token_ids"].tolist()
 
     trajectory.token_ids.extend(new_tokens)
     trajectory.loss_mask.extend([1] * len(new_tokens))
     trajectory.rollout_log_probs.extend(output_logprobs["logprobs"].tolist())
-    if args.use_score_centering is not None:
-        top_logprobs = decode_tensor_envelopes(meta_info["output_top_logprobs"])
-        trajectory.rollout_topk_log_probs = torch.cat((trajectory.rollout_topk_log_probs, top_logprobs["logprobs"]))
-        trajectory.rollout_topk_token_ids = torch.cat((trajectory.rollout_topk_token_ids, top_logprobs["token_ids"]))
+    if top_k is not None:
+        top_logprobs, top_token_ids = decode_output_top_logprobs(meta_info)
+        trajectory.rollout_topk_log_probs = torch.cat((trajectory.rollout_topk_log_probs, top_logprobs))
+        trajectory.rollout_topk_token_ids = torch.cat((trajectory.rollout_topk_token_ids, top_token_ids))
 
-    if args.routing_replay_shape is not None:
-        num_layers, top_k = args.routing_replay_shape
+    if routing_replay_shape is not None:
         # The response covers [start_len, seqlen - 1), one row per prediction.
         prediction_count = len(trajectory.token_ids) - 1 - routed_experts_start_len
 
-        def _decode_routed_experts(envelope: dict):
-            return decode_tensor_envelopes(envelope).reshape(prediction_count, num_layers, top_k)
+        def _decode_routed_experts(data: str):
+            return decode_b64_array(data, torch.int32).reshape(prediction_count, *routing_replay_shape)
 
         fresh = await asyncio.to_thread(_decode_routed_experts, meta_info["routed_experts"])
         trajectory.rollout_routed_experts = (
@@ -282,16 +261,12 @@ async def generate_and_rm(
         episode.status = Episode.Status.ABORTED
         return episode
 
-    with state.dp_rank_context():
-        custom_func_path = episode.generate_function_path or args.custom_generate_function_path
-        if custom_func_path is not None:
-            custom_generate_func = load_function(custom_func_path)
-            if "evaluation" in inspect.signature(custom_generate_func).parameters:
-                episode = await custom_generate_func(state, episode, evaluation=evaluation)
-            else:
-                episode = await custom_generate_func(state, episode)
-        else:
-            episode = await generate(state, episode)
+    custom_func_path = episode.generate_function_path or args.custom_generate_function_path
+    if custom_func_path is not None:
+        custom_generate_func = load_function(custom_func_path)
+        episode = await custom_generate_func(state, episode, evaluation=evaluation)
+    else:
+        episode = await generate(state, episode, evaluation=evaluation)
 
     if episode.status != Episode.Status.ABORTED:
         for trajectory in episode.trajectories:
@@ -335,7 +310,6 @@ async def generate_rollout_async(
 ) -> tuple[RolloutFnTrainOutput, list[dict]]:
     from slim.rollout.worker import RolloutWorkerPool
 
-    assert args.rollout_global_dataset
     pool = RolloutWorkerPool(args)
     dynamic_filter = load_function(args.rollout_group_filter_path) if args.rollout_group_filter_path else None
 
@@ -464,7 +438,6 @@ async def eval_rollout_single_dataset(
 def generate_rollout(
     args: Namespace, rollout_id: int, data_source: Any, evaluation: bool = False
 ) -> RolloutFnTrainOutput | RolloutFnEvalOutput:
-    assert args.rollout_global_dataset
     if evaluation:
         return run(eval_rollout(args, rollout_id))
 

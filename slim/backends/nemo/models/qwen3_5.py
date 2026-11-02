@@ -23,6 +23,8 @@ from nemo_automodel.components.models.qwen3_5.parallelization import PARALLELIZE
 from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
 from nemo_automodel.components.models.qwen3_5_moe.model import Qwen3_5MoeForConditionalGeneration
 
+from ..data_packing import multimodal_item_offsets
+
 MODEL_TYPES = ("qwen3_5", "qwen3_5_moe")
 CP_VISION_SHARDING = CpVisionFrameShardingConfig(enabled=True)
 
@@ -184,43 +186,30 @@ def _install_synchronized_vision(model: torch.nn.Module, sync_group, cp_group) -
         token = set_cp_vision_group(cp_group, config=CP_VISION_SHARDING)
         try:
             with cp_dispatcher_suspended(module.cp_mesh):
-                if has_images:
-                    image_pixels, image_grid, is_local = visual_inputs(pixel_values, image_grid_thw)
+                for has_media, local_pixels, local_grid, is_video in (
+                    (has_images, pixel_values, image_grid_thw, False),
+                    (has_videos, pixel_values_videos, video_grid_thw, True),
+                ):
+                    if not has_media:
+                        continue
+                    media_pixels, media_grid, is_local = visual_inputs(local_pixels, local_grid)
                     if hasattr(module.model.visual, "rotary_pos_emb"):
-                        module.model.visual.rotary_pos_emb.to(image_pixels.device)
-                    image_embeds = module._encode_vision_for_cp(
-                        image_pixels,
-                        image_grid,
-                        is_video=False,
+                        module.model.visual.rotary_pos_emb.to(media_pixels.device)
+                    media_embeds = module._encode_vision_for_cp(
+                        media_pixels,
+                        media_grid,
+                        is_video=is_video,
                     ).to(inputs_embeds.device, inputs_embeds.dtype)
                     if is_local:
-                        image_mask, _ = module.model.get_placeholder_mask(
+                        features = "video_features" if is_video else "image_features"
+                        media_mask = module.model.get_placeholder_mask(
                             input_ids,
                             inputs_embeds=inputs_embeds,
-                            image_features=image_embeds,
-                        )
-                        inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-                    elif image_embeds.requires_grad:
-                        inputs_embeds = inputs_embeds + image_embeds.sum() * 0.0
-
-                if has_videos:
-                    video_pixels, video_grid, is_local = visual_inputs(pixel_values_videos, video_grid_thw)
-                    if hasattr(module.model.visual, "rotary_pos_emb"):
-                        module.model.visual.rotary_pos_emb.to(video_pixels.device)
-                    video_embeds = module._encode_vision_for_cp(
-                        video_pixels,
-                        video_grid,
-                        is_video=True,
-                    ).to(inputs_embeds.device, inputs_embeds.dtype)
-                    if is_local:
-                        _, video_mask = module.model.get_placeholder_mask(
-                            input_ids,
-                            inputs_embeds=inputs_embeds,
-                            video_features=video_embeds,
-                        )
-                        inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-                    elif video_embeds.requires_grad:
-                        inputs_embeds = inputs_embeds + video_embeds.sum() * 0.0
+                            **{features: media_embeds},
+                        )[int(is_video)]
+                        inputs_embeds = inputs_embeds.masked_scatter(media_mask, media_embeds)
+                    elif media_embeds.requires_grad:
+                        inputs_embeds = inputs_embeds + media_embeds.sum() * 0.0
         finally:
             reset_cp_vision_group(token)
 
@@ -242,14 +231,10 @@ def configure_packed_cp(model: torch.nn.Module, device_mesh) -> None:
     _install_synchronized_vision(model, vision_sync_group, cp_mesh.get_group())
 
 
-def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: dict) -> torch.Tensor:
-    """Build document-local text or multimodal positions for one physical pack."""
-    device = model_batch["input_ids"].device
-    if not pack.get("multimodal_inputs"):
-        return pack["position_ids"].to(device=device, non_blocking=True).unsqueeze(0)
-
-    image_grid_hws = model_batch.get("image_grid_hws")
-    if model_batch.get("image_grid_thw") is None and image_grid_hws is not None:
+def _promote_image_grid(batch: dict) -> None:
+    """Replace a batch's `image_grid_hws` with the `[N, 3]` T/H/W `image_grid_thw` the model reads."""
+    image_grid_hws = batch.get("image_grid_hws")
+    if batch.get("image_grid_thw") is None and image_grid_hws is not None:
         if image_grid_hws.shape[-1] == 2:
             temporal = torch.ones(
                 image_grid_hws.shape[0],
@@ -257,26 +242,33 @@ def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: d
                 dtype=image_grid_hws.dtype,
                 device=image_grid_hws.device,
             )
-            model_batch["image_grid_thw"] = torch.cat((temporal, image_grid_hws), dim=-1)
+            batch["image_grid_thw"] = torch.cat((temporal, image_grid_hws), dim=-1)
         else:
-            model_batch["image_grid_thw"] = image_grid_hws
-        model_batch.pop("image_grid_hws")
+            batch["image_grid_thw"] = image_grid_hws
+        batch.pop("image_grid_hws")
+
+
+def _multimodal_position_ids(model: torch.nn.Module, pack: dict) -> torch.Tensor:
+    """Document-local mRoPE positions of a multimodal pack, computed from its CPU tokens and grids."""
+    grids = {
+        name: pack["multimodal_inputs"][name]
+        for name in ("image_grid_thw", "image_grid_hws", "video_grid_thw")
+        if name in pack["multimodal_inputs"]
+    }
+    _promote_image_grid(grids)
 
     boundaries = pack["cu_seqlens"].tolist()
-    counts = pack.get("multimodal_num_items") or {}
-    offsets = {}
-    for name in ("image_grid_thw", "video_grid_thw"):
-        item_counts = counts.get(name, counts.get("image_grid_hws", []) if name == "image_grid_thw" else [])
-        cursor = [0]
-        for count in item_counts:
-            cursor.append(cursor[-1] + count)
-        offsets[name] = cursor
+    item_offsets = multimodal_item_offsets(pack)
+    offsets = {
+        "image_grid_thw": item_offsets.get("image_grid_thw", item_offsets.get("image_grid_hws", [0])),
+        "video_grid_thw": item_offsets.get("video_grid_thw", [0]),
+    }
 
     pieces = []
     for document_index, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:], strict=True)):
-        document_batch = {"input_ids": model_batch["input_ids"][:, start:end]}
+        document_batch = {"input_ids": pack["tokens"][start:end].unsqueeze(0)}
         for name, cursor in offsets.items():
-            tensor = model_batch.get(name)
+            tensor = grids.get(name)
             if tensor is None or len(cursor) <= document_index + 1:
                 continue
             item_start, item_end = cursor[document_index : document_index + 2]
@@ -285,3 +277,17 @@ def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: d
         prepared = model.prepare_model_inputs_for_cp(document_batch, num_chunks=1)
         pieces.append(prepared["position_ids"])
     return torch.cat(pieces, dim=-1)
+
+
+def build_packed_position_ids(model: torch.nn.Module, pack: dict, model_batch: dict) -> torch.Tensor:
+    """Build document-local text or multimodal positions for one physical pack."""
+    device = model_batch["input_ids"].device
+    if not pack.get("multimodal_inputs"):
+        return pack["position_ids"].to(device=device, non_blocking=True).unsqueeze(0)
+
+    _promote_image_grid(model_batch)
+    # The positions come from CPU tensors, so they need no device sync, and every forward of the
+    # pack (reference, critic values, train) reuses them.
+    if "mrope_position_ids" not in pack:
+        pack["mrope_position_ids"] = _multimodal_position_ids(model, pack)
+    return pack["mrope_position_ids"].to(device=device, non_blocking=True)

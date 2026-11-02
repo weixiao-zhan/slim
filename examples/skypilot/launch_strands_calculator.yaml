@@ -180,7 +180,6 @@ run: | # shell
     --advantage-estimator grpo \
     --disable-group-advantage-std-normalization \
     --loss-normalization-unit episode \
-    --old-logprob-source rollout \
     --policy-surrogate cis \
     --lr 1e-6 \
     \

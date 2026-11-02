@@ -47,7 +47,6 @@ If using group mode, return one reward per sample in input order.
 ### Step 3: Keep Reward Type Consistent
 
 - Return scalar numeric rewards unless your pipeline explicitly uses keyed rewards.
-- If using reward dicts, ensure downstream `reward_key` / `eval_reward_key` is configured.
 - Keep exceptions explicit for invalid metadata instead of silently returning zeros.
 
 ### Step 4: Optional Reward Post-Processing
@@ -79,7 +78,6 @@ Use:
 ## Common Mistakes
 
 - Returning wrong output shape in group mode
-- Mixing scalar rewards and reward dicts without `reward_key` config
 - Doing blocking network calls without async handling
 - Forgetting to validate reward behavior on truncated/failed samples
 

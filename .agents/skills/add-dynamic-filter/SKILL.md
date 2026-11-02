@@ -20,8 +20,7 @@ Use this skill when:
 
 ### Step 1: Pick the Correct Hook
 
-- Dynamic sampling filter: `--dynamic-sampling-filter-path`
-- Buffer filter: `--buffer-filter-path`
+- Dynamic sampling filter: `--rollout-group-filter-path`
 - Per-sample rollout filter: `--rollout-sample-filter-path`
 - All-samples post process: `--rollout-all-samples-process-path`
 
@@ -31,10 +30,10 @@ Dynamic sampling filter (called in `slim/rollout/sglang_rollout.py`):
 
 ```python
 def filter_function(args, samples, **kwargs):
-    # return DynamicFilterOutput or bool
+    # return DynamicFilterOutput
 ```
 
-Preferred return type:
+Return type:
 
 ```python
 from slim.rollout.filter_hub.base_types import DynamicFilterOutput
@@ -74,8 +73,7 @@ def process_all_samples(args, all_samples, data_source):
 Example wiring:
 
 ```bash
---dynamic-sampling-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
---buffer-filter-path <module>.buffer_filter
+--rollout-group-filter-path slim.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std
 --rollout-sample-filter-path <module>.rollout_sample_filter
 --rollout-all-samples-process-path <module>.process_all_samples
 ```

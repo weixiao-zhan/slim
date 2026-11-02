@@ -65,7 +65,7 @@ def test_decode_generated_text_requires_rollout_prediction_alignment(monkeypatch
 
 
 def test_generate_handles_aborted_routing_replay_response(monkeypatch):
-    async def build_trajectory(_state, _episode):
+    async def build_trajectory(_state, _episode, _top_k):
         return Trajectory(token_ids=[10, 11], loss_mask=[0], rollout_log_probs=[0.0])
 
     async def post(_url, _payload, headers=None):

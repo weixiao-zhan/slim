@@ -23,8 +23,8 @@ class RolloutHealthMonitor:
     - stop(): Stop the monitor thread completely (called during dispose)
     """
 
-    def __init__(self, server_group, args):
-        self._server_group = server_group
+    def __init__(self, server, args):
+        self._server = server
 
         self._thread = None
         self._stop_event = None
@@ -34,7 +34,6 @@ class RolloutHealthMonitor:
         self._check_timeout = args.rollout_health_check_timeout
         self._check_first_wait = args.rollout_health_check_first_wait
         self._need_first_wait = True  # Need to wait after each resume
-        self._is_checking_enabled = False  # Track if health checking should be active
 
     def start(self) -> bool:
         """Start the health monitor thread. Called once during initialization.
@@ -42,7 +41,7 @@ class RolloutHealthMonitor:
         Returns:
             True if the monitor was started, False if there are no engines to monitor.
         """
-        if not self._server_group.all_engines:
+        if not self._server.all_engines:
             return False
 
         if self._thread is not None:
@@ -82,7 +81,6 @@ class RolloutHealthMonitor:
         self._thread = None
         self._stop_event = None
         self._pause_event = None
-        self._is_checking_enabled = False
 
     def pause(self) -> None:
         """Pause health checking. Called when engines are offloaded.
@@ -95,7 +93,6 @@ class RolloutHealthMonitor:
             return
         logger.info("Pausing health monitor...")
         self._pause_event.set()
-        self._is_checking_enabled = False
         # Wait for any in-flight health check to finish
         self._check_lock.acquire()
         self._check_lock.release()
@@ -107,11 +104,6 @@ class RolloutHealthMonitor:
         logger.info("Resuming health monitor...")
         self._need_first_wait = True  # Need to wait after each resume
         self._pause_event.clear()
-        self._is_checking_enabled = True
-
-    def is_checking_enabled(self) -> bool:
-        """Return whether health checking is currently enabled (not paused)."""
-        return self._is_checking_enabled
 
     def _health_monitor_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -144,7 +136,7 @@ class RolloutHealthMonitor:
 
     def _run_health_checks(self) -> None:
         with self._check_lock:
-            for rollout_engine_id, engine in enumerate(self._server_group.engines):
+            for rollout_engine_id, engine in enumerate(self._server.engines):
                 if self._stop_event is not None and self._stop_event.is_set():
                     break
                 if self._pause_event is not None and self._pause_event.is_set():
@@ -162,6 +154,6 @@ class RolloutHealthMonitor:
             logger.error(
                 f"Health check failed for rollout engine {rollout_engine_id} (ray timeout or error). Killing actor. Exception: {e}"
             )
-            self._server_group.kill_engine(rollout_engine_id)
+            self._server.kill_engine(rollout_engine_id)
         else:
             logger.debug(f"Health check passed for rollout engine {rollout_engine_id}")

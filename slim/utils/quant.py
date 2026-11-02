@@ -26,10 +26,11 @@ Two scale formats:
   * ue8m0 (scale_fmt="ue8m0")-- DeepSeek-V3.1 / DeepGEMM-on-Blackwell style: each block
                                scale is rounded UP to a power of two. On disk the scale
                                is still a float32 power-of-two (sglang re-packs it at
-                               load). The ONLINE sync path additionally packs it into the
-                               int32 MN-major TMA-aligned layout DeepGEMM consumes at
-                               runtime, because the sync path does not re-run sglang's
-                               `process_weights_after_loading` (see QuantizerFP8.quantize).
+                               load). For the layers the engine runs on DeepGEMM, the
+                               ONLINE sync path additionally packs it into the int32
+                               MN-major TMA-aligned layout DeepGEMM consumes at runtime,
+                               because the engine re-lays out scales only at its initial
+                               load (see QuantizerFP8.quantize).
 """
 
 import torch
@@ -154,21 +155,25 @@ def _block_fp8_ue8m0(weight, block_size):
     Delegates to sglang's `per_block_cast_to_fp8` so the e4m3 weights and the
     fp32 power-of-two scales are bit-identical to what the rollout engine itself
     produces (the engine requants its own checkpoints through the same function).
-    The returned scale is a float32 power of two with shape (n_tiles, k_tiles);
-    the online path packs it into DeepGEMM's int32 layout (see QuantizerFP8).
+    The returned scale is a float32 power of two with shape (..., n_tiles, k_tiles);
+    the online path packs it into DeepGEMM's int32 layout for the layers the engine
+    runs on DeepGEMM (see QuantizerFP8).
     """
     from sglang.srt.layers.quantization.fp8_utils import per_block_cast_to_fp8
 
     if list(block_size) != [128, 128]:
         raise ValueError(f"ue8m0 scales require 128x128 blocks, got {block_size}")
     # per_block_cast_to_fp8 expects a 2D tensor; it pads to 128-multiples internally
-    # and crops the weight back to the original shape. Scale shape: (n/128, k/128).
-    qweight, scale = per_block_cast_to_fp8(weight)
-    return qweight.contiguous(), scale
+    # and crops the weight back to the original shape. Leading (expert) dims fold into n,
+    # which callers keep a multiple of 128, so no block spans two experts.
+    # Scale shape: (..., n/128, k/128).
+    *batch_shape, n, k = weight.shape
+    qweight, scale = per_block_cast_to_fp8(weight.reshape(-1, k))
+    return qweight.view(*batch_shape, n, k), scale.view(*batch_shape, -1, scale.shape[-1])
 
 
 def block_fp8(weight, block_size, scale_fmt=None):
-    """Quantize a 2D weight to block-FP8. Returns (e4m3 weight, float32 scale).
+    """Quantize a weight to block-FP8 over its last two dims. Returns (e4m3 weight, float32 scale).
 
     scale_fmt=None  -> full float32 scales.
     scale_fmt="ue8m0" -> power-of-two (float32) scales, matching DeepGEMM on Blackwell.
@@ -199,24 +204,40 @@ def pack_ue8m0_scale_for_engine(scale, mn):
     (int32, MN-major, TMA-aligned, 4 UE8M0 bytes per int32).
 
     Reuses sglang's `transform_scale_ue8m0` so the packed bytes match the engine
-    exactly. Only needed on the online sync path on Blackwell, where the engine
-    consumes scales without re-running its load-time requant.
+    exactly. Only needed on the online sync path, for the layers the engine runs on
+    DeepGEMM (see `_engine_runs_deepgemm`).
     """
     from sglang.srt.layers.quantization.fp8_utils import transform_scale_ue8m0
 
     return transform_scale_ue8m0(scale, mn=mn)
 
 
-def _engine_expects_packed_ue8m0():
-    """True iff the local rollout engine consumes int32-packed UE8M0 scales at runtime
-    (DeepGEMM on Blackwell). On Hopper/Ada the engine keeps fp32 power-of-two scales.
-    """
-    try:
-        from sglang.srt.layers.deep_gemm_wrapper.configurer import DEEPGEMM_SCALE_UE8M0
+def _engine_runs_deepgemm(engine_args, grouped_moe):
+    """True iff the rollout engine runs its dense (or grouped MoE) FP8 layers on DeepGEMM.
 
-        return bool(DEEPGEMM_SCALE_UE8M0)
-    except ImportError:
-        return False
+    Follows sglang's load-time requant decision, read from the engine's backend args
+    (`engine_args.sglang_*`). The layer must run on DeepGEMM: dense layers do with
+    `--fp8-gemm-backend` auto or deep_gemm, grouped MoE layers with `--moe-runner-backend`
+    deep_gemm, or auto with a DeepEP-style all-to-all. Then sglang's
+    `should_deepgemm_weight_requant_ue8m0` gates the GPU (dense: SM100 only) and the shape
+    of each weight. Every other layer keeps fp32 power-of-two scales.
+    """
+    from sglang.srt.layers.moe.utils import MoeA2ABackend, resolve_moe_runner_backend
+    from sglang.srt.layers.quantization.fp8 import Fp8MoEMethod
+
+    if grouped_moe:
+        # sglang resolves these before it picks the MoE runner: Waterfill forces the DeepEP
+        # all-to-all, and DeepEP v2 and PPLX turn an auto runner into deep_gemm.
+        a2a = engine_args.sglang_moe_a2a_backend
+        if engine_args.sglang_enable_waterfill and a2a not in ("deepep", "megamoe"):
+            a2a = "deepep"
+        runner = engine_args.sglang_moe_runner_backend
+        if runner == "auto" and a2a in ("deepep_v2", "pplx"):
+            runner = "deep_gemm"
+        return Fp8MoEMethod.is_deepgemm_moe_runner_backend_enabled(
+            resolve_moe_runner_backend(runner), MoeA2ABackend(a2a)
+        )
+    return engine_args.sglang_fp8_gemm_runner_backend in ("auto", "deep_gemm")
 
 
 class Quantizer:
@@ -227,8 +248,11 @@ class Quantizer:
     """
 
     @classmethod
-    def maybe_from_checkpoint(cls, hf_checkpoint):
-        """Build the quantizer matching `hf_checkpoint`'s config, or None if unquantized."""
+    def maybe_from_checkpoint(cls, hf_checkpoint, args):
+        """Build the quantizer matching `hf_checkpoint`'s config, or None if unquantized.
+
+        `args` carries the rollout engine's `sglang_*` backend settings.
+        """
         from transformers import AutoConfig
 
         config = AutoConfig.from_pretrained(hf_checkpoint, trust_remote_code=True)
@@ -237,7 +261,7 @@ class Quantizer:
             return None
         method = qc.get("quant_method")
         if method == "fp8":
-            return QuantizerFP8.from_quant_config(qc)
+            return QuantizerFP8.from_quant_config(qc, args)
         raise NotImplementedError(
             f"Online weight sync does not support quant_method={method!r} yet; "
             "use a block-FP8 or unquantized --hf-checkpoint for the rollout engine."
@@ -253,17 +277,20 @@ class QuantizerFP8(Quantizer):
     engine and the synced weights share one recipe and keep-list by construction.
     """
 
-    def __init__(self, block_size, keep_patterns, scale_fmt=None):
+    def __init__(self, block_size, keep_patterns, scale_fmt=None, engine_args=None):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_kept = make_keep_predicate(keep_patterns)
-        # Packing the UE8M0 scale into DeepGEMM's int32 layout is required ONLY when the
-        # local engine consumes that layout at runtime (Blackwell). On Hopper/Ada the
-        # engine keeps fp32 power-of-two scales, so we leave the scale unpacked.
-        self._pack_ue8m0 = scale_fmt == "ue8m0" and _engine_expects_packed_ue8m0()
+        # The engine's sglang backend args decide which layers run on DeepGEMM and so get the packed
+        # UE8M0 scale layout, keyed by grouped_moe (see `_engine_runs_deepgemm`).
+        self.runs_deepgemm = {}
+        if scale_fmt == "ue8m0":
+            self.runs_deepgemm = {
+                grouped_moe: _engine_runs_deepgemm(engine_args, grouped_moe) for grouped_moe in (False, True)
+            }
 
     @classmethod
-    def from_quant_config(cls, qc):
+    def from_quant_config(cls, qc, args):
         assert qc.get("weight_block_size"), (
             "FP8 weight sync only supports per-block. sglang applies special "
             "per-tensor/per-channel transforms at load that the sync path can't replicate."
@@ -281,9 +308,10 @@ class QuantizerFP8(Quantizer):
             list(qc["weight_block_size"]),
             list(qc.get("modules_to_not_convert") or []),
             scale_fmt=scale_fmt,
+            engine_args=args,
         )
 
-    def _quantize_weight(self, name, param):
+    def _quantize_weight(self, name, param, grouped_moe):
         if hasattr(param, "wait"):
             param = param.wait()
         block_n = self.block_size[0]
@@ -291,16 +319,21 @@ class QuantizerFP8(Quantizer):
             f"{name}: output dim {param.shape[-2]} is not divisible by block size {block_n}"
         )
         qweight, scale = block_fp8(param, self.block_size, scale_fmt=self.scale_fmt)
-        if self._pack_ue8m0:
-            scale = pack_ue8m0_scale_for_engine(scale, mn=qweight.shape[-2])
+        if self.runs_deepgemm.get(grouped_moe):
+            from sglang.srt.model_loader.utils import should_deepgemm_weight_requant_ue8m0
+
+            if should_deepgemm_weight_requant_ue8m0(
+                [128, 128], torch.bfloat16, param.shape[-2:], grouped_moe=grouped_moe
+            ):
+                scale = pack_ue8m0_scale_for_engine(scale, mn=qweight.shape[-2])
         return qweight, scale
 
     def _quantize_linear_weight(self, name, param):
-        qweight, scale = self._quantize_weight(name, param)
+        qweight, scale = self._quantize_weight(name, param, grouped_moe=False)
         return ((name, qweight), (name.replace(".weight", ".weight_scale_inv"), scale))
 
     def _quantize_grouped_expert_weight(self, name, param):
-        qweight, scale = self._quantize_weight(name, param)
+        qweight, scale = self._quantize_weight(name, param, grouped_moe=True)
         expert_prefix, projection = name.rsplit(".", 1)
         if projection == "gate_up_proj":
             gate_scale, up_scale = scale.chunk(2, dim=-2)

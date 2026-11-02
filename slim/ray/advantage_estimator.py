@@ -34,9 +34,11 @@ class AdvantageEstimator:
     def compute_training_targets(
         self,
         rollout_data_refs: list,
-        value_payloads: list[dict] | None = None,
+        value_refs: list | None = None,
     ) -> list:
+        """Publish every DP rank's batch with training targets; `value_refs` are the critic's value payload refs."""
         batches = ray.get(rollout_data_refs)
+        value_payloads = None if value_refs is None else ray.get(value_refs)
         self.compute_partition_training_targets(batches, value_payloads)
         return [ray.put(batch) for batch in batches]
 

@@ -16,7 +16,7 @@ from slim.rollout.worker import RolloutWorkerPool, finalize_trajectories
 from slim.utils.data import process_rollout_data
 from slim.utils.misc import SingletonMeta
 from slim.utils.trajectory_batch import build_dp_batches
-from slim.utils.types import Episode, Trajectory
+from slim.utils.types import BULK_FIELDS, Episode, Trajectory
 
 NUM_GPUS = 0
 NODE_IDS = [f"{1:056x}"]
@@ -156,7 +156,7 @@ def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fak
     monkeypatch.setattr(sglang_rollout, "load_processor", lambda *args, **kwargs: None)
     env_steps = []
 
-    async def generate(state, episode):
+    async def generate(state, episode, evaluation=False):
         episode.trajectories.append(Trajectory(token_ids=[1, 2], loss_mask=[1], rollout_log_probs=[0.0]))
         if episode.example["prompt"] == "fast":
             episode.reward = 1.0
@@ -177,12 +177,10 @@ def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fak
         rollout_num_gpus=1,
         hf_checkpoint="unused",
         apply_chat_template_kwargs=None,
-        sglang_dp_size=None,
         use_rollout_routing_replay=False,
         group_rm=False,
         custom_generate_function_path=None,
         rollout_seed=0,
-        rollout_global_dataset=True,
         rollout_group_filter_path=None,
         rollout_sample_filter_path=None,
         rollout_all_samples_process_path=None,
@@ -212,7 +210,7 @@ def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fak
 
 @pytest.fixture(scope="module")
 def local_ray():
-    ray.init(num_cpus=1, include_dashboard=False)
+    ray.init(address="local", num_cpus=1, include_dashboard=False)
     yield
     ray.shutdown()
 
@@ -249,7 +247,7 @@ def test_bulk_fields_round_trip_by_reference(local_ray):
     )
     refs = [ray.put(batch) for batch in batches]
 
-    fetched = [trajectory for rank in range(2) for trajectory in process_rollout_data(refs, rank, 2).trajectories]
+    fetched = [trajectory for rank in range(2) for trajectory in process_rollout_data(refs, rank, BULK_FIELDS).trajectories]
     real = [trajectory for trajectory in fetched if trajectory.episode_index is not None]
     padding = [trajectory for trajectory in fetched if trajectory.episode_index is None]
     assert len(real) == 1 and len(padding) == 1

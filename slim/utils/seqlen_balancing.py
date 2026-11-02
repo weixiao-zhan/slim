@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import heapq
 
 
@@ -172,21 +171,6 @@ def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     return partitions
 
 
-def greedy_partition(seqlen_list: list[int], k_partitions: int, equal_size: bool):
-    bias = sum(seqlen_list) + 1 if equal_size else 0
-    sorted_seqlen = [(seqlen + bias, i) for i, seqlen in enumerate(seqlen_list)]
-    partitions = [[] for _ in range(k_partitions)]
-    partition_sums = [0 for _ in range(k_partitions)]
-    for seqlen, i in sorted_seqlen:
-        min_idx = None
-        for j in range(k_partitions):
-            if min_idx is None or partition_sums[j] < partition_sums[min_idx]:
-                min_idx = j
-        partitions[min_idx].append(i)
-        partition_sums[min_idx] += seqlen
-    return partitions
-
-
 def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     """get order of seq lengths to make partitions balanced, this is
         used in balacing sum of seqlength across dp ranks and microbatches
@@ -205,12 +189,3 @@ def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, eq
     """
     partitions = karmarkar_karp(seqlen_list=seqlen_list, k_partitions=k_partitions, equal_size=equal_size)
     return [sorted(partition) for partition in partitions]
-
-
-def get_reverse_idx(idx_map):
-    reverse_idx_map = copy.deepcopy(idx_map)
-
-    for i, idx in enumerate(idx_map):
-        reverse_idx_map[idx] = i
-
-    return reverse_idx_map

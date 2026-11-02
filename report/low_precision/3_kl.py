@@ -36,8 +36,8 @@ import common as C
 def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: int, r3: bool):
     """Construct a full slim args Namespace via slim's own parser, with a synthetic argv.
 
-    A forward-only actor: --debug-train-only skips sglang; --get-mismatch-metrics +
-    --old-logprob-source actor force the actor-old forward (the training logprob we compare to rollout).
+    A forward-only actor: --debug-train-only skips sglang; the actor's own forward gives the
+    training logprob we compare to rollout.
     """
     argv = [
         "--debug-train-only",  # do not parse/launch sglang
@@ -53,8 +53,6 @@ def build_slim_args(model_dir: str, max_context_len: int, max_tokens_per_gpu: in
         "--max-context-len", str(max_context_len),
         "--global-batch-size", "1",  # set per-call below to the episode count
         "--rollout-temperature", "1",
-        "--old-logprob-source", "actor",
-        "--get-mismatch-metrics",
         "--advantage-estimator", "grpo",
         # Keep the checkpoint's BF16 storage: FSDP2 computes in BF16 either way, and the forward-only
         # actor has no optimizer, so fp32 master weights would only double memory (BF16-35B fits).
@@ -93,7 +91,7 @@ def records_to_trajectories(d, limit=None):
         if rec.get("has_experts"):
             arr = C.load_experts(d, rec["sample_idx"])
             if arr is not None:
-                traj.rollout_routed_experts = torch.from_numpy(arr).to(torch.int32)
+                traj.rollout_routed_experts = torch.from_numpy(arr).to(torch.int16)
         if rec.get("has_mm"):
             # Restore the processor-output tensors (pixel_values, image_grid_thw, ...) onto the
             # trajectory so the actor runs slim's VLM forward branch (image embeddings + MRoPE).
@@ -175,39 +173,40 @@ def main():
     batch = TrajectoryBatch(trajectories=trajectories)
 
     packed_batches, _ = actor._packed_data(batch)
-    actor._compute_log_prob("actor", packed_batches, store_key="actor_old_log_probs")
+
+    from slim.backends.nemo.loss import selective_log_probs
+
+    def train_log_probs(prepared):
+        output = actor.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        local_log_probs = selective_log_probs(
+            output.logits,
+            prepared.fields["labels"][:, prepared.loss_positions],
+            temperature=actor.args.rollout_temperature,
+        )
+        return prepared.scatter_loss_values(local_log_probs)
+
+    actor._forward_only(actor.model, packed_batches, "train_log_probs", store_key="cur_log_probs", forward=train_log_probs)
 
     # --- per-token AND sequence-level K3 KL over generated predictions ---
     # Unpack each packed batch into per-episode source-token-aligned tensors. With
     # Δ_i = train_logprob_i - rollout_logprob_i on each generated prediction slot i:
     #   per-token K3  : kl_k3_i = exp(Δ_i) - Δ_i - 1
-    #   sequence K3   : length-NORMALIZED, GSPO-style (slim's compute_gspo_kl averages the
-    #                   log-ratio over the sequence). Let Δ_seq = Σ_i Δ_i over the L generated
+    #   sequence K3   : length-NORMALIZED, GSPO-style (slim's GSPO averages the log-ratio
+    #                   over the sequence). Let Δ_seq = Σ_i Δ_i over the L generated
     #                   predictions (= log P_train(seq) - log P_rollout(seq)); the mean log-ratio is
     #                   s_bar = Δ_seq / L, then kl_k3_seq = exp(s_bar) - s_bar - 1 (one per seq).
     # Both are the K3 estimator (exp(x)-x-1). Normalizing by L keeps the sequence ratio O(1)
     # regardless of length (the raw Σ_i Δ_i exponentiates an unbounded sum and is tail-explosive).
     from slim.backends.nemo.data_packing import unpack_sequences
-    from slim.utils.mismatch import compute_mismatch_metrics
 
     all_kl = []                       # pooled per-token, across all sequences
     seq_kl, seq_delta = [], []        # one per sequence
     per_sample = []
     for batch in packed_batches:
-        if "actor_old_log_probs" not in batch:
-            continue
-        unpacked = unpack_sequences(batch)
-        train_lps = [u["actor_old_log_probs"] for u in unpacked]
-        rollout_lps = [u["rollout_log_probs"] for u in unpacked]
-        masks = [u["loss_masks"] for u in unpacked]
-        _, _, m = compute_mismatch_metrics(
-            actor.args, train_log_probs=train_lps, rollout_log_probs=rollout_lps, loss_masks=masks
-        )
-        for kl_t, train_t, roll_t, mask_t in zip(
-            m.get("kl_k3", []), train_lps, rollout_lps, masks, strict=True
-        ):
-            sel = mask_t.bool().cpu()
-            kl = kl_t.float().cpu()[sel].numpy()
+        for document in unpack_sequences(batch):
+            sel = document["loss_masks"].bool().cpu()
+            log_ratio = (document["cur_log_probs"].float().cpu() - document["rollout_log_probs"].float().cpu())[sel]
+            kl = (log_ratio.exp() - log_ratio - 1).numpy()
             if kl.size == 0:
                 continue
             # per-token
@@ -215,7 +214,7 @@ def main():
             # sequence-level (length-normalized, GSPO-style): mean log-ratio over this
             # sequence's generated predictions, then K3. Normalizing by L keeps it O(1) and
             # comparable across lengths (raw Σ Δ exponentiates an unbounded sum -> tail explosion).
-            delta_seq = float((train_t.float().cpu()[sel] - roll_t.float().cpu()[sel]).sum().item())
+            delta_seq = float(log_ratio.sum().item())
             s_bar = delta_seq / kl.size  # mean log-ratio; kl.size == # generated predictions (L)
             kl_seq = float(np.exp(s_bar) - s_bar - 1.0)
             seq_delta.append(delta_seq)
@@ -246,8 +245,8 @@ def main():
             # by rare outliers), so we report mean (headline) + p99 (tail), not std.
             "kl_k3_token_mean": float(flat_kl.mean()),
             "kl_k3_token_p99": float(np.percentile(flat_kl, 99)),
-            # sequence-level K3 (length-normalized mean log-ratio, GSPO-style); now O(1), unlike
-            # the old un-normalized form. Reported as mean (headline) + p99 (tail).
+            # sequence-level K3 (length-normalized mean log-ratio, GSPO-style), so O(1) regardless of
+            # length. Reported as mean (headline) + p99 (tail).
             "kl_k3_seq_mean": float(seq_kl_arr.mean()),
             "kl_k3_seq_p99": float(np.percentile(seq_kl_arr, 99)),
             "delta_seq_mean": float(seq_delta_arr.mean()),

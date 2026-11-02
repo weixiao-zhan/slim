@@ -15,13 +15,7 @@ def call_dynamic_filter(fn, *args, **kwargs):
     if fn is None:
         return DynamicFilterOutput(keep=True)
 
-    output = fn(*args, **kwargs)
-
-    # compatibility for legacy version
-    if not isinstance(output, DynamicFilterOutput):
-        output = DynamicFilterOutput(keep=output)
-
-    return output
+    return fn(*args, **kwargs)
 
 
 class MetricGatherer:
