@@ -35,7 +35,7 @@ run: | # shell
     uv run hf download "Qwen/${MODEL_NAME}" --local-dir "${HOME}/models/${MODEL_NAME}"
   fi
   if [ ! -f "${HOME}/datasets/mixed/train.parquet" ]; then
-    uv run python tests/prepare_mixed.py
+    uv run python tests/e2e/prepare_mixed.py
   fi
 
   # =========================================================================

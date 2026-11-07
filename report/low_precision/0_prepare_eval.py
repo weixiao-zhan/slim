@@ -66,7 +66,7 @@ def main():
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Text math: take the FIRST --n-eval (disjoint from tests/prepare_mixed.py's train slice, which
+    # Text math: take the FIRST --n-eval (disjoint from tests/e2e/prepare_mixed.py's train slice, which
     # uses range(100, len) — these may overlap that train slice, but for a standalone eval study that
     # is fine since we are not training on it here).
     dapo_all = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train").shuffle(seed=42)

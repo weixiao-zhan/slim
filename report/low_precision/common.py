@@ -89,7 +89,7 @@ def mamba_cli_flags(concurrency: int) -> tuple:
     return ("--max-mamba-cache-size", str(MAMBA_SLOTS_PER_REQUEST * concurrency),
             "--mamba-radix-cache-strategy", MAMBA_RADIX_CACHE_STRATEGY)
 
-# Eval splits -> (parquet path, rm_type). 100-example sets from tests/prepare_mixed.py.
+# Eval splits -> (parquet path, rm_type). 100-example sets from tests/e2e/prepare_mixed.py.
 # The study uses 100 examples x 4 samples/prompt per split.
 SPLITS = {
     "math": ("datasets/mixed/test_math.parquet", "math"),

@@ -25,7 +25,6 @@ _SLIM_MANAGED_SERVER_ARGS = frozenset(
         "gpu_id_step",
         "base_gpu_id",
         "nccl_port",
-        "skip_server_warmup",
     }
 )
 

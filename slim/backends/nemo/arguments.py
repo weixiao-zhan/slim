@@ -26,7 +26,7 @@ class NeMoArgs:
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_eps: float = 1e-8
-    optimizer: Literal["adamw", "muon"] = "adamw"
+    optimizer: Literal["adamw", "muon"] = "muon"
     muon_momentum: float = 0.95
     # Storage dtype of the trained weights (the adapters under PEFT). The optimizer updates them in place with
     # no master copy; FSDP2 computes in bf16 either way, and `auto` keeps the checkpoint's dtype.

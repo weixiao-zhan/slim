@@ -1,0 +1,257 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import time
+from types import SimpleNamespace
+
+import pytest
+import ray
+import torch
+
+import slim.rollout.sglang_rollout as sglang_rollout
+import slim.rollout.worker as worker_module
+from slim.rollout.sglang_rollout import RolloutGroup
+from slim.rollout.worker import RolloutWorkerPool, finalize_trajectories
+from slim.utils.data import process_rollout_data
+from slim.utils.misc import SingletonMeta
+from slim.utils.trajectory_batch import build_dp_batches
+from slim.utils.types import BULK_FIELDS, Episode, Trajectory
+
+NUM_GPUS = 0
+NODE_IDS = [f"{1:056x}"]
+
+
+class LocalHandle:
+    """Exposes an in-process object through the actor call shape `handle.method.remote(...)`."""
+
+    def __init__(self, instance):
+        self.instance = instance
+
+    def __getattr__(self, name):
+        method = getattr(self.instance, name)
+        return SimpleNamespace(remote=lambda *args, **kwargs: method(*args, **kwargs))
+
+
+class FakeWorkerClass:
+    """Stands in for the `RolloutWorker` actor class."""
+
+    def __init__(self, make_worker):
+        self.make_worker = make_worker
+
+    def options(self, **kwargs):
+        return SimpleNamespace(remote=lambda args: LocalHandle(self.make_worker(args)))
+
+
+class BlockingWorker:
+    def __init__(self, index: int, calls: list, releases: dict):
+        self.index = index
+        self.calls = calls
+        self.releases = releases
+
+    def __ray_ready__(self):
+        return True
+
+    async def run_group(self, group, evaluation):
+        self.calls.append((self.index, group.index))
+        await self.releases.setdefault(group.index, asyncio.Event()).wait()
+        group.completed = True
+        return group
+
+
+def _args(**overrides):
+    values = dict(
+        rollout_concurrency_per_replica=4,
+        rollout_num_gpus=2,
+        rollout_num_gpus_per_replica=1,
+        rollout_num_workers=1,
+        router_ip="127.0.0.1",
+        router_port=30000,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _group(index: int, num_episodes: int, prompt: str = "") -> RolloutGroup:
+    example = {"prompt": prompt or f"prompt-{index}"}
+    return RolloutGroup(index=index, example=example, episodes=[Episode.from_example(example) for _ in range(num_episodes)])
+
+
+async def _settle():
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+@pytest.fixture
+def fake_cluster(monkeypatch):
+    """Patch actor creation so the pool builds over in-process workers."""
+    monkeypatch.setattr(SingletonMeta, "_instances", {})
+    monkeypatch.setattr(worker_module.ray, "get", lambda refs: refs)
+
+    def install(make_worker):
+        monkeypatch.setattr(worker_module, "RolloutWorker", FakeWorkerClass(make_worker))
+
+    return install
+
+
+@pytest.fixture
+def fake_router(monkeypatch):
+    posts = []
+
+    async def get(url):
+        return {"workers": [{"url": "http://engine-0"}, {"url": "http://engine-1"}]}
+
+    async def post(url, payload, max_retries=60, headers=None):
+        posts.append((url, payload))
+        return {}
+
+    monkeypatch.setattr(worker_module, "get", get)
+    monkeypatch.setattr(worker_module, "post", post)
+    return posts
+
+
+def test_pool_dispatches_to_least_loaded_worker_below_capacity(fake_cluster):
+    calls, releases, workers = [], {}, []
+
+    def make_worker(args):
+        workers.append(BlockingWorker(len(workers), calls, releases))
+        return workers[-1]
+
+    fake_cluster(make_worker)
+
+    async def run():
+        pool = RolloutWorkerPool(_args(rollout_num_workers=2), NODE_IDS)
+        assert pool.concurrency == 4
+
+        tasks = [asyncio.create_task(pool.run_group(_group(i, 3), evaluation=False)) for i in range(5)]
+        await _settle()
+        assert calls == [(0, 0), (1, 1), (0, 2), (1, 3)]
+        assert pool.loads == [6, 6]
+        assert not tasks[4].done()
+
+        releases[2].set()
+        await _settle()
+        assert calls[-1] == (0, 4)
+        assert pool.loads == [6, 6]
+
+        for index in range(5):
+            releases.setdefault(index, asyncio.Event()).set()
+        groups = await asyncio.gather(*tasks)
+        assert pool.loads == [0, 0]
+        assert [group.index for group in groups] == list(range(5))
+        assert all(group.completed for group in groups)
+
+    asyncio.run(run())
+
+
+class _Tokenizer:
+    def decode(self, token_ids):
+        return ",".join(str(token_id) for token_id in token_ids)
+
+
+def test_generate_rollout_drains_slow_environment_step_on_abort(monkeypatch, fake_cluster, fake_router):
+    monkeypatch.setattr(sglang_rollout, "load_tokenizer", lambda *args, **kwargs: _Tokenizer())
+    monkeypatch.setattr(sglang_rollout, "load_processor", lambda *args, **kwargs: None)
+    env_steps = []
+
+    async def generate(state, episode, evaluation=False):
+        episode.trajectories.append(Trajectory(token_ids=[1, 2], loss_mask=[1], rollout_log_probs=[0.0]))
+        if episode.example["prompt"] == "fast":
+            episode.reward = 1.0
+            episode.status = Episode.Status.COMPLETED
+            return episode
+        while True:
+            if state.aborted:
+                episode.status = Episode.Status.ABORTED
+                return episode
+            await asyncio.to_thread(time.sleep, 0.2)
+            env_steps.append(episode.example["prompt"])
+
+    monkeypatch.setattr(sglang_rollout, "generate", generate)
+    local_worker_class = worker_module.RolloutWorker.__ray_metadata__.modified_class
+    fake_cluster(local_worker_class)
+
+    args = _args(
+        rollout_num_gpus=1,
+        hf_checkpoint="unused",
+        apply_chat_template_kwargs=None,
+        use_rollout_routing_replay=False,
+        group_rm=False,
+        custom_generate_function_path=None,
+        rollout_seed=0,
+        rollout_group_filter_path=None,
+        rollout_sample_filter_path=None,
+        rollout_all_samples_process_path=None,
+        rollout_batch_size=1,
+        over_sampling_batch_size=3,
+        n_samples_per_prompt=2,
+        max_context_len=16,
+    )
+    examples = [{"prompt": "fast"}, {"prompt": "slow"}, {"prompt": "slow-waiting"}]
+
+    async def run():
+        pool = RolloutWorkerPool(args, NODE_IDS)
+        output, aborted_examples = await sglang_rollout.generate_rollout_async(args, 0, lambda n: [examples.pop(0) for _ in range(n)])
+        return pool, output, aborted_examples
+
+    pool, output, aborted_examples = asyncio.run(run())
+
+    assert [episode.example["prompt"] for episode in output.episodes] == ["fast", "fast"]
+    assert all(episode.status == Episode.Status.COMPLETED for episode in output.episodes)
+    assert sorted(example["prompt"] for example in aborted_examples) == ["slow", "slow-waiting"]
+    assert "slow" in env_steps
+    assert fake_router
+    assert pool.loads == [0]
+    assert not pool.pendings and not pool.aborted
+    assert not pool.workers[0].instance.state.aborted
+
+
+@pytest.fixture(scope="module")
+def local_ray():
+    ray.init(address="local", num_cpus=1, include_dashboard=False)
+    yield
+    ray.shutdown()
+
+
+def _bulk_episode() -> Episode:
+    trajectory = Trajectory(
+        token_ids=[1, 2, 3],
+        loss_mask=[1, 1],
+        rollout_log_probs=[-0.1, -0.2],
+        rollout_routed_experts=torch.arange(8, dtype=torch.int32).reshape(2, 2, 2),
+        multimodal_inputs={"pixel_values": torch.arange(8.0).reshape(2, 4), "image_grid_thw": torch.tensor([[1, 1, 2]])},
+    )
+    return Episode(trajectories=[trajectory], reward=1.0, episode_index=0, group_index=0)
+
+
+def test_bulk_fields_round_trip_by_reference(local_ray):
+    episode = _bulk_episode()
+    expected_inputs = dict(episode.trajectory.multimodal_inputs)
+    finalize_trajectories(RolloutGroup(index=0, example={}, episodes=[episode]))
+    assert isinstance(episode.trajectory.multimodal_inputs, ray.ObjectRef)
+    assert isinstance(episode.trajectory.rollout_routed_experts, ray.ObjectRef)
+    assert episode.trajectory.loss_mask.tolist() == [1, 1, 0]
+
+    batches = build_dp_batches(
+        [episode],
+        dp_size=2,
+        num_steps=1,
+        loss_normalization_unit="episode",
+        pad_token_id=0,
+        balance_data=False,
+        top_k=None,
+        routing_replay_shape=(2, 2),
+    )
+    refs = [ray.put(batch) for batch in batches]
+
+    fetched = [trajectory for rank in range(2) for trajectory in process_rollout_data(refs, rank, BULK_FIELDS).trajectories]
+    real = [trajectory for trajectory in fetched if trajectory.episode_index is not None]
+    padding = [trajectory for trajectory in fetched if trajectory.episode_index is None]
+    assert len(real) == 1 and len(padding) == 1
+    assert set(real[0].multimodal_inputs) == set(expected_inputs)
+    for key, value in expected_inputs.items():
+        torch.testing.assert_close(real[0].multimodal_inputs[key], value)
+    assert real[0].rollout_routed_experts.shape == (3, 2, 2)
+    assert real[0].rollout_routed_experts[-1].eq(0).all()
+    assert padding[0].rollout_routed_experts.shape == (2, 2, 2)
+    assert padding[0].multimodal_inputs is None

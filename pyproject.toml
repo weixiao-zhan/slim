@@ -3,18 +3,15 @@ name = "slim"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "accelerate",
     "datasets>=3.2.0",
     "dion",
     "flash-attn",
     "flash-attn-3",
     # FLA 0.6.0 compiles 160 KB of shared memory per block for the 128-dim GatedDeltaNet CP state.
     "flash-linear-attention==0.5.2",
-    "httpx[http2]",
-    "liger-kernel",
+    "httpx",
     "nemo-automodel[fla,vlm]==0.7.0",
     "omegaconf",
-    "packaging",
     "orjson",
     "pylatexenc",
     "pybase64",
@@ -29,12 +26,6 @@ dependencies = [
     "transformers==5.19.0",
     "wandb",
 ]
-classifiers = [
-    "Programming Language :: Python :: 3.12",
-    "Environment :: GPU :: NVIDIA CUDA",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: System :: Distributed Computing",
-]
 
 [project.scripts]
 slim-train = "slim.train:main"
@@ -43,8 +34,6 @@ slim-train-async = "slim.train_async:main"
 [project.optional-dependencies]
 dev = [
     "memray",
-    "nvidia-ml-py",
-    "pillow",
     "pre-commit",
     "pytest",
     "ruff",
@@ -55,6 +44,8 @@ strands = [
     "strands-agents-tools",
 ]
 quant = [
+    # tools/convert_hf_to_nvfp4.py loads with device_map="auto".
+    "accelerate",
     "nvidia-modelopt==0.47.0",
 ]
 
@@ -80,68 +71,16 @@ name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
-[tool.isort]
-profile = "black"  # black-compatible
-line_length = 119  # should match black parameters
-ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
-py_version = 312  # python 3.12 as a target version
-sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
-default_section = "THIRDPARTY"
-extend_skip = ["setup.py", "docs/source/conf.py"]
-known_first_party = ["slim"]
-known_third_party = ["wandb", "ray", "transformers"]
-src_paths = ["slim"]
-
-[tool.black]
-line_length = 119
-
-[tool.ruff]
-line-length = 320  # TODO
-
 [tool.ruff.lint]
-select = [
-    "E",      # Pycodestyle Errors (Structural/Fundamental Errors like bad indentation)
-    "F",      # Pyflakes (Core Errors: Unused imports, undefined names)
-    "B",      # Flake8-Bugbear (Logic Bugs: Variable shadowing, dangerous default arguments)
-    "UP",     # pyupgrade (Modernization and compatibility issues)
-]
+select = ["E", "F", "B", "UP"]
 ignore = [
     "E402", # module-import-not-at-top-of-file
-    "E501", # Line too long # TODO handle it later
+    "E501", # line-too-long
 ]
 
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with duration = 0.00s
-addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
-testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
-# directories to ignore when discovering tests
-norecursedirs = [
-    "external",
-    "examples",
-    "docs",
-    "scripts",
-    "tools",
-    "tutorials",
-    "*.egg",
-    ".*",
-    "_darcs",
-    "build",
-    "CVS",
-    "dist",
-    "venv",
-    "{arch}",
-]
-# markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
-markers = [
-    "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
-    "integration: marks test checking the elements when integrated into subsystems (deselect with '-m \"not integration\"')",
-    "system: marks test working at the highest integration level (deselect with '-m \"not system\"')",
-    "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
-    "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
-    "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
-    "pleasefixme: marks tests that are broken and need fixing",
-]
+addopts = "--strict-markers"
+testpaths = ["tests/unit"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux'"]

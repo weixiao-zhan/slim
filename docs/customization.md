@@ -186,16 +186,6 @@ See [Endpoints and Tokenization Ownership](sglang-config.md#endpoints-and-tokeni
 --custom-rm-path my_project.rewards.multi_turn_rm
 ```
 
-## Testing Custom Hooks
-
-Contract tests in `tests/plugin_contracts/` check, without GPU, how `generate_and_rm` dispatches to a custom generate function: a per-episode function takes precedence over `--custom-generate-function-path`, `evaluation` reaches the function, and every trajectory is decoded from its own ids:
-
-```bash
-pytest tests/plugin_contracts/ -v
-```
-
-CI label: `run-ci-plugin-contracts`.
-
 ---
 
 **See also:** [Data Layout](data-layout.md) | [SGLang Config](sglang-config.md) | [Training Loss](training-loss.md)

@@ -1,5 +1,15 @@
 # Running Tests
 
+## Layout
+
+| Path | Contents | Hardware |
+|------|----------|----------|
+| `tests/unit/` | pytest tests, mirroring the `slim/` package | CPU; the fused-kernel tests need one GPU and skip without it |
+| `tests/e2e/` | end-to-end sweeps and qualification harnesses, their data preparation, `common.sh` and `sanity_check.py` | 2 to 8 GPUs |
+| `tests/e2e/nemo/` | `torchrun` qualification harnesses of the NeMo backend | 8 GPUs |
+
+`tests/e2e/template_run.sh` and `tests/e2e/run_strands_35b_a3b_lora.sh` are training recipes, not tests.
+
 ## Prerequisites
 
 ```bash
@@ -9,7 +19,15 @@ uv sync --extra dev
 uv run python patch_dependencies.py
 ```
 
-## Models
+## Unit Tests
+
+```bash
+uv run pytest
+```
+
+## End-to-End Tests
+
+### Models
 
 Models, datasets, and outputs all live under the repo root. 
 The test scripts resolve these via `$REPO_DIR`.
@@ -18,55 +36,34 @@ The test scripts resolve these via `$REPO_DIR`.
 hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
 ```
 
-### FP8 checkpoints (prerequisite for `sweep_fp8.sh`)
-
-`sweep_fp8.sh` needs a pre-forged FP8 copy of the base model alongside the bf16 one:
+`sweep_e2e.sh` also needs `models/Qwen3.5-35B-A3B-tiny`, a random-weight Qwen3.5 MoE with 4 layers and 16 experts, and a weightless block-FP8 rollout checkpoint that it loads with `--sglang-load-format dummy`. The first weight sync fills it:
 
 ```bash
 # fp32 block scales
 uv run python tools/convert_hf_to_fp8.py \
     --model-dir models/Qwen3.5-4B \
     --save-dir models/Qwen3.5-4B-FP8 \
-    --ref-config tools/quant_recipes/qwen35_128blockfp8.json
+    --ref-config tools/quant_recipes/qwen35_128blockfp8.json \
+    --config-only
 ```
 
-## Datasets
+### Datasets
 
-Two source datasets — **DAPO-Math-17k** (text math) and **geometry3k** (vision/VLM) —
-plus a **mixed** set derived from both.
+The tests train on the **mixed** set: DAPO-Math-17k (text math) and geometry3k (vision).
 
 ```bash
-# DAPO-17k (math tests): open-r1/DAPO-Math-17k-Processed
-# -> datasets/dapo17k/train.parquet
-uv run python tests/prepare_dapo17k_tokenizer_ready.py
-
-# Geo3K (vision tests): hiyouga/geometry3k
-# -> datasets/geo3k/{train,test}.parquet
-uv run python tests/prepare_geo3k_processor_ready.py
-
-# Mixed (GRPO mixed tests): DAPO-Math-17k (text) + geometry3k (vision)
-# -> datasets/mixed/{train,test_math,test_vision}.parquet
-uv run python tests/prepare_mixed.py
+# -> datasets/mixed/{train,train_balanced,test_math,test_vision}.parquet
+uv run python tests/e2e/prepare_mixed.py
 ```
 
-## Running
+### Running
 
-Every script starts one ray cluster, then submits its job(s) with
-`ray job submit --no-wait` and exits. Jobs queue on the cluster: each job's
-driver blocks in `ray.get(pg.ready())` until the previous job's
-`RolloutManager.dispose` releases the GPUs, so a sweep's combos run sequentially without restarting ray between them.
+Each script starts one ray cluster and runs its jobs one at a time, because later jobs read the rollouts or checkpoints of earlier ones.
 
 ```bash
-bash tests/test_grpo_profile.sh
-bash tests/sweep_trajectory.sh
-bash tests/sweep_placement.sh
-bash tests/sweep_dataset.sh
-bash tests/sweep_algo.sh
-bash tests/sweep_surrogate.sh
-bash tests/sweep_fp8.sh
-bash tests/sweep_peft.sh
-bash tests/run_nemo_mixed_cp_ep.sh
-bash tests/run_nemo_grad_norm_matrix.sh
+bash tests/e2e/sweep_e2e.sh
+bash tests/e2e/run_nemo_mixed_cp_ep.sh
+bash tests/e2e/run_nemo_grad_norm_matrix.sh
 ```
 
 Watch progress and grade externally via ray's own log management:
@@ -77,80 +74,61 @@ uv run ray job logs <id> --follow    # stream one job
 # Grade a finished job: job success, finite actor/critic losses, non-degenerate
 # rollout reward, >=2 weight updates. Args are <expect_actor> <expect_critic> (0/1).
 uv run ray job logs <id> > out.log
-uv run python tests/sanity_check.py out.log <expect_actor> <expect_critic>
+uv run python tests/e2e/sanity_check.py out.log <expect_actor> <expect_critic>
 ```
 
-### on Blackwell (SM120)
+### Available Tests
 
-SM120 need following treatment:
+Each test changes several independent axes in one run instead of the full product of their values, so every axis value runs at least once. The unit tests cover the combinations of surrogate, score centering, loss normalization, and batch partitioning.
+Live combos generate with SGLang only for the axes that need the engines; the other combos replay saved rollouts.
+Pass combo or case names to run a subset.
 
-- **Training attention:** packed Qwen3.5 uses AutoModel's FlashAttention 2 varlen CP kernel when available and falls back to PyTorch SDPA.
-- **Rollout GEMM:** SGLang defaults to DeepGEMM for FP8 on Blackwell, which expects UE8M0 scales. The Hopper sweep uses the official FP32 block-scale checkpoint. To run that checkpoint on Blackwell, add `--sglang-fp8-gemm-backend triton`.
-
-## Available Tests
-
-Two kinds of tests live here:
-
-- **Sweeps** (`sweep_*.sh`) — each submits a matrix of combos along one axis on a
-  single 8-GPU node. Run all combos with no args, or a subset by passing combo names.
-- **Standalone tests** — single runs that exercise an orthogonal axis (precision,
-  profiling) not covered by a sweep.
-
-GRPO and GSPO tests use the built-in nonzero reward standard-deviation group filter. The rollout loop oversamples and refills until it has the configured `rollout-batch-size` of accepted groups, so every retained group has nonzero reward variance and contributes group-relative learning signal. PPO tests do not use this filter.
-
-### Sweeps
-
-| Sweep | Axis | Combos | Model |
-|-------|------|--------|-------|
-| `sweep_placement.sh` | rollout and critic colocation placement | 4 PPO combos | Qwen3.5-4B |
-| `sweep_dataset.sh` | PPO × data modality | `math`, `vision` | Qwen3.5-4B |
-| `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-4B |
-| `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `mis`, `cis` | Qwen3.5-4B |
-| `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32` | Qwen3.5-4B (+ FP8 forge) |
-| `sweep_peft.sh` | LoRA training, merged weight sync, PEFT checkpoints, reference | 12 combos, 2 GPUs | Qwen3.5-4B (+ FP8 forge), Qwen3.5-35B-A3B-tiny |
-| `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 10 combos (see below) | Qwen3.5-4B |
+| Test | Covers | Runs | Model |
+|------|--------|------|-------|
+| `sweep_e2e.sh` | placement, trainer, weight sync, FP8 rollout, estimator, surrogate, batch layout, LoRA, MoE EP, profiler | 5 live + 8 replay | Qwen3.5-4B (+ FP8 forge), Qwen3.5-35B-A3B-tiny |
+| `run_nemo_mixed_cp_ep.sh` | GRPO with TP2 rollout, CP2 and EP8 training, routing replay | 1 | Qwen3.6-35B-A3B |
+| `run_nemo_grad_norm_matrix.sh` | gradient norm parity of CP and EP on captured rollouts | 1 capture + 2 | Qwen3.6-35B-A3B |
 
 ```bash
-hf download Qwen/Qwen3.5-4B --local-dir models/Qwen3.5-4B
-uv run python tests/prepare_mixed.py
-bash tests/sweep_placement.sh                       # all combos
-bash tests/sweep_placement.sh colocate_critic_async # a single combo
-bash tests/sweep_surrogate.sh cis                   # just the CIS combo
+bash tests/e2e/sweep_e2e.sh                     # all combos
+bash tests/e2e/sweep_e2e.sh ppo_colocate_critic # a single combo
+bash tests/e2e/sweep_e2e.sh save resume         # resume needs the checkpoint of save
 ```
 
-The sweeps use **Qwen3.5-4B**. Their SGLang rollout engines use
-`flash_attention_3` on Hopper. On A100/L40s switch the rollout backend to
-`flash_attention_2`; on Blackwell/SM120 use `sdpa`.
+#### `sweep_e2e.sh`
 
-### `sweep_trajectory.sh`
+Every combo trains on `train_balanced.parquet` with reasoning disabled, 4 prompts and 8 samples per prompt.
+GPU counts scale with `NUM_GPUS` (N). `ppo_disagg` needs at least 4 GPUs.
+Live combos run 2 rollouts. Colocated ones run `slim-train` and sync weights over CUDA IPC; disaggregated ones run `slim-train-async` and sync over NCCL.
+Full-parameter combos use the Muon default with fp32 master weights; PEFT combos train fp32 adapters with `--optimizer adamw`.
+`capture` saves its rollouts, and `prepare_heterogeneous_rollout.py` builds a 32-episode fixture from them in `outputs/sweep-e2e-replay/`.
+Replay combos train on that fixture on N GPUs without SGLang and with round-robin assignment, so DP rank 1 holds the vision episodes and the other ranks hold pure text.
+The tiny MoE has random weights and cannot generate useful rollouts, but it shares the tokenizer and processor of Qwen3.5-4B, so it replays the same fixture.
 
-Sized for a **4-GPU node** with disaggregated placement (2 GPUs train, 2 serve rollout),
-so weight sync goes over NCCL rather than the CUDA IPC path, which needs `CAP_SYS_PTRACE`.
+| Combo | Rollout | Placement | Model and weights | Estimator and surrogate | Other axes |
+|-------|---------|-----------|-------------------|-------------------------|------------|
+| `capture` | live, saved | actor and rollout N | 4B LoRA, FP8 rollout | GRPO, `mis` with score centering | KL to the shared reference, CP2, rollout profiler |
+| `ppo_disagg` | live | actor N/4, critic N/4, rollout N/2 | 4B, bf16 rollout | PPO, `ppo_clip` | |
+| `ppo_colocate_rollout` | live | actor N/2, critic N/2, rollout colocated | 4B LoRA actor and critic, bf16 rollout | PPO, `ppo_clip` | 2 optimizer steps per rollout, saves |
+| `ppo_colocate_critic` | live | actor and critic N/2, rollout N/2 | 4B LoRA actor and critic, FP8 rollout | PPO, `ppo_clip` | token loss normalization |
+| `ppo_colocate_all` | live | actor, critic and rollout N | 4B, bf16 rollout | PPO, `ppo_clip` | round-robin instead of Karmarkar-Karp |
+| `grpo` | replay | actor N | 4B | GRPO, `cis` | trajectory loss normalization |
+| `grpo_std` | replay | actor N | 4B | GRPO with group std normalization, `is` | CP2 |
+| `gspo` | replay | actor N | 4B | GSPO | fixed micro-batch size 2 |
+| `save` | replay | actor N | 4B LoRA | GRPO, `ppo_clip` | KL to the shared reference, saves |
+| `resume` | replay | actor N | 4B LoRA | GRPO, `ppo_clip` | resumes `save` |
+| `kl_adapter` | replay | actor N | 4B LoRA | GRPO, `ppo_clip` | adapter initialization, KL to the adapter reference |
+| `moe` | replay | actor N | tiny MoE expert LoRA | GRPO, `ppo_clip` | EP2, KL to a separate reference model, policy update profiler |
+| `ppo_resume` | replay | actor N/2, critic N/2 | 4B LoRA actor and critic | PPO, `ppo_clip` | resumes `ppo_colocate_rollout` |
 
-Combos cover the layout's degrees of freedom: `unit_episode`, `unit_trajectory`,
-`unit_token` (the three `--loss-normalization-unit` values); `multi_step` (partition
-across optimizer steps as well as ranks); `cp2` (context parallel halves the logical DP
-size); `grpo_std`, `gspo`, `ppo` (estimators, PPO adding the trajectory-keyed critic value
-round trip); `fixed_mbs` (fixed micro-batching, which requires exactly equal pack counts
-per rank with no dynamic re-split available); `no_balance` (round-robin instead of
-Karmarkar-Karp).
-
-### Standalone tests
-
-Tests default to the **mixed** (math+vision) dataset unless noted.
-
-| Test | Algorithm | Notes |
-|------|-----------|-------|
-| `test_grpo_profile.sh` | GRPO + CIS | torch profiler harness |
-| `run_nemo_mixed_cp_ep.sh` | GRPO | Qwen3.6-35B-A3B, TP2 rollout, CP2 and EP8 training |
-| `run_nemo_grad_norm_matrix.sh` | GRPO | Qwen3.6-35B-A3B, CP1/CP2 and EP1/EP8 comparison |
-
-## Environment Variables
+### Environment Variables
 
 Each test hardcodes its `MODEL_DIR`, `DATASET_DIR`, and `SAVE_DIR` near the top of the
-script — edit the script directly to change paths. The only runtime env vars are:
+script; edit the script directly to change paths. The only runtime env vars are:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WANDB_API_KEY` | (from `.env`) | Weights & Biases API key |
-| `NUM_GPUS` | `8` | Number of GPUs for ray |
+| `NUM_GPUS` | all visible GPUs | Number of GPUs for ray |
+| `SWEEP_E2E_REPLAY_DIR` | `outputs/sweep-e2e-replay` | Rollouts of `capture` and the replay fixture |
+| `SWEEP_E2E_CKPT_DIR` | `/mnt/sagemaker-nvme/checkpoints/sweep-e2e` | Checkpoints of `sweep_e2e.sh`, deleted when it exits |

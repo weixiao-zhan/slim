@@ -7,7 +7,7 @@
 # Strands is an optional extra. Sync before common.sh so that its
 # patch_dependencies.py run re-applies the SGLang patches afterwards.
 uv sync --extra dev --extra strands
-source "$(dirname "$0")/../../tests/common.sh"
+source "$(dirname "$0")/../../tests/e2e/common.sh"
 
 TRAIN_MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B"
 ROLLOUT_MODEL_DIR="$REPO_DIR/models/Qwen3.6-35B-A3B-FP8"

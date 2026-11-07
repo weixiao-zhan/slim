@@ -37,7 +37,7 @@ NeMoAutoModelForImageTextToText.from_pretrained(...)
 
 `BackendConfig` uses an internal `sdpa` attention dispatch. AutoModel's packed CP runtime sends that dispatch to the FlashAttention 2 varlen kernel and falls back to PyTorch SDPA when the varlen kernel is unavailable. Packed full-attention layers use needed-only halo K/V exchange by default. Documents spanning more than two CP ranks use A2A exchange, while cross-node CP groups fall back to all-gather. Linear, RMS normalization, expert GEMM, and MoE dispatcher backends are selected with `--nemo-linear-backend`, `--nemo-rms-norm-backend`, `--nemo-experts-backend`, and `--nemo-dispatcher`. Their non-FP8 choices follow AutoModel's `BackendConfig`; the defaults are `torch`, `torch_fp32`, `torch_mm`, and `torch`. Other choices retain AutoModel's hardware, dependency, and combination constraints. `FSDP2Config` uses AutoModel's default BF16 parameter and output policy with FP32 gradient reduction. Layer parameters reshard after forward, while prefetch scheduling follows AutoModel's FSDP2 defaults. `--master-weight-dtype` sets the storage dtype of the trained policy and critic. The optimizer updates the stored parameters in place and keeps no master copy, so the default `fp32` makes them the master weights while FSDP2 still computes in BF16; `auto` keeps the checkpoint's dtype. The frozen reference model has no optimizer and keeps the checkpoint's dtype. FSDP2 shards at every world size, including one GPU, so its precision policy always applies; `dependency_patches/nemo_automodel.py` removes AutoModel's single-GPU skip. Qwen3.5's model-defined fp32 Gated DeltaNet holders remain separate dtype-uniform FSDP units that compute in fp32. `DistributedSetup` constructs the FSDP2, CP, and EP meshes before model creation. The optimizer runs over the resulting distributed parameters.
 
-`--optimizer` selects `adamw` (default) or `muon`. `adamw` is AutoModel's `AdamWConfig` with `--weight-decay`, `--adam-beta1`, `--adam-beta2`, and `--adam-eps`. `muon` is Dion's FSDP2 `Muon` with Moonshot's Moonlight recipe: Nesterov momentum `--muon-momentum` (default 0.95), five quintic Newton-Schulz steps with coefficients $(3.4445, -4.7750, 2.0315)$, update scale $0.2\sqrt{\max(m, n)}$ so that the update RMS matches AdamW, and decoupled weight decay `--weight-decay`. The Muon update applies to the 2D matrices and the 3D grouped expert weights. Embeddings, the output embedding, biases, 1D parameters, convolution weights, and the critic value head use Dion's AdamW with the AdamW flags. When experts are FSDP-sharded over `ep_shard > 1` (EP smaller than the FSDP size), their matrix shards are outside Dion's FSDP mesh, so they use AdamW and the backend logs this. Each Slim parameter group splits into a Muon subgroup and an AdamW subgroup with the same `max_lr` and `start_step`. Optimizer state from one optimizer does not load into the other; use `--no-load-optim` to switch.
+`--optimizer` selects `muon` (default) or `adamw`. `adamw` is AutoModel's `AdamWConfig` with `--weight-decay`, `--adam-beta1`, `--adam-beta2`, and `--adam-eps`. `muon` is Dion's FSDP2 `Muon` with Moonshot's Moonlight recipe: Nesterov momentum `--muon-momentum` (default 0.95), five quintic Newton-Schulz steps with coefficients $(3.4445, -4.7750, 2.0315)$, update scale $0.2\sqrt{\max(m, n)}$ so that the update RMS matches AdamW, and decoupled weight decay `--weight-decay`. The Muon update applies to the 2D matrices and the 3D grouped expert weights. Embeddings, the output embedding, biases, 1D parameters, convolution weights, and the critic value head use Dion's AdamW with the AdamW flags. When experts are FSDP-sharded over `ep_shard > 1` (EP smaller than the FSDP size), their matrix shards are outside Dion's FSDP mesh, so they use AdamW and the backend logs this. Each Slim parameter group splits into a Muon subgroup and an AdamW subgroup with the same `max_lr` and `start_step`. Optimizer state from one optimizer does not load into the other; use `--no-load-optim` to switch.
 
 AutoModel applies the parameter freeze configuration before sharding and optimizer construction. Vision, audio, and language model parameters are trainable by default. The CLI flags `--freeze-vision-tower`, `--freeze-audio-tower`, and `--freeze-language-model` explicitly select frozen components.
 
@@ -308,9 +308,9 @@ To get a full model, `nemo_automodel.export_merged_peft_checkpoint` merges an ad
 Hardware-independent checks:
 
 ```bash
-uv run ruff check slim/backends/nemo tests/backends/nemo
-uv run pytest tests/backends/nemo -q
-uv run pytest tests/utils/test_ppo_utils.py -q
+uv run ruff check slim/backends/nemo tests/unit/backends/nemo tests/e2e/nemo
+uv run pytest tests/unit/backends/nemo -q
+uv run pytest tests/unit/utils/test_ppo_utils.py -q
 uv run python -c "import slim.backends.nemo"
 ```
 
@@ -380,12 +380,12 @@ The sampled memory profile does not show a rank-zero memory premium. GPU 3 was t
 The packed CP harness compares CP candidates against an eight-GPU CP1 baseline:
 
 ```bash
-uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
   --checkpoint /path/to/Qwen3.5-35B-A3B \
   --context-parallel-size 1 \
   --output /tmp/qwen35-cp1.pt
 
-uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
   --checkpoint /path/to/Qwen3.5-35B-A3B \
   --context-parallel-size 2 \
   --output /tmp/qwen35-cp2.pt \
@@ -395,13 +395,13 @@ uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_c
 For MoE CP and EP composition, hold EP fixed in the baseline and candidate:
 
 ```bash
-uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
   --checkpoint /path/to/Qwen3.5-35B-A3B \
   --context-parallel-size 1 \
   --expert-parallel-size 8 \
   --output /tmp/qwen35-cp1-ep8.pt
 
-uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_cp_qualification.py \
+uv run torchrun --standalone --nproc-per-node 8 tests/e2e/nemo/run_packed_cp_qualification.py \
   --checkpoint /path/to/Qwen3.5-35B-A3B \
   --context-parallel-size 2 \
   --expert-parallel-size 8 \
@@ -411,15 +411,9 @@ uv run torchrun --standalone --nproc-per-node 8 tests/backends/nemo/run_packed_c
 
 The harness verifies finite outputs and gradients, exact packed-document isolation, block-diagonal attention execution, target log-probability parity, mean-loss parity, aggregate gradient parity, and first-sequence-layer parity. Baseline and candidate artifacts must use the same expert-parallel size.
 
-The heterogeneous multimodal harness derives one fixed 256-episode fixture from a captured rollout. Each eight-episode group receives a rotated permutation of rewards from \(0\) through \(1\), so every group has mean reward \(0.5\) and all 256 centered advantages are nonzero. Vision episodes occupy global indices 1, 9, 17, and 25. With CP1 and logical DP8, DP rank 1 receives 28 text and 4 vision episodes, while every other DP rank receives 32 text-only episodes. The harness runs the same serialized fixture at EP4 and EP8 with the vision tower frozen and trainable:
+`tests/e2e/sweep_e2e.sh` trains its replay combos on a fixed fixture in which DP rank 1 holds the vision episodes and every other DP rank holds pure text. The vision tower is trainable in the full-parameter combos and frozen as part of the PEFT base in the LoRA combos. Every physical rank enters the synchronized vision path: text-only ranks use a dummy visual input to preserve FSDP collective ordering, and the dummy result contributes a zero-valued autograd dependency when the vision tower is trainable.
 
-```bash
-bash tests/run_nemo_heterogeneous_multimodal.sh
-```
-
-The harness records the rollout log probabilities with a forward on each fixed pack immediately before backward, which makes the rollout versus current \(k_3\) KL zero. The harness requires every physical rank to enter the synchronized vision path. Text-only ranks use a dummy visual input to preserve FSDP collective ordering, and the dummy result contributes a zero-valued autograd dependency when the vision tower is trainable. It also verifies the DP1-only modality layout, unchanged frozen vision parameters, and nonzero trainable vision updates.
-
-`tests/sweep_peft.sh` runs the PEFT qualification on two GPUs: full-parameter and LoRA training on dense Qwen3.5, expert LoRA on Qwen3.5 MoE with EP2, LoRA with FP8 rollout, save and resume, adapter initialization, PPO with a LoRA actor and critic, and KL with the shared reference, a separate reference model, and an adapter reference.
+`tests/e2e/sweep_e2e.sh` runs the PEFT qualification: LoRA with merged block-FP8 and bf16 rollout weights, expert LoRA on Qwen3.5 MoE with EP2, save and resume, adapter initialization, PPO with a LoRA actor and critic, and KL with the shared reference, a separate reference model, and an adapter reference. The checkpoint and reference combos replay saved rollouts in which one DP rank holds the vision episodes and the other ranks hold pure text.
 
 GPU qualification covers dense CP, MoE CP and EP composition, heterogeneous multimodal batches, both vision freeze states, routing replay, checkpoint resume, LoRA, and NeMo versus SGLang target log-probability parity.
 
@@ -428,12 +422,6 @@ The eight-GPU qualification results for the pinned revision are:
 | Path | Topology | Result |
 |---|---|---|
 | Dense Qwen3.5 packed parity | CP1 and CP2 | Block-diagonal attention fired in all 12 full-attention calls. Mean losses were 9.479804 and 9.491175. |
-| Qwen3.5 MoE heterogeneous multimodal, frozen vision | CP1 and EP4 | \(k_3\) KL was 0, pre-clip gradient norm was 0.2695210, and the tracked vision parameter update norm was 0. |
-| Qwen3.5 MoE heterogeneous multimodal, frozen vision | CP1 and EP8 | \(k_3\) KL was 0, pre-clip gradient norm was 0.2702204, and the tracked vision parameter update norm was 0. |
-| Qwen3.5 MoE heterogeneous multimodal, trainable vision | CP1 and EP4 | \(k_3\) KL was 0, pre-clip gradient norm was 0.2700823, and the tracked vision parameter update norm was 13.09052. |
-| Qwen3.5 MoE heterogeneous multimodal, trainable vision | CP1 and EP8 | \(k_3\) KL was 0, pre-clip gradient norm was 0.2706632, and the tracked vision parameter update norm was 13.09165. |
 | Qwen3.5 MoE actor step | CP2 and EP8 | All 40 routing layers replayed at least twice, including activation-checkpoint recomputation. Loss was -0.1109375 and gradient norm was 329.1560. |
 | Dense state-dict conversion | CP2 | Converted 474 tensors totaling 2,214,532,352 bytes. |
 | MoE grouped-expert conversion | CP2 and EP8 | Converted 1,026 tensors totaling 70,214,367,712 bytes. |
-
-The EP4 frozen and trainable runs used 48,742 to 48,880 MiB and 52,456 to 52,594 MiB of NVML process memory after the optimizer step. The EP8 frozen and trainable runs used 42,432 to 42,956 MiB and 42,600 to 43,178 MiB. Rank 0 was not the highest-memory process in any case.

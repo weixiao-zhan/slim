@@ -53,7 +53,6 @@ def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
             api_key=server_args.api_key,
             is_process_alive=lambda: p.is_alive(),
         )
-        requests.post(f"{server_args.url()}/freeze_gc").raise_for_status()
 
     return p
 
@@ -383,8 +382,6 @@ def _compute_server_args(
         "max_running_requests": int(args.rollout_concurrency_per_replica),
         # truncate over-length prompts instead of rejecting the request.
         "allow_auto_truncate": True,
-        # always skip warmup to prevent warmup timeout.
-        "skip_server_warmup": True,
         # always enable draft weights cpu backup so that we run training without mtp weights.
         "enable_draft_weights_cpu_backup": True,
         # use the PIL image processor to avoid compatibility issues with some VLMs.
@@ -420,7 +417,6 @@ _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
     "random_seed",
     "nccl_port",
     "dist_init_addr",
-    "skip_server_warmup",
     "enable_draft_weights_cpu_backup",
     "mem_fraction_static",
 ]
