@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from nemo_automodel.components._peft.lora import PeftConfig
+from nemo_automodel.components.checkpoint.addons import load_automodel_peft_config_dict
 from nemo_automodel.components.checkpoint.config import CheckpointingConfig
 from nemo_automodel.components.checkpoint.stateful_wrappers import ModelState
 
@@ -62,6 +64,12 @@ def is_hf_checkpoint(path: str | Path) -> bool:
     )
 
 
+def is_peft_adapter_dir(path: str | Path) -> bool:
+    """Return whether a path holds a NeMo PEFT adapter save."""
+    adapter = Path(path).expanduser()
+    return (adapter / "adapter_config.json").exists() and (adapter / "automodel_peft_config.json").exists()
+
+
 def resolve_checkpoint_dir(load_root: str | None, args: Any) -> Path | None:
     """Resolve a Slim iteration directory from a checkpoint root."""
     if load_root is None:
@@ -87,14 +95,39 @@ def _checkpoint_root(trainer: Any) -> str:
     return str(Path(checkpoint_dir or trainer.args.hf_checkpoint).expanduser())
 
 
+def resolve_model_source(load_root: str | None, args: Any, peft_config: dict | None) -> tuple[str, PeftConfig | None]:
+    """Return the Hugging Face checkpoint that a model loaded from `load_root` builds from, and its PEFT config.
+
+    A NeMo PEFT adapter directory, or the `model/` of a Slim PEFT checkpoint, carries its PEFT config, which takes
+    precedence over `peft_config`. PEFT builds on --hf-checkpoint. Without PEFT, a Hugging Face `load_root`
+    replaces --hf-checkpoint.
+    """
+    root = None if load_root is None else Path(load_root).expanduser()
+    checkpoint_dir = resolve_checkpoint_dir(load_root, args)
+    peft_dir = None
+    if root is not None and is_peft_adapter_dir(root):
+        peft_dir = root
+    elif checkpoint_dir is not None and is_peft_adapter_dir(checkpoint_dir / "model"):
+        peft_dir = checkpoint_dir / "model"
+    if peft_dir is not None:
+        logger.info("Using the PEFT config saved in %s", peft_dir)
+        peft_config = load_automodel_peft_config_dict(str(peft_dir))
+    is_hf = peft_dir is None and root is not None and is_hf_checkpoint(root)
+    if peft_config is None:
+        return str(root) if is_hf else args.hf_checkpoint, None
+    if is_hf:
+        raise ValueError(f"PEFT builds on --hf-checkpoint, so it cannot load the Hugging Face checkpoint {root}")
+    return args.hf_checkpoint, PeftConfig.from_dict(peft_config)
+
+
 def build_checkpointer(trainer: Any):
     """Build the pinned AutoModel checkpointer for a trainer."""
-    is_actor = trainer.role == "actor"
     config = CheckpointingConfig(
         checkpoint_dir=_checkpoint_root(trainer),
-        model_save_format="safetensors" if is_actor else "torch_save",
+        model_save_format="safetensors",
         model_repo_id=trainer.args.hf_checkpoint,
-        save_consolidated=trainer.args.checkpoint_save_consolidated if is_actor else "false",
+        save_consolidated=trainer.args.checkpoint_save_consolidated if trainer.role == "actor" else "false",
+        is_peft=trainer.peft_config is not None,
         is_async=trainer.args.async_save,
         wait_for_staging=trainer.args.async_save,
         cpu_offload=trainer.args.checkpoint_cpu_offload,
@@ -114,8 +147,13 @@ def _has_rank_state(checkpoint_dir: Path, state_name: str) -> bool:
 
 
 def load(trainer: Any) -> dict[str, Any] | None:
-    """Restore model and optional optimizer state from a Slim checkpoint."""
+    """Restore model and optional optimizer state from a Slim checkpoint or a NeMo PEFT adapter directory."""
     load_root = trainer._checkpoint_load_dir
+    if load_root is not None and is_peft_adapter_dir(load_root):
+        # An adapter directory holds the adapters only, so the optimizer and the other states start fresh.
+        logger.info("Loading NeMo PEFT adapter from %s", load_root)
+        trainer.checkpointer.load_model(trainer.model, str(Path(load_root).expanduser()))
+        return None
     checkpoint_dir = resolve_checkpoint_dir(load_root, trainer.args)
     if checkpoint_dir is None:
         logger.info("No NeMo checkpoint found at %s", load_root)
@@ -126,14 +164,14 @@ def load(trainer: Any) -> dict[str, Any] | None:
         raise FileNotFoundError(f"model checkpoint not found: {model_dir}")
 
     logger.info("Loading NeMo model checkpoint from %s", model_dir)
-    trainer.checkpointer.load_model(trainer.checkpoint_model, str(model_dir))
+    trainer.checkpointer.load_model(trainer.model, str(model_dir))
 
     optim_dir = checkpoint_dir / "optim"
     if not trainer.args.no_load_optim and optim_dir.exists():
         logger.info("Loading NeMo optimizer checkpoint from %s", optim_dir)
         trainer.checkpointer.load_optimizer(
             trainer.optimizer,
-            trainer.checkpoint_model,
+            trainer.optimizer_model,
             str(checkpoint_dir),
             None if trainer.args.no_load_lr_scheduler else trainer.lr_scheduler,
         )
@@ -160,16 +198,8 @@ def finalize_load(trainer: Any, payload: dict[str, Any] | None) -> None:
         return
 
     checkpoint_dir = payload["checkpoint_dir"]
-    if (
-        trainer.role == "actor"
-        and trainer.ref_model is not None
-        and (checkpoint_dir / "reference").exists()
-    ):
-        trainer.checkpointer.load_distributed_state(
-            ModelState(trainer.ref_model),
-            "reference",
-            str(checkpoint_dir),
-        )
+    for name, module in trainer.checkpoint_states().items():
+        trainer.checkpointer.load_distributed_state(ModelState(module), name, str(checkpoint_dir))
 
     if not trainer.args.no_load_rng and _has_rank_state(checkpoint_dir, "rng"):
         trainer.checkpointer.load_on_dp_ranks(RNGState(), "rng", str(checkpoint_dir))
@@ -242,28 +272,26 @@ def save(trainer: Any, rollout_id: int, *, force_sync: bool = False) -> None:
         checkpoint_dir.mkdir(parents=True)
     dist.barrier()
 
+    # `model/` holds the backbone of either role, so an adapter of either role can initialize the other.
     trainer.checkpointer.save_model(
-        trainer.checkpoint_model,
+        trainer.model,
         str(checkpoint_dir),
+        peft_config=trainer.peft_config,
         tokenizer=(trainer.processor or trainer.tokenizer) if trainer.role == "actor" else None,
         is_final_checkpoint=force_sync,
     )
+    for name, module in trainer.checkpoint_states().items():
+        trainer.checkpointer.save_distributed_state(ModelState(module), name, str(checkpoint_dir))
     if not trainer.args.no_save_optim:
         if trainer.args.optimizer == "adamw":
             _initialize_missing_adamw_state(trainer.optimizer)
         trainer.checkpointer.save_optimizer(
             trainer.optimizer,
-            trainer.checkpoint_model,
+            trainer.optimizer_model,
             str(checkpoint_dir),
             trainer.lr_scheduler,
         )
 
-    if trainer.role == "actor" and trainer.ref_model is not None:
-        trainer.checkpointer.save_distributed_state(
-            ModelState(trainer.ref_model),
-            "reference",
-            str(checkpoint_dir),
-        )
     trainer.checkpointer.save_on_dp_ranks(RNGState(), "rng", str(checkpoint_dir))
 
     if dist.get_rank() == 0:

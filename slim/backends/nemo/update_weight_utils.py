@@ -11,6 +11,7 @@ from collections.abc import Iterator
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.shared.tied_weights import is_tied_word_embeddings
 from ray.actor import ActorHandle
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import _CHECKPOINT_PREFIX
 from torch.distributed.fsdp import FSDPModule
@@ -22,6 +23,9 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.quant import FUSED_EXPERT_SUFFIXES
+from slim.utils.timer import timer
+
+from .peft import LORA_MODULES, merged_lora_weights
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,17 @@ class UpdateWeight(abc.ABC):
         self.quantizer = quantizer
         self.state_dict_adapter = model.state_dict_adapter
         self.compute_dtypes = _compute_dtypes(model)
+        # Under PEFT the engines receive every adapted weight merged into its base, and no adapter tensors.
+        self.lora_modules = {
+            f"{name}.".replace(_CHECKPOINT_PREFIX, ""): module
+            for name, module in model.named_modules()
+            if isinstance(module, LORA_MODULES)
+        }
+        # The engine holds one matrix for tied word embeddings, so it cannot run an adapted `lm_head`.
+        if is_tied_word_embeddings(model) and isinstance(model.get_output_embeddings(), LORA_MODULES):
+            raise ValueError("LoRA on lm_head requires untied word embeddings")
+        # The merged weights of an offloading policy, on the CPU from its last offload until the next one.
+        self.staged_merges: dict[str, torch.Tensor] | None = None
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -95,9 +110,54 @@ class UpdateWeight(abc.ABC):
         or is None if not all of these GPUs are actor GPUs.
         """
 
+    @torch.no_grad()
+    def _merged_weights(self, device: str | None = None) -> dict[str, torch.Tensor]:
+        """Merge every adapter into its base weight, by state dict name, on the model's device or on `device`.
+
+        Each merged weight takes the compute dtype of its base weight.
+        """
+        training = self.model.training
+        # AutoModel merges no adapter whose dropout is active.
+        self.model.eval()
+        merged = {}
+        for prefix, module in self.lora_modules.items():
+            for name, weight in merged_lora_weights(module).items():
+                weight = weight.to(self.compute_dtypes.get(prefix + name, getattr(module, name).dtype))
+                merged[prefix + name] = weight if device is None else weight.to(device, non_blocking=True)
+        self.model.train(training)
+        return merged
+
+    @timer
+    def stage_merged_weights(self) -> None:
+        """Merge the adapters while the policy is on the GPU, before it offloads.
+
+        The copies to pinned CPU memory finish at the synchronization of the offload.
+        """
+        if self.lora_modules:
+            # Release the last staging first.
+            self.staged_merges = None
+            self.staged_merges = self._merged_weights("cpu")
+
+    def _state_tensors(self) -> dict[str, torch.Tensor]:
+        """The trainer state that the engines receive, by state dict name.
+
+        Colocated engines release their weights while the actor trains, so every synchronization sends every weight.
+        Under PEFT each adapted weight is replaced by its merge, and no adapter tensor goes out.
+        """
+        state_dict = self.model.state_dict()
+        if not self.lora_modules:
+            return state_dict
+        merged = self.staged_merges if self.staged_merges is not None else self._merged_weights()
+        # AutoModel names every adapter tensor with a `lora_` component.
+        return {
+            name: merged.get(name, tensor)
+            for name, tensor in state_dict.items()
+            if not any(part.startswith("lora_") for part in name.split("."))
+        }
+
     def _hf_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         device = torch.device("cuda", torch.cuda.current_device())
-        for name, state_tensor in self.model.state_dict().items():
+        for name, state_tensor in self._state_tensors().items():
             if name.endswith("_extra_state"):
                 continue
 

@@ -449,6 +449,7 @@ def _build_trainer(
     trainer = trainer_type.__new__(trainer_type)
     trainer.args = args
     trainer.global_step = 0
+    trainer.peft_config = None
     trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)
@@ -661,15 +662,6 @@ def _qualify_weight_conversion(trainer: ActorNeMoTrainer) -> dict[str, int]:
     }
 
 
-def _prepare_reference(trainer: ActorNeMoTrainer) -> None:
-    trainer.ref_model = trainer._create_ref_model(trainer.args.ref_load)
-    with torch.no_grad():
-        for parameter in trainer.ref_model.parameters():
-            if parameter.is_floating_point():
-                parameter.add_(0.125)
-                break
-
-
 def _save_and_reload(
     cli: argparse.Namespace,
     trainer,
@@ -680,13 +672,13 @@ def _save_and_reload(
         raise ValueError("checkpoint qualification requires --checkpoint-dir")
 
     if cli.role == "actor":
-        _prepare_reference(trainer)
+        trainer.ref_model = trainer._create_ref_model(trainer.args.ref_load)
         reference_name, reference_before = _local_parameter(trainer.ref_model, "embed_tokens.weight")
     else:
         reference_name = None
         reference_before = None
 
-    tracked_name, tracked_before = _full_parameter(trainer.checkpoint_model, tracked_suffix)
+    tracked_name, tracked_before = _full_parameter(trainer.optimizer_model, tracked_suffix)
     scheduler_before = trainer.lr_scheduler.state_dict()
     saved_rollout_id = 3
     checkpoint.save(trainer, rollout_id=saved_rollout_id, force_sync=True)
@@ -722,7 +714,7 @@ def _save_and_reload(
     if snapshot is not None:
         memory_snapshots.append(snapshot)
 
-    loaded_name, tracked_after = _full_parameter(resumed.checkpoint_model, tracked_suffix)
+    loaded_name, tracked_after = _full_parameter(resumed.optimizer_model, tracked_suffix)
     if loaded_name != tracked_name:
         raise RuntimeError(f"resumed a different tracked parameter: {tracked_name} versus {loaded_name}")
     torch.testing.assert_close(tracked_after, tracked_before, rtol=0, atol=0)
@@ -744,6 +736,7 @@ def _save_and_reload(
         atol=0,
     )
 
+    # A resume builds the reference again from --ref-load.
     if cli.role == "actor":
         loaded_reference_name, reference_after = _local_parameter(resumed.ref_model, "embed_tokens.weight")
         if loaded_reference_name != reference_name:
@@ -863,10 +856,10 @@ def main() -> None:
             raise ValueError("critic qualification expects one synthetic pack")
         pack = packs[0]
         tracked_suffix = "value_head.proj.weight"
-        tracked_name, tracked_before = tracked_parameter(trainer.checkpoint_model, tracked_suffix)
+        tracked_name, tracked_before = tracked_parameter(trainer.optimizer_model, tracked_suffix)
         metrics, grad_norm = _train_critic(trainer, pack)
         replay_counts = []
-        tracked_after_name, tracked_after = tracked_parameter(trainer.checkpoint_model, tracked_suffix)
+        tracked_after_name, tracked_after = tracked_parameter(trainer.optimizer_model, tracked_suffix)
         if tracked_after_name != tracked_name or torch.equal(tracked_after, tracked_before):
             raise RuntimeError("critic optimizer did not update the value head")
 

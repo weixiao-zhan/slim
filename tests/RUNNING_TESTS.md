@@ -64,6 +64,7 @@ bash tests/sweep_dataset.sh
 bash tests/sweep_algo.sh
 bash tests/sweep_surrogate.sh
 bash tests/sweep_fp8.sh
+bash tests/sweep_peft.sh
 bash tests/run_nemo_mixed_cp_ep.sh
 bash tests/run_nemo_grad_norm_matrix.sh
 ```
@@ -106,6 +107,7 @@ GRPO and GSPO tests use the built-in nonzero reward standard-deviation group fil
 | `sweep_algo.sh` | advantage estimator | `grpo`, `gspo`, `ppo` | Qwen3.5-4B |
 | `sweep_surrogate.sh` | GRPO policy surrogate | `ppo_clip`, `is`, `mis`, `cis` | Qwen3.5-4B |
 | `sweep_fp8.sh` | GRPO+CIS rollout-weight precision | `bf16`, `fp8_fp32` | Qwen3.5-4B (+ FP8 forge) |
+| `sweep_peft.sh` | LoRA training, merged weight sync, PEFT checkpoints, reference | 12 combos, 2 GPUs | Qwen3.5-4B (+ FP8 forge), Qwen3.5-35B-A3B-tiny |
 | `sweep_trajectory.sh` | Episode/Trajectory flatten-pad-partition | 10 combos (see below) | Qwen3.5-4B |
 
 ```bash

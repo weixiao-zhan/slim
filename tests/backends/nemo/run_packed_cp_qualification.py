@@ -231,6 +231,7 @@ def main() -> None:
         cli.checkpoint,
         setup,
         routing_replay=False,
+        peft_config=None,
     )
     model.train()
 

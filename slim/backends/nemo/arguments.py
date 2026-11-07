@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
 from typing import Literal, get_args, get_origin, get_type_hints
 
@@ -27,9 +28,12 @@ class NeMoArgs:
     adam_eps: float = 1e-8
     optimizer: Literal["adamw", "muon"] = "adamw"
     muon_momentum: float = 0.95
-    # Storage dtype of the trained models' weights. The optimizer updates them in place with no master
-    # copy; FSDP2 computes in bf16 either way, and `auto` keeps the checkpoint's dtype.
+    # Storage dtype of the trained weights (the adapters under PEFT). The optimizer updates them in place with
+    # no master copy; FSDP2 computes in bf16 either way, and `auto` keeps the checkpoint's dtype.
     master_weight_dtype: Literal["fp32", "auto"] = "fp32"
+    # NeMo `PeftConfig` fields as JSON; LoRA adapters train on the frozen --hf-checkpoint.
+    actor_peft_config: dict | None = None
+    critic_peft_config: dict | None = None
 
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
@@ -56,6 +60,8 @@ def _field_type(field: dataclasses.Field, type_hints: dict[str, object]):
     if origin is Literal:
         choices = get_args(field_type)
         return type(choices[0]) if choices else str
+    if dict in get_args(field_type):
+        return json.loads
     return field_type
 
 

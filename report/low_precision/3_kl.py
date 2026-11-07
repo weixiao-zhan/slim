@@ -177,7 +177,8 @@ def main():
     from slim.backends.nemo.loss import selective_log_probs
 
     def train_log_probs(prepared):
-        output = actor.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+        with actor._forward_context(prepared):
+            output = actor.model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
         local_log_probs = selective_log_probs(
             output.logits,
             prepared.fields["labels"][:, prepared.loss_positions],

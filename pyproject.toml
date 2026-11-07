@@ -8,6 +8,8 @@ dependencies = [
     "dion",
     "flash-attn",
     "flash-attn-3",
+    # FLA 0.6.0 compiles 160 KB of shared memory per block for the 128-dim GatedDeltaNet CP state.
+    "flash-linear-attention==0.5.2",
     "httpx[http2]",
     "liger-kernel",
     "nemo-automodel[fla,vlm]==0.7.0",

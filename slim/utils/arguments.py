@@ -451,8 +451,8 @@ def add_slim_arguments(parser):
             type=str,
             default=None,
             help=(
-                "The checkpoint for reference model. "
-                "When --load is not set, this will be used as the initial checkpoint for training. "
+                "Reference model of the KL loss: a HF checkpoint or, under PEFT, an adapter directory on "
+                "--hf-checkpoint. Defaults to --hf-checkpoint."
             ),
         )
         parser.add_argument(
@@ -463,7 +463,9 @@ def add_slim_arguments(parser):
                 "Path to load training weights from. Accepts either: "
                 "(1) a slim DCP checkpoint directory (with latest_checkpointed_iteration.txt) for resuming training, or "
                 "(2) a HuggingFace checkpoint directory (with config.json) for BF16 weight initialization. "
-                "When an HF checkpoint is given, it overrides --hf-checkpoint for training init only."
+                "When an HF checkpoint is given, it overrides --hf-checkpoint for training init only. "
+                "Under PEFT: a slim PEFT checkpoint or an adapter directory, whose PEFT config overrides "
+                "--actor-peft-config."
             ),
         )
         parser.add_argument(
@@ -539,7 +541,12 @@ def add_slim_arguments(parser):
             default=0,
             help="Rollout step at which the critic value head learning rate leaves 0.",
         )
-        parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
+        parser.add_argument(
+            "--critic-load",
+            type=str,
+            default=None,
+            help="The checkpoint for the critic model, as --load.",
+        )
         parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
         parser.add_argument("--critic-train-only", action="store_true", default=False, help="Only train critic")
 
@@ -615,12 +622,6 @@ def add_slim_arguments(parser):
             action="store_true",
             default=False,
             help="Whether to enable unbiased KL estimation.",
-        )
-        parser.add_argument(
-            "--ref-update-interval",
-            type=int,
-            default=None,
-            help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
         )
         parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
         parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
@@ -956,9 +957,8 @@ def slim_validate_args(args):
 
     args.eval_datasets = _resolve_eval_datasets(args)
 
-    if args.kl_loss_coef != 0:
-        if not os.path.exists(args.ref_load):
-            raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
+    if args.kl_loss_coef != 0 and args.ref_load is not None and not os.path.exists(args.ref_load):
+        raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
 
     if args.eval_interval is not None:
         assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."

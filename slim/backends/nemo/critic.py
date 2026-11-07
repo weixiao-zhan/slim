@@ -8,18 +8,47 @@ from __future__ import annotations
 import logging
 
 import torch
+import torch.nn as nn
+from nemo_automodel.components.distributed.mesh_utils import get_fsdp_dp_mesh
+from nemo_automodel.components.distributed.parallelizer_utils import fully_shard_by_dtype
+from nemo_automodel.components.training.model_output_utils import get_final_hidden_states
 
 from slim.utils.data import process_rollout_data
 from slim.utils.ppo_utils import compute_value_loss
 
 from .base import NeMoTrainer
-from .checkpoint import is_hf_checkpoint
+from .checkpoint import resolve_model_source
 from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .loss import reduce_weighted_sequence_mean
-from .model import CriticModel, build_optimizer, build_value_head
 from .models import build_model
+from .optimizer import build_optimizer
 
 logger = logging.getLogger(__name__)
+
+
+class ScalarValueHead(nn.Module):
+    """Token-level scalar projection for the PPO critic."""
+
+    def __init__(self, hidden_size: int, dtype: torch.dtype, device: torch.device) -> None:
+        super().__init__()
+        self.proj = nn.Linear(hidden_size, 1, bias=False, dtype=dtype, device=device)
+        nn.init.zeros_(self.proj.weight)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.proj(hidden_states.to(dtype=self.proj.weight.dtype)).squeeze(-1).float()
+
+
+class CriticModel(nn.Module):
+    """AutoModel backbone and scalar value head."""
+
+    def __init__(self, backbone: nn.Module, value_head: nn.Module) -> None:
+        super().__init__()
+        self.backbone = backbone
+        self.value_head = value_head
+
+    def forward(self, **kwargs) -> torch.Tensor:
+        output = self.backbone(logits_to_keep=1, output_hidden_states=True, **kwargs)
+        return self.value_head(get_final_hidden_states(output))
 
 
 class CriticNeMoTrainer(NeMoTrainer):
@@ -35,15 +64,39 @@ class CriticNeMoTrainer(NeMoTrainer):
         return [self.model, self.value_head]
 
     @property
-    def checkpoint_model(self) -> torch.nn.Module:
+    def optimizer_model(self) -> torch.nn.Module:
         return self.critic_model
+
+    def checkpoint_states(self) -> dict[str, torch.nn.Module]:
+        return {"value_head": self.value_head}
 
     def _resolve_checkpoint_paths(self) -> str:
         self._checkpoint_load_dir = self.args.critic_load
         self._checkpoint_save_dir = self.args.critic_save
-        if self.args.critic_load and is_hf_checkpoint(self.args.critic_load):
-            return self.args.critic_load
-        return self.args.hf_checkpoint
+        checkpoint_path, self.peft_config = resolve_model_source(
+            self.args.critic_load,
+            self.args,
+            self.args.critic_peft_config,
+        )
+        return checkpoint_path
+
+    def _build_value_head(self) -> nn.Module:
+        self.model.get_output_embeddings().requires_grad_(False)
+        # The trained head is stored in --master-weight-dtype; `auto` follows the backbone.
+        head = ScalarValueHead(
+            hidden_size=self.model.config.get_text_config().hidden_size,
+            dtype=torch.float32 if self.args.master_weight_dtype == "fp32" else self.model.dtype,
+            device=torch.device("cuda", torch.cuda.current_device()),
+        )
+        strategy = self.distributed_setup.strategy_config
+        fully_shard_by_dtype(
+            head,
+            get_fsdp_dp_mesh(self.device_mesh),
+            strategy.mp_policy,
+            strategy.offload_policy,
+            reshard_after_forward=False,
+        )
+        return head
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
         self.model = build_model(
@@ -51,11 +104,9 @@ class CriticNeMoTrainer(NeMoTrainer):
             checkpoint_path,
             self.distributed_setup,
             routing_replay=False,
+            peft_config=self.peft_config,
         )
-        self.value_head = build_value_head(
-            self.model,
-            self.distributed_setup,
-        )
+        self.value_head = self._build_value_head()
         self.critic_model = CriticModel(self.model, self.value_head)
 
         backbone_parameters = [

@@ -10,6 +10,7 @@ from types import MethodType
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForImageTextToText
+from nemo_automodel.components._peft.lora import PeftConfig
 from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
 from nemo_automodel.components.distributed.cp_vision_frame_shard import (
@@ -80,13 +81,15 @@ def build_model(
     distributed_setup,
     *,
     routing_replay: bool,
+    torch_dtype: torch.dtype | str,
+    peft_config: PeftConfig | None,
 ):
     if routing_replay and not _is_moe(config):
         raise ValueError("rollout routing replay requires Qwen3.5 MoE")
 
     kwargs = {
-        # AdamW keeps no master copy, so the stored weights are the master weights.
-        "torch_dtype": torch.float32 if args.master_weight_dtype == "fp32" else "auto",
+        "torch_dtype": torch_dtype,
+        "peft_config": peft_config,
         "distributed_setup": distributed_setup,
         "backend": build_backend_config(args),
         "attn_implementation": "sdpa",

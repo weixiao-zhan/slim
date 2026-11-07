@@ -210,6 +210,7 @@ class NeMoTrainer(RayWorker):
         return int(args.start_rollout_id)
 
     def _resolve_checkpoint_paths(self) -> str:
+        """Set the checkpoint directories and `self.peft_config`, and return the checkpoint the model builds from."""
         raise NotImplementedError
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
@@ -219,8 +220,13 @@ class NeMoTrainer(RayWorker):
         pass
 
     @property
-    def checkpoint_model(self) -> torch.nn.Module:
+    def optimizer_model(self) -> torch.nn.Module:
+        """The module that holds every parameter of the optimizer."""
         return self.model
+
+    def checkpoint_states(self) -> dict[str, torch.nn.Module]:
+        """The modules that a checkpoint holds beside `model/`, by directory name."""
+        return {}
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
         raise NotImplementedError
@@ -238,8 +244,8 @@ class NeMoTrainer(RayWorker):
         """Run the forward pass of one prepared microbatch and return its loss and detached metrics."""
         raise NotImplementedError
 
-    def _forward_context(self, model: torch.nn.Module, prepared):
-        """Context for the forward and backward passes of `model` on one prepared microbatch."""
+    def _forward_context(self, prepared):
+        """Context for the training forward and backward passes on one prepared microbatch."""
         return contextlib.nullcontext()
 
     def _train_microbatch(
@@ -266,7 +272,7 @@ class NeMoTrainer(RayWorker):
         with (
             self._sync_context(is_final),
             prepared.context_factory(),
-            self._forward_context(self.model, prepared),
+            self._forward_context(prepared),
         ):
             loss, metrics = self._microbatch_loss(
                 pack,
@@ -306,7 +312,7 @@ class NeMoTrainer(RayWorker):
                         pack,
                         padding_token_id=self.tokenizer.pad_token_id,
                     )
-                    with prepared.context_factory(), self._forward_context(model, prepared):
+                    with prepared.context_factory():
                         local_values = forward(prepared)
                     pack[store_key] = prepared.gather(local_values).squeeze(0).cpu()
         finally:
@@ -341,9 +347,6 @@ class NeMoTrainer(RayWorker):
                         self._after_first_microbatch()
                 grad_norm = self._optimizer_step()
                 self._log_step(self._reduce_metrics(metric_sums), grad_norm)
-
-    def _maybe_update_ref_model(self, rollout_id: int) -> None:
-        pass
 
     def set_rollout_manager(self, rollout_manager):
         self.rollout_manager = rollout_manager
@@ -452,7 +455,6 @@ class NeMoTrainer(RayWorker):
         self._run_train_loop(packed_batches, grad_accum)
         self.prof.step(rollout_id=rollout_id)
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=None)
-        self._maybe_update_ref_model(rollout_id)
 
     def _begin_gradient_accumulation(self) -> None:
         prepare_for_grad_accumulation(self.model_parts, pp_enabled=False)
