@@ -12,7 +12,7 @@ First-party support covers:
 | Qwen3.5 MoE | FSDP2, context parallelism, and expert parallelism |
 
 Tensor parallelism, pipeline parallelism, and sequence parallelism are not supported by this backend.
-Training updates model parameters directly; adapter fine-tuning is not part of the backend.
+Training updates either all model parameters or LoRA adapters on a frozen base, as [PEFT](#peft) describes.
 
 SGLang remains the rollout engine. Slim owns `Episode` and `Trajectory` processing, RL objectives, reference and critic execution, routing replay, metrics, and policy weight synchronization.
 
@@ -221,6 +221,90 @@ Asynchronous save uses AutoModel staging and upload futures. Slim publishes `lat
 Every policy state tensor is converted through the model's `convert_single_tensor_to_hf` adapter before transport. This conversion handles Qwen3.5 native names, Gated DeltaNet fp32 holders, and grouped expert layouts.
 
 The configured rollout quantizer runs after conversion. Colocated engines receive flattened CUDA IPC buckets. Separate engines receive tensors through the temporary NCCL update group.
+
+## PEFT
+
+`--actor-peft-config` and `--critic-peft-config` train LoRA adapters on a frozen base model instead of all parameters.
+LoRA is the only supported adapter type.
+Each value holds NeMo AutoModel `PeftConfig` fields, for example `dim`, `alpha`, `target_modules`, `exclude_modules`, `match_all_linear`, `dropout`, `lora_A_init`, and `moe_rank_scaling`.
+The command line takes the value as JSON, and the `--config` YAML takes it as a mapping:
+
+```bash
+--actor-peft-config '{"dim": 32, "alpha": 64, "target_modules": ["*_proj"]}'
+```
+
+```yaml
+actor_peft_config:
+  dim: 32
+  alpha: 64
+  target_modules: ["*_proj", "*.experts"]
+```
+
+`target_modules` and `exclude_modules` match module names with wildcards and are mutually exclusive.
+Without `target_modules`, `exclude_modules`, and `match_all_linear`, AutoModel adapts the modules that match `*_proj`.
+On Qwen3.5, `*_proj` covers the attention and MLP projections and the Gated DeltaNet `out_proj`, but not the Gated DeltaNet inputs `in_proj_qkv`, `in_proj_z`, `in_proj_b`, and `in_proj_a`; add `*in_proj_*` to adapt them.
+On Qwen3.5 MoE, `*.experts` adds LoRA to the grouped expert weights of every MoE layer, and `moe_rank_scaling` divides their rank by the number of activated experts.
+For an adapted weight $W$ with LoRA factors $A$ and $B$ of rank $r$ (`dim`), the effective weight is $W + s B A$ with $s = \alpha / r$.
+`match_all_linear` adapts every `nn.Linear`, `lm_head` included, and takes no `exclude_modules`; `exclude_modules: ["*lm_head"]` alone adapts every other `nn.Linear`.
+With tied word embeddings, as in Qwen3.5-4B, an adapted `lm_head` is an error, because the rollout engine holds one matrix for the embedding and `lm_head`.
+Neither form adapts the grouped experts or the MoE router, which are not `nn.Linear`, so expert LoRA needs `target_modules` with `*.experts`.
+
+### Precision
+
+The frozen base keeps the checkpoint's dtype.
+`--master-weight-dtype` sets the storage dtype of the adapters: `fp32` stores them in fp32, and `auto` stores them in the dtype of the weight they adapt.
+Each weight computes in the mixed-precision dtype of its FSDP2 unit, as in full-parameter training, so the Qwen3.5 Gated DeltaNet holders `A_log` and `dt_bias` stay fp32.
+The critic's scalar value head is a trainable module, not an adapter.
+Use `--optimizer adamw` with PEFT.
+
+### Rollout Weights
+
+Rollout engines receive merged weights and no adapter tensors.
+At the end of its initialization and of each training step, before it offloads, the actor merges every adapted weight to $W + s B A$ on the GPU.
+AutoModel's `materialize_effective_weight` and `materialize_effective_weights` compute the merge from the sharded tensors in the dtype of the adapters, which the default `--master-weight-dtype fp32` makes fp32.
+Each merged shard takes the compute dtype of $W$, and with an offloaded actor it waits on the CPU for the synchronization.
+Every synchronization sends the frozen weights unchanged and the merged weights in place of the adapted ones.
+These tensors go through the conversion, quantization, and transport path of [SGLang Weight Synchronization](#sglang-weight-synchronization).
+SGLang therefore runs unchanged, and an FP8 `--rollout-load` quantizes the merged weights.
+The trainer computes the adapter path next to the frozen base weight, while the engine uses the merged weight rounded to the compute dtype.
+This rounding adds to the train/rollout mismatch that `pg_kl_k3` and `pg_clipfrac` measure.
+
+### Reference Model
+
+With a nonzero `--kl-loss-coef`, `--ref-load` selects the reference policy:
+
+- Unset: the reference is `--hf-checkpoint`. The actor computes the reference log probabilities with its own model and every LoRA scale at zero, so it builds no second model.
+- A NeMo PEFT adapter directory: the actor builds a separate frozen reference model from `--hf-checkpoint` with that adapter and the PEFT config saved beside it.
+- A Hugging Face checkpoint directory, for example a merged SFT model: the actor builds a separate frozen reference model, as in full-parameter training.
+
+To start from an SFT adapter and keep the KL anchored to it, give the adapter directory to both `--load` and `--ref-load`.
+A separate reference model costs the same memory and transfer time as in full-parameter training.
+To anchor the KL to an SFT adapter without a second model, merge the adapter into a Hugging Face checkpoint, use that checkpoint as `--hf-checkpoint`, and train new adapters on it.
+With a nonzero `--kl-loss-coef`, `--ref-update-interval` is an error with PEFT.
+The reference therefore never changes, so a PEFT checkpoint holds no `reference/`, and a resume builds the reference again from `--ref-load`.
+
+### Load and Save
+
+The base model is always `--hf-checkpoint`.
+With PEFT, `--load` accepts two kinds of directory:
+
+- A Slim PEFT checkpoint root resumes training.
+- A NeMo PEFT adapter directory, for example an SFT adapter or `iter_*/model` of a Slim PEFT checkpoint, initializes only the adapter weights and starts a fresh optimizer.
+
+A NeMo PEFT adapter directory holds `adapter_config.json` and `automodel_peft_config.json`.
+In both cases the PEFT config comes from the loaded directory and takes precedence over `--actor-peft-config` and `--critic-peft-config`, so these flags are optional.
+A Hugging Face full-model checkpoint or a full-parameter Slim checkpoint in `--load` is an error with PEFT.
+`--critic-load` accepts the same directories for the critic.
+An adapter directory initializes only the critic adapters, and the value head starts from a fresh initialization.
+
+Checkpoints keep the directory layout of [Checkpoints](#checkpoints).
+`model/` holds only the backbone adapters: `adapter_model.safetensors` and `adapter_config.json` in Hugging Face PEFT format, and `automodel_peft_config.json`.
+The actor and the critic save their adapters in the same format, so an adapter directory of either role can initialize the other.
+A critic checkpoint holds the value head in `value_head/`.
+`--checkpoint-save-consolidated` has no effect with PEFT.
+To get a full model, merge the adapters into `--hf-checkpoint` with an external tool.
+
+`tests/sweep_peft.sh` runs the PEFT qualification on two GPUs: full-parameter and LoRA training on dense Qwen3.5, expert LoRA on Qwen3.5 MoE with EP2, LoRA with FP8 rollout, save and resume, adapter initialization, PPO with a LoRA actor and critic, and KL with the shared reference, a separate reference model, and an adapter reference.
 
 ## Validation
 

@@ -11,6 +11,8 @@ from collections.abc import Iterator
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.components._peft.lora import LinearLoRA
+from nemo_automodel.components._peft.lora_experts import GroupedExpertsLoRA
 from ray.actor import ActorHandle
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import _CHECKPOINT_PREFIX
 from torch.distributed.fsdp import FSDPModule
@@ -22,6 +24,9 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 
 from slim.utils.distributed_utils import get_gloo_group
 from slim.utils.quant import FUSED_EXPERT_SUFFIXES
+from slim.utils.timer import timer
+
+from .model import LORA_MODULES
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,12 @@ class UpdateWeight(abc.ABC):
         self.quantizer = quantizer
         self.state_dict_adapter = model.state_dict_adapter
         self.compute_dtypes = _compute_dtypes(model)
+        # Under PEFT the engines receive every adapted weight merged into its base, and no adapter tensors.
+        self.is_peft = any(isinstance(module, LORA_MODULES) for module in model.modules())
+        # The engine holds one matrix for tied word embeddings, so it cannot run an adapted `lm_head`.
+        if self.is_peft and model.config.tie_word_embeddings and isinstance(model.get_output_embeddings(), LinearLoRA):
+            raise ValueError("LoRA on lm_head requires untied word embeddings")
+        self.merged: dict[str, torch.Tensor] | None = None
         self.weight_version = 0
 
     @abc.abstractmethod
@@ -95,9 +106,54 @@ class UpdateWeight(abc.ABC):
         or is None if not all of these GPUs are actor GPUs.
         """
 
+    @timer
+    @torch.no_grad()
+    def stage_merged_weights(self, offload: bool) -> None:
+        """Fold every adapter into its base weight while the model is on the GPU.
+
+        AutoModel's `materialize_effective_weight(s)` computes the merged weight from the sharded tensors.
+        Each result takes the compute dtype of its base weight and, with `offload`, waits for the sync on the CPU
+        like the offloaded model.
+        """
+        training = self.model.training
+        # AutoModel folds no adapter whose dropout is active.
+        self.model.eval()
+        self.merged = {}
+        for module_name, module in self.model.named_modules():
+            if not isinstance(module, LORA_MODULES):
+                continue
+            if isinstance(module, LinearLoRA):
+                weights = {"weight": module.materialize_effective_weight()}
+            else:
+                # The DeepEP grouped experts hold the same adapter tensors as `GroupedExpertsLoRA`.
+                merged = GroupedExpertsLoRA.materialize_effective_weights(module)
+                weights = dict(zip(("gate_and_up_projs", "down_projs"), merged, strict=True))
+            prefix = f"{module_name}.".replace(_CHECKPOINT_PREFIX, "")
+            for name, weight in weights.items():
+                weight = weight.to(self.compute_dtypes.get(prefix + name, getattr(module, name).dtype))
+                self.merged[prefix + name] = weight.to("cpu") if offload else weight
+        self.model.train(training)
+
+    def _state_tensors(self) -> dict[str, torch.Tensor]:
+        """The trainer state that the engines receive, by state dict name.
+
+        Colocated engines release their weights while the actor trains, so every synchronization sends every weight.
+        Under PEFT the merged weights of the last staging replace the adapted weights, and no adapter tensor goes out.
+        """
+        state_dict = self.model.state_dict()
+        if not self.is_peft:
+            return state_dict
+        # AutoModel names every adapter tensor with a `lora_` component.
+        base = {
+            name: tensor
+            for name, tensor in state_dict.items()
+            if not any(part.startswith("lora_") for part in name.split("."))
+        }
+        return base | self.merged
+
     def _hf_tensors(self) -> Iterator[tuple[str, torch.Tensor]]:
         device = torch.device("cuda", torch.cuda.current_device())
-        for name, state_tensor in self.model.state_dict().items():
+        for name, state_tensor in self._state_tensors().items():
             if name.endswith("_extra_state"):
                 continue
 
@@ -155,6 +211,7 @@ class UpdateWeight(abc.ABC):
             ray.get([engine.end_weight_update.remote() for engine in self.rollout_engines])
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
+        self.merged = None
 
     def wait_and_update_bucket_weights(self, bucket):
         bucket = [

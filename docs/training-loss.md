@@ -171,7 +171,7 @@ At the first optimizer step of a rollout it measures only the numerical mismatch
 
 ## KL Penalty
 
-KL penalty measures the divergence between $\pi_\theta$ and the frozen reference model $\pi_\text{ref}$ (load via `--ref-load`).
+KL penalty measures the divergence between $\pi_\theta$ and the frozen reference model $\pi_\text{ref}$ (`--ref-load`, by default `--hf-checkpoint`).
 It constrains the trained policy from drifting too far from the reference.
 
 KL is injected as a loss term (`--kl-loss-coef`), added directly to the training loss:
@@ -246,7 +246,7 @@ Choosing `trajectory` weights a 50-call attempt 50 times as heavily as a single-
 | `--value-clip` | `0.2` | Critic value loss clip range |
 | `--loss-normalization-unit` | `episode` | Loss denominator unit: `episode`, `trajectory`, `token` |
 | `--loss-type` | `policy_loss` | `policy_loss`, `custom_loss` |
-| `--ref-load` | `None` | Reference model checkpoint |
+| `--ref-load` | `None` | Reference model checkpoint; unset uses `--hf-checkpoint` |
 
 ---
 

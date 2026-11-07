@@ -17,6 +17,7 @@ from itertools import accumulate
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.checkpoint.addons import load_automodel_peft_config_dict
 from nemo_automodel.components.distributed.utils import get_sync_ctx
 from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler
 from nemo_automodel.components.training.utils import (
@@ -52,6 +53,7 @@ from .data_packing import (
 )
 from .loss import count_global_denominators, reduce_weighted_sequence_mean
 from .lr_scheduler import get_lr_scheduler
+from .model import build_peft_config
 from .models import validate_config
 from .packed_cp_forward import prepare_forward
 from .topology import NeMoTopology
@@ -212,6 +214,26 @@ class NeMoTrainer(RayWorker):
     def _resolve_checkpoint_paths(self) -> str:
         raise NotImplementedError
 
+    def _resolve_model_checkpoint(self, peft_config: dict | None) -> str:
+        """Set `self.peft_config` and return the checkpoint the model builds from.
+
+        A PEFT save at the load dir carries its own config, which takes precedence over `peft_config`.
+        PEFT always builds on `--hf-checkpoint`.
+        """
+        load_dir = self._checkpoint_load_dir
+        peft_dir = checkpoint.resolve_peft_dir(load_dir, self.args)
+        if peft_dir is not None:
+            logger.info("Using the PEFT config saved in %s", peft_dir)
+            peft_config = load_automodel_peft_config_dict(str(peft_dir))
+        self.peft_config = build_peft_config(self.args, peft_config)
+        if peft_dir is not None or not load_dir:
+            return self.args.hf_checkpoint
+        if self.peft_config is None:
+            return load_dir if checkpoint.is_hf_checkpoint(load_dir) else self.args.hf_checkpoint
+        if checkpoint.is_hf_checkpoint(load_dir) or checkpoint.resolve_checkpoint_dir(load_dir, self.args) is not None:
+            raise ValueError(f"PEFT builds on --hf-checkpoint and cannot load the full checkpoint {load_dir}")
+        return self.args.hf_checkpoint
+
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
         raise NotImplementedError
 
@@ -238,8 +260,11 @@ class NeMoTrainer(RayWorker):
         """Run the forward pass of one prepared microbatch and return its loss and detached metrics."""
         raise NotImplementedError
 
-    def _forward_context(self, model: torch.nn.Module, prepared):
-        """Context for the forward and backward passes of `model` on one prepared microbatch."""
+    def _forward_context(self, prepared, *, replay: bool):
+        """Context for the forward and backward passes on one prepared microbatch.
+
+        `replay` selects the rollout routing replay that the policy's training forward uses.
+        """
         return contextlib.nullcontext()
 
     def _train_microbatch(
@@ -266,7 +291,7 @@ class NeMoTrainer(RayWorker):
         with (
             self._sync_context(is_final),
             prepared.context_factory(),
-            self._forward_context(self.model, prepared),
+            self._forward_context(prepared, replay=True),
         ):
             loss, metrics = self._microbatch_loss(
                 pack,
@@ -287,10 +312,11 @@ class NeMoTrainer(RayWorker):
         *,
         store_key: str,
         forward,
+        replay: bool = False,
     ) -> None:
         """Store the gathered output of `forward` for every pack under `store_key`, without gradients.
 
-        `forward` maps one prepared pack to a CP-local value per token.
+        `forward` maps one prepared pack to a CP-local value per token, and `replay` replays the rollout routing.
         """
         modules = self.model_parts if model is self.model else [model]
         training = [module.training for module in modules]
@@ -306,7 +332,7 @@ class NeMoTrainer(RayWorker):
                         pack,
                         padding_token_id=self.tokenizer.pad_token_id,
                     )
-                    with prepared.context_factory(), self._forward_context(model, prepared):
+                    with prepared.context_factory(), self._forward_context(prepared, replay=replay):
                         local_values = forward(prepared)
                     pack[store_key] = prepared.gather(local_values).squeeze(0).cpu()
         finally:

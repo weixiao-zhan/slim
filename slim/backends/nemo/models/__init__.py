@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from nemo_automodel.components._peft.lora import PeftConfig
 from transformers import AutoConfig
 
 from . import qwen3_5
@@ -19,6 +20,7 @@ def build_model(
     distributed_setup,
     *,
     routing_replay: bool,
+    peft_config: PeftConfig | None = None,
 ):
     config = AutoConfig.from_pretrained(checkpoint, trust_remote_code=True)
     return qwen3_5.build_model(
@@ -27,4 +29,5 @@ def build_model(
         checkpoint,
         distributed_setup,
         routing_replay=routing_replay,
+        peft_config=peft_config,
     )

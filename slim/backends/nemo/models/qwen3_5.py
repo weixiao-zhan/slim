@@ -10,6 +10,7 @@ from types import MethodType
 import torch
 import torch.distributed as dist
 from nemo_automodel import NeMoAutoModelForImageTextToText
+from nemo_automodel.components._peft.lora import PeftConfig
 from nemo_automodel.components.distributed.blockdiag_cp import configure_cp_varlen
 from nemo_automodel.components.distributed.context_parallel.utils import cp_dispatcher_suspended
 from nemo_automodel.components.distributed.cp_vision_frame_shard import (
@@ -80,6 +81,7 @@ def build_model(
     distributed_setup,
     *,
     routing_replay: bool,
+    peft_config: PeftConfig | None = None,
 ):
     if routing_replay and not _is_moe(config):
         raise ValueError("rollout routing replay requires Qwen3.5 MoE")
@@ -104,6 +106,10 @@ def build_model(
     }
     if routing_replay:
         kwargs["moe_overrides"] = {"enable_routing_replay": True}
+    if peft_config is not None:
+        # The frozen base keeps the checkpoint's dtype; `peft_config.lora_dtype` sets the adapters'.
+        kwargs["torch_dtype"] = "auto"
+        kwargs["peft_config"] = peft_config
     model = NeMoAutoModelForImageTextToText.from_pretrained(checkpoint, **kwargs)
     configure_packed_cp(model, distributed_setup.mesh_context.device_mesh)
     return model

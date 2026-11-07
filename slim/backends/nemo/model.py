@@ -11,6 +11,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from dion import Muon
+from nemo_automodel.components._peft.lora import LinearLoRA, PeftConfig
+from nemo_automodel.components._peft.lora_experts import GroupedExpertsDeepEPLoRA, GroupedExpertsLoRA
 from nemo_automodel.components.distributed.mesh_utils import get_fsdp_dp_mesh
 from nemo_automodel.components.distributed.parallelizer_utils import fully_shard_by_dtype
 from nemo_automodel.components.moe.experts import GroupedExperts, GroupedExpertsDeepEP
@@ -19,6 +21,17 @@ from nemo_automodel.components.training.model_output_utils import get_final_hidd
 from torch.distributed.tensor import DTensor
 
 logger = logging.getLogger(__name__)
+# AutoModel's LoRA modules. Every forward path, the fused LoRA MLP included, reads the module's `scale` at call time.
+LORA_MODULES = (LinearLoRA, GroupedExpertsLoRA, GroupedExpertsDeepEPLoRA)
+
+
+def build_peft_config(args, config: dict | None) -> PeftConfig | None:
+    if config is None:
+        return None
+    peft_config = PeftConfig.from_dict(config)
+    # None makes NeMo store the adapters in the base linear dtype.
+    peft_config.lora_dtype = torch.float32 if args.master_weight_dtype == "fp32" else None
+    return peft_config
 
 
 @torch.compile(fullgraph=True)
@@ -150,11 +163,16 @@ class CriticModel(nn.Module):
         return self.value_head(get_final_hidden_states(output))
 
 
-def build_value_head(backbone: nn.Module, distributed_setup) -> nn.Module:
+def build_value_head(backbone: nn.Module, distributed_setup, args) -> nn.Module:
     backbone.get_output_embeddings().requires_grad_(False)
 
     config = backbone.config.get_text_config()
-    storage_dtype = next(parameter.dtype for parameter in backbone.parameters() if parameter.is_floating_point())
+    # Under PEFT the backbone keeps the checkpoint's dtype, so the trained head follows --master-weight-dtype.
+    storage_dtype = (
+        torch.float32
+        if args.master_weight_dtype == "fp32"
+        else next(parameter.dtype for parameter in backbone.parameters() if parameter.is_floating_point())
+    )
     head = ScalarValueHead(
         hidden_size=config.hidden_size,
         dtype=storage_dtype,

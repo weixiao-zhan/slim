@@ -185,7 +185,14 @@ def main():
         )
         return prepared.scatter_loss_values(local_log_probs)
 
-    actor._forward_only(actor.model, packed_batches, "train_log_probs", store_key="cur_log_probs", forward=train_log_probs)
+    actor._forward_only(
+        actor.model,
+        packed_batches,
+        "train_log_probs",
+        store_key="cur_log_probs",
+        forward=train_log_probs,
+        replay=True,
+    )
 
     # --- per-token AND sequence-level K3 KL over generated predictions ---
     # Unpack each packed batch into per-episode source-token-aligned tensors. With

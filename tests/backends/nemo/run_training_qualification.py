@@ -449,6 +449,7 @@ def _build_trainer(
     trainer = trainer_type.__new__(trainer_type)
     trainer.args = args
     trainer.global_step = 0
+    trainer.peft_config = None
     trainer.hf_config = AutoConfig.from_pretrained(cli.checkpoint, trust_remote_code=True)
     record("config_loaded")
     NeMoTrainer._setup_topology(trainer)

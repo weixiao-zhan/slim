@@ -15,6 +15,7 @@ from functools import partial
 import ray
 import torch
 import torch.distributed as dist
+from nemo_automodel.components.checkpoint.addons import load_automodel_peft_config_dict
 from nemo_automodel.components.moe.router_replay import RouterReplay
 
 from slim.utils.data import process_rollout_data
@@ -26,7 +27,7 @@ from slim.utils.quant import Quantizer
 from slim.utils.timer import Timer, timer
 
 from .base import NeMoTrainer, _move_module
-from .checkpoint import is_hf_checkpoint
+from .checkpoint import is_peft_adapter_dir
 from .data_packing import (
     SEQUENCE_FIELDS,
     unpack_sequences,
@@ -38,12 +39,26 @@ from .loss import (
     selective_log_probs,
     sequence_mean_at_tokens,
 )
-from .model import build_optimizer
+from .model import LORA_MODULES, build_optimizer, build_peft_config
 from .models import build_model
 from .routing_replay import replay_router_targets
 from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTensor
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _lora_disabled(model: torch.nn.Module):
+    """Run `model` as its base for the block by zeroing the scale of every LoRA module."""
+    modules = [module for module in model.modules() if isinstance(module, LORA_MODULES)]
+    scales = [module.scale for module in modules]
+    for module in modules:
+        module.scale = 0.0
+    try:
+        yield
+    finally:
+        for module, scale in zip(modules, scales, strict=True):
+            module.scale = scale
 
 
 class ActorNeMoTrainer(NeMoTrainer):
@@ -62,9 +77,10 @@ class ActorNeMoTrainer(NeMoTrainer):
     def _resolve_checkpoint_paths(self) -> str:
         self._checkpoint_load_dir = self.args.load
         self._checkpoint_save_dir = self.args.save
-        if self.args.load and is_hf_checkpoint(self.args.load):
-            return self.args.load
-        return self.args.hf_checkpoint
+        checkpoint_path = self._resolve_model_checkpoint(self.args.actor_peft_config)
+        if self.peft_config is not None and self.args.kl_loss_coef != 0 and self.args.ref_update_interval is not None:
+            raise ValueError("--ref-update-interval does not support PEFT")
+        return checkpoint_path
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
         RouterReplay.clear_registry()
@@ -73,6 +89,7 @@ class ActorNeMoTrainer(NeMoTrainer):
             checkpoint_path,
             self.distributed_setup,
             routing_replay=self.args.use_rollout_routing_replay,
+            peft_config=self.peft_config,
         )
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
         self.optimizer = build_optimizer(
@@ -109,19 +126,28 @@ class ActorNeMoTrainer(NeMoTrainer):
             # The frozen reference has no optimizer, so no master weights: it keeps the checkpoint's dtype.
             ref_args = copy.copy(self.args)
             ref_args.master_weight_dtype = "auto"
+            # A NeMo PEFT adapter directory makes the reference --hf-checkpoint with that adapter and its PEFT config.
+            peft_config = None
+            if is_peft_adapter_dir(checkpoint_path):
+                peft_config = build_peft_config(ref_args, load_automodel_peft_config_dict(checkpoint_path))
             ref_model = build_model(
                 ref_args,
-                checkpoint_path,
+                checkpoint_path if peft_config is None else self.args.hf_checkpoint,
                 self.distributed_setup,
                 routing_replay=False,
+                peft_config=peft_config,
             )
+            if peft_config is not None:
+                self.checkpointer.load_model(ref_model, checkpoint_path)
             ref_model.eval()
             ref_model.requires_grad_(False)
             _move_module(ref_model, "cpu")
         return ref_model
 
     def _post_model_setup(self) -> None:
-        self.ref_model = self._create_ref_model(self.args.ref_load) if self.args.kl_loss_coef != 0 else None
+        # Without --ref-load the reference is --hf-checkpoint, which a PEFT policy computes with its adapters disabled.
+        builds_ref = self.args.kl_loss_coef != 0 and (self.args.ref_load is not None or self.peft_config is None)
+        self.ref_model = self._create_ref_model(self.args.ref_load or self.args.hf_checkpoint) if builds_ref else None
         quantizer = Quantizer.maybe_from_checkpoint(self.args.rollout_load, self.args)
         if quantizer is not None:
             logger.info(
@@ -133,8 +159,10 @@ class ActorNeMoTrainer(NeMoTrainer):
         self.weight_updater = updater_type(self.args, self.model, quantizer)
 
     def _compute_ref_log_probs(self, packed_batches: list[dict]) -> None:
+        ref_model = self.model if self.ref_model is None else self.ref_model
+
         def forward(prepared):
-            output = self.ref_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
+            output = ref_model(**prepared.model_batch, logits_to_keep=prepared.loss_positions)
             local_log_probs = selective_log_probs(
                 output.logits,
                 prepared.fields["labels"][:, prepared.loss_positions],
@@ -142,9 +170,10 @@ class ActorNeMoTrainer(NeMoTrainer):
             )
             return prepared.scatter_loss_values(local_log_probs)
 
-        with self._policy_offloaded(self.ref_model):
+        context = _lora_disabled(self.model) if self.ref_model is None else self._policy_offloaded(self.ref_model)
+        with context:
             self._forward_only(
-                self.ref_model,
+                ref_model,
                 packed_batches,
                 "ref_log_probs",
                 store_key="ref_log_probs",
@@ -154,7 +183,7 @@ class ActorNeMoTrainer(NeMoTrainer):
     def compute_log_probs(self, rollout_data_ref: list) -> None:
         batch = process_rollout_data(rollout_data_ref, self.dp_rank, self.bulk_fields)
         packed_batches, grad_accum = self._packed_data(batch)
-        if self.ref_model is not None:
+        if self.args.kl_loss_coef != 0:
             self.wake_up()
             self._compute_ref_log_probs(packed_batches)
 
@@ -282,8 +311,8 @@ class ActorNeMoTrainer(NeMoTrainer):
         metrics = {name: value.detach() / normalization for name, value in raw_metrics.items()}
         return loss, metrics
 
-    def _forward_context(self, model: torch.nn.Module, prepared):
-        replay_enabled = model is self.model and self.args.use_rollout_routing_replay
+    def _forward_context(self, prepared, *, replay: bool):
+        replay_enabled = replay and self.args.use_rollout_routing_replay
         return replay_router_targets(prepared.fields["rollout_routed_experts"] if replay_enabled else None)
 
     def _microbatch_loss(
@@ -318,7 +347,7 @@ class ActorNeMoTrainer(NeMoTrainer):
         )
 
     def _run_train_loop(self, packed_batches: list, grad_accum: list[int]) -> None:
-        if self.ref_model is not None and "ref_log_probs" not in packed_batches[0]:
+        if self.args.kl_loss_coef != 0 and "ref_log_probs" not in packed_batches[0]:
             self._compute_ref_log_probs(packed_batches)
 
         self._log_packed_metrics(packed_batches, ["ref_log_probs", "advantages"])
@@ -332,6 +361,12 @@ class ActorNeMoTrainer(NeMoTrainer):
         ):
             return
         self.ref_model.load_state_dict(self.model.state_dict())
+
+    def sleep(self) -> None:
+        if self.peft_config is not None:
+            # Fold the adapters while the policy is still on the GPU; the merged weights follow it to the CPU.
+            self.weight_updater.stage_merged_weights(offload=self._need_offload)
+        super().sleep()
 
     @timer
     def update_weights(self) -> None:  # type: ignore[override]

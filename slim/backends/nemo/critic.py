@@ -13,7 +13,6 @@ from slim.utils.data import process_rollout_data
 from slim.utils.ppo_utils import compute_value_loss
 
 from .base import NeMoTrainer
-from .checkpoint import is_hf_checkpoint
 from .data_packing import fill_document_terminal_slots, unpack_sequences
 from .loss import reduce_weighted_sequence_mean
 from .model import CriticModel, build_optimizer, build_value_head
@@ -41,9 +40,7 @@ class CriticNeMoTrainer(NeMoTrainer):
     def _resolve_checkpoint_paths(self) -> str:
         self._checkpoint_load_dir = self.args.critic_load
         self._checkpoint_save_dir = self.args.critic_save
-        if self.args.critic_load and is_hf_checkpoint(self.args.critic_load):
-            return self.args.critic_load
-        return self.args.hf_checkpoint
+        return self._resolve_model_checkpoint(self.args.critic_peft_config)
 
     def _create_model_and_optimizer(self, checkpoint_path: str) -> None:
         self.model = build_model(
@@ -51,10 +48,12 @@ class CriticNeMoTrainer(NeMoTrainer):
             checkpoint_path,
             self.distributed_setup,
             routing_replay=False,
+            peft_config=self.peft_config,
         )
         self.value_head = build_value_head(
             self.model,
             self.distributed_setup,
+            self.args,
         )
         self.critic_model = CriticModel(self.model, self.value_head)
 
